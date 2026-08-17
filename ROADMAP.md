@@ -43,24 +43,31 @@ and `export_onnx` emits exactly the `.onnx` + `.onnx.json` the voice library
 already loads. A trained voice appears in the library and works with profiles,
 previews and everything else for free.
 
-### Phase 0 — Spike: is the speaker embedding reachable? (half a day)
+### Phase 0 — Spike: is the speaker embedding reachable? ✅ DONE
 
-**Gates Phase 3. Do this before committing to anything there.**
+**Result: viable, with no measurable cost. Phase 3 is unblocked.**
 
-Multi-speaker Piper models take a speaker *index*; the embedding lookup happens
-inside the ONNX graph. Blending needs to supply a *vector* instead.
+- [x] Download `en_GB-vctk-medium` (109 speakers) and inspect the graph
+- [x] Locate the embedding table and the `Gather` that indexes it
+- [x] Replace that `Gather` with a direct graph input
+- [x] Confirm the patched model reproduces the indexed speaker **byte-identically**
+- [x] Measure inference speed — 11.6 ms → 11.8 ms, unchanged
 
-- [ ] Download `en_GB-vctk-medium` (109 speakers) and inspect the graph
-- [ ] Locate the embedding table and the `Gather` that indexes it
-- [ ] Try replacing that `Gather` with a direct graph input
-- [ ] Confirm a re-exported model still synthesizes, and that feeding the original
-      speaker's vector reproduces the original speaker
-- [ ] Measure whether inference speed is unchanged
+`emb_g.weight` is `[109, 512]` with exactly one consumer, and `sid` feeds nothing
+else, so the surgery is a single node. See `spike/05_embedding_inspect.py`,
+`spike/06_embedding_surgery.py` and FINDINGS §5.
 
-**If it works** → Phase 3 as described.
-**If it fails** → fall back to `piper.train.infer_torch` with arbitrary embeddings
-(works, but slow to iterate and needs torch loaded just to audition), or cut
-blending and ship the effects chain alone. Record which, and why, here.
+Two things learned that change Phase 3:
+
+- **VITS is stochastic.** `scales = (noise_scale, length_scale, noise_w)` feeds the
+  duration predictor, so the same model gives different audio and different lengths
+  on every call. Auditioning two blends at default noise compares two random draws
+  as much as two voices, so the designer must pin the noise while comparing and
+  restore it only for the final listen. This nearly produced a false negative in
+  the spike itself.
+- **The embedding table must be extracted to a side file.** ONNX Runtime drops
+  `emb_g.weight` from the patched model because nothing references it, so the
+  designer cannot read speaker vectors back out of a live session.
 
 ### Phase 1 — Studio pack and hardware gate (~3 days)
 
@@ -168,7 +175,8 @@ sidecar alongside.
 
 | Risk | Mitigation |
 |---|---|
-| Embedding surgery is not viable | Phase 0 runs first and is cheap; two fallbacks recorded |
+| ~~Embedding surgery is not viable~~ | **Retired** — Phase 0 proved it works at no cost |
+| Surgery fails on a model laid out differently | Only vctk was tested; check libritts before relying on it |
 | Training crashes hours in | Checkpoint-and-resume is a Phase 2 requirement, not a nicety |
 | 2.5 GB pack scares people off | On demand only; the app is fully usable without it |
 | Trained voices sound poor | Audition at checkpoints so quality is visible early |

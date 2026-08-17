@@ -104,7 +104,54 @@ per target device. Separate devices run on independent clocks and can differ in
 rate and channel count, so they cannot share a stream. Resampling happens on the
 producer side, per target, since each may want a different rate.
 
-## 5. Why we do not ship our own virtual audio device
+## 5. The speaker embedding is reachable (Voice Studio, Phase 0)
+
+Run `spike/05_embedding_inspect.py` then `spike/06_embedding_surgery.py`.
+
+**Verdict: viable, with no measurable cost.** Blending voices is on.
+
+A multi-speaker Piper model takes a speaker index and looks the embedding up
+inside the graph. `en_GB-vctk-medium` turned out to be the easy case:
+
+    emb_g.weight   [109, 512]
+    /emb_g/Gather  inputs=[emb_g.weight, sid]  outputs=[/emb_g/Gather_output_0]
+
+One table, **exactly one consumer**, and `sid` feeds nothing else. Removing that
+Gather and exposing its output tensor as a new `speaker_embedding` input of shape
+`(1, 512)` is the whole surgery: one node out, one input in, nothing downstream
+changed.
+
+| | |
+|---|---|
+| Reproduces the indexed speaker | **byte-identical** for speakers 0, 1, 42, 108 |
+| Blend of two speakers | runs, and differs from both parents |
+| Inference speed | 11.6 ms → 11.8 ms, i.e. unchanged |
+| Embedding width | 512 |
+
+### VITS is stochastic, which nearly produced a false negative
+
+The first comparison run "failed" because the patched model produced different
+audio lengths from the original. It was not a surgery bug: `scales` is
+`(noise_scale, length_scale, noise_w)`, and both noise terms feed the duration
+predictor, so **the same model gives different audio on every call** — 7168
+samples one run, 9984 the next, from identical inputs.
+
+Equivalence can only be tested with `scales = (0, 1, 0)`. Verified both ways: with
+normal scales two runs differ, with zero noise they are bit-for-bit identical.
+
+This matters for the Voice Designer beyond the test. Auditioning two blends with
+default noise compares two random draws as much as two voices, so the preview must
+pin the noise while comparing and only restore it for the final listen.
+
+### One packaging note
+
+ONNX Runtime drops `emb_g.weight` when loading the patched model, since nothing
+references it any more — the log says so explicitly. The tensor is still in the
+file and readable with the `onnx` library, but the designer should extract the
+table to a small side file rather than expecting to read it back out of a live
+session.
+
+## 6. Why we do not ship our own virtual audio device
 
 Researched 2026-08-16, because "just make our own cable" is the obvious idea and it
 will otherwise get proposed again.
@@ -129,7 +176,7 @@ the software from the vendor; we redistribute nothing.
 Live test caught the reason scraping comes before the pinned URL: the pack was
 `VBCABLE_Driver_Pack43.zip` when written and `Pack45` a few hours later.
 
-## 6. Latency budget (projected)
+## 7. Latency budget (projected)
 
     VAD endpoint detect   ~100 ms  (Silero, tunable trailing silence)
     Whisper transcribe    ~235 ms  (short utterance, warm)
