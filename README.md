@@ -157,6 +157,44 @@ first; the updater ignores drafts. Requires `gh auth login`.
 and the Inno script both read it, and the updater compares against it. Don't set a
 version anywhere else.
 
+## Everyday use
+
+| | |
+|---|---|
+| `Ctrl+Alt+V` | Push to talk (hold) |
+| `Ctrl+Alt+C` | Speak whatever is on the clipboard |
+| `Ctrl+Alt+X` | Stop speaking |
+
+**Type to speak** (tray menu) opens a small window that stays put: Enter speaks,
+Shift+Enter adds a line, Up/Down recalls what you said before.
+
+**Words** rewrites text between recognition and speech — fixes names the recogniser
+mishears, expands abbreviations, and corrects words the voice says badly. Whole-word
+matching by default, with a live preview.
+
+**History** lists recent utterances so you can say one again when someone missed it.
+
+**Review before speaking** (History tab) shows each transcript for approval first.
+Slower, but nothing unreviewed reaches a call. It discards on timeout rather than
+speaking.
+
+**Profiles** save situational settings — mode, voice, speed, detection tuning — so a
+meeting and a game are one dropdown apart. Devices and models stay global, since
+those describe the machine rather than the situation.
+
+## Checking it reaches Discord
+
+Settings → Audio → **Test the Discord path** plays a tone into the virtual cable and
+listens on the recording side, confirming the exact route Discord will use. If it
+fails, **Find the right device** plays one tone and reports which recording device
+actually receives the audio.
+
+That second button matters for **routers**. VB-CABLE is a fixed loop in the driver
+and works with nothing running. VB-Audio Matrix and VoiceMeeter are mixers: their
+endpoints are ports, so audio sent to `VBMatrix In 1` only reaches `VBMatrix Out 1`
+if the application is running and routing it there. Voice2TTS says so rather than
+naming a device that may carry nothing.
+
 ## Tuning
 
 | Symptom | Fix |

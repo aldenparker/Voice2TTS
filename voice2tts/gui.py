@@ -21,6 +21,7 @@ from . import (
     loopback,
     profiles,
     substitutions,
+    theme,
     updater,
     voices,
 )
@@ -70,6 +71,9 @@ class SettingsWindow(tk.Toplevel):
         self._pending_release = None
         self._output_rows: list[dict] = []
         self._closing = False
+        # Applied by the tray app to the shared root; kept here so status text can
+        # use semantic colours that work in both light and dark.
+        self.palette = theme.resolve(cfg.theme)
 
         self.title("Voice2TTS Settings")
         self.geometry("640x620")
@@ -77,6 +81,10 @@ class SettingsWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.close)
 
         self._build()
+        # Classic Tk text widgets are outside ttk styling, so they stay white in
+        # dark mode unless coloured explicitly.
+        for widget in (self.logbox, self.transcript, self.update_notes):
+            theme.style_text_widget(widget, self.palette)
         self._load_from_config()
         self._tick()
 
@@ -1469,10 +1477,19 @@ class SettingsWindow(tk.Toplevel):
         actions.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Button(actions, text="Copy diagnostics",
                    command=self._copy_diagnostics).pack(side="left")
+        ttk.Button(actions, text="Show log", command=self._show_log).pack(
+            side="left", padx=6)
         ttk.Button(actions, text="Open log folder",
-                   command=self._open_log_folder).pack(side="left", padx=6)
-        self.diag_status = ttk.Label(actions, text="", foreground="#666")
+                   command=self._open_log_folder).pack(side="left")
+        self.diag_status = ttk.Label(actions, text="", foreground=self.palette.muted)
         self.diag_status.pack(side="left", padx=8)
+
+        ttk.Label(actions, text="  Theme").pack(side="left")
+        self.theme_var = tk.StringVar()
+        theme_combo = ttk.Combobox(actions, textvariable=self.theme_var, width=8,
+                                   state="readonly", values=list(theme.MODES))
+        theme_combo.pack(side="left", padx=4)
+        theme_combo.bind("<<ComboboxSelected>>", lambda _e: self._change_theme())
 
         ttk.Label(tab, text=f"Config: {config_path()}", foreground="#555").grid(
             row=4, column=0, columnspan=2, sticky="w", pady=(8, 0)
@@ -1502,6 +1519,55 @@ class SettingsWindow(tk.Toplevel):
             subprocess.Popen(["explorer", "/select,", str(log_path())])
         except Exception as exc:  # noqa: BLE001
             self.diag_status.config(text=f"Could not open: {exc}")
+
+    def _show_log(self) -> None:
+        """Show the log tail in-app, rather than sending people into AppData."""
+        win = tk.Toplevel(self)
+        win.title(f"Log — {log_path()}")
+        win.geometry("900x520")
+
+        text = tk.Text(win, wrap="none")
+        text.pack(fill="both", expand=True, side="left", padx=(8, 0), pady=8)
+        theme.style_text_widget(text, self.palette)
+        sb = ttk.Scrollbar(win, orient="vertical", command=text.yview)
+        sb.pack(fill="y", side="right", padx=(0, 8), pady=8)
+        text.configure(yscrollcommand=sb.set)
+
+        # Colour by level so an error is findable without reading every line.
+        for level, colour in (("ERROR", self.palette.error),
+                              ("CRITICAL", self.palette.error),
+                              ("WARNING", self.palette.warn)):
+            text.tag_configure(level, foreground=colour)
+
+        try:
+            lines = log_path().read_text(encoding="utf-8",
+                                         errors="replace").splitlines()[-2000:]
+        except OSError as exc:
+            lines = [f"Could not read the log: {exc}"]
+
+        for line in lines:
+            start = text.index("end-1c")
+            text.insert("end", line + "\n")
+            for level in ("CRITICAL", "ERROR", "WARNING"):
+                if f" {level} " in line:
+                    text.tag_add(level, start, f"{start} lineend")
+                    break
+        text.see("end")
+        text.configure(state="disabled")
+
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
+        ttk.Label(bar, text=f"{len(lines)} lines (most recent last)",
+                  foreground=self.palette.muted).pack(side="left")
+
+    def _change_theme(self) -> None:
+        self.cfg.theme = self.theme_var.get()
+        self.palette = theme.apply(self.winfo_toplevel(), self.cfg.theme)
+        for widget in (self.logbox, self.transcript, self.update_notes):
+            theme.style_text_widget(widget, self.palette)
+        self.diag_status.config(
+            text="Theme applied. Reopen Settings for a full refresh.")
 
     def append_log(self, kind: str, message: str) -> None:
         if self._closing or not self.winfo_exists():
@@ -1563,6 +1629,7 @@ class SettingsWindow(tk.Toplevel):
         self._render_subs()
 
         self._refresh_profiles()
+        self.theme_var.set(c.theme)
         self.repo_var.set(c.updates.repo)
         self.check_start_var.set(c.updates.check_on_start)
         self.interval_var.set(c.updates.interval_hours)

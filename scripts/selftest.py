@@ -311,6 +311,82 @@ def test_device_recovery() -> None:
     p.capture.stop()
 
 
+def test_theme() -> None:
+    print("\n[theme]")
+    import tkinter as tk
+
+    from voice2tts import theme
+
+    light, dark = theme.LIGHT, theme.DARK
+    check("light and dark differ", light.bg != dark.bg)
+    check("dark palette identifies as dark", dark.is_dark and not light.is_dark)
+    check("explicit modes ignore the system setting",
+          theme.resolve("dark") is dark and theme.resolve("light") is light)
+    check("system mode returns a palette", theme.resolve("system") in (light, dark))
+    check("unknown mode falls back to a palette",
+          theme.resolve("banana") in (light, dark))
+    check("windows preference readable",
+          isinstance(theme.windows_prefers_dark(), bool))
+
+    # Every semantic colour must be set, or status text goes invisible.
+    for name, palette in (("light", light), ("dark", dark)):
+        missing = [f for f in ("bg", "text", "muted", "ok", "warn", "error")
+                   if not getattr(palette, f).startswith("#")]
+        check(f"{name} palette complete", not missing, str(missing))
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        applied = theme.apply(root, "dark")
+        check("applying returns the palette in use", applied is dark)
+        text = tk.Text(root)
+        theme.style_text_widget(text, applied)
+        check("text widget takes the palette background",
+              text.cget("background") == dark.field, text.cget("background"))
+        theme.apply(root, "light")
+        check("theme can be switched at runtime", True)
+    finally:
+        root.destroy()
+
+
+def test_winget_manifests() -> None:
+    print("\n[winget]")
+    import yaml
+
+    folder = ROOT / "installer" / "winget"
+    files = sorted(folder.glob("*.yaml"))
+    check("three manifests present", len(files) == 3, str([f.name for f in files]))
+
+    ids, versions, types = set(), set(), set()
+    for path in files:
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            check(f"{path.name} parses", False, str(exc))
+            continue
+        ids.add(data.get("PackageIdentifier"))
+        versions.add(str(data.get("PackageVersion")))
+        types.add(data.get("ManifestType"))
+
+    check("identifier consistent across manifests", len(ids) == 1, str(ids))
+    check("version consistent across manifests", len(versions) == 1, str(versions))
+    check("all three manifest types present",
+          types == {"version", "installer", "defaultLocale"}, str(types))
+
+    import voice2tts
+
+    check("manifest version matches the package",
+          versions == {voice2tts.__version__},
+          f"{versions} vs {voice2tts.__version__}")
+
+    locale = yaml.safe_load(
+        (folder / "Voice2TTS.Voice2TTS.locale.en-US.yaml").read_text(encoding="utf-8"))
+    check("licence declared as GPL", "GPL-3.0" in str(locale.get("License")),
+          str(locale.get("License")))
+    check("short description within winget's limit",
+          len(locale.get("ShortDescription", "")) <= 256)
+
+
 def test_profiles() -> None:
     print("\n[profiles]")
     from voice2tts import profiles
@@ -1067,6 +1143,8 @@ def main() -> int:
     test_substitutions()
     if not no_audio:
         test_device_recovery()
+    test_theme()
+    test_winget_manifests()
     test_profiles()
     test_history_and_review()
     test_vad()

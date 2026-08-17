@@ -1,0 +1,36 @@
+PackageIdentifier: Voice2TTS.Voice2TTS
+PackageVersion: 0.5.0
+PackageLocale: en-US
+Publisher: Voice2TTS
+PublisherUrl: https://github.com/aldenparker/Voice2TTS
+PublisherSupportUrl: https://github.com/aldenparker/Voice2TTS/issues
+PackageName: Voice2TTS
+PackageUrl: https://github.com/aldenparker/Voice2TTS
+License: GPL-3.0-or-later
+LicenseUrl: https://github.com/aldenparker/Voice2TTS/blob/main/COPYING
+Copyright: Copyright (C) 2026
+ShortDescription: Speak into your microphone and have a synthetic voice repeat it into a virtual microphone.
+Description: |-
+  Voice2TTS listens to your microphone, transcribes what you say with Whisper, and
+  speaks it back in a Piper voice through a virtual microphone that Discord, Zoom,
+  OBS and other applications can use as an input device.
+
+  Everything runs locally; no audio leaves the machine. Push-to-talk and automatic
+  speech detection are both supported, speech can be sent to several devices at
+  once, and a pronunciation dictionary fixes names the recogniser mishears.
+
+  A virtual audio device such as VB-CABLE is required for other applications to
+  hear the output; the setup wizard can install one.
+Moniker: voice2tts
+Tags:
+  - accessibility
+  - discord
+  - speech
+  - speech-to-text
+  - text-to-speech
+  - tts
+  - voice
+  - whisper
+ReleaseNotesUrl: https://github.com/aldenparker/Voice2TTS/releases
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

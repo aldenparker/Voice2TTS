@@ -1,0 +1,12 @@
+# winget version manifest.
+#
+# Generated for a release by scripts/winget.ps1, which fills in the version and
+# installer hash. Submit the resulting folder to microsoft/winget-pkgs.
+#
+# Note: winget requires the installer to be reachable at a stable URL, which the
+# GitHub release provides.
+PackageIdentifier: Voice2TTS.Voice2TTS
+PackageVersion: 0.5.0
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

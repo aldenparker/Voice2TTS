@@ -17,6 +17,7 @@ from tkinter import messagebox, ttk
 
 import pystray
 
+from . import theme
 from .config import Config, load_config
 from .gui import SettingsWindow
 from .icon import make_icon
@@ -50,6 +51,8 @@ class TrayApp:
         self.root.withdraw()
         self.root.title("Voice2TTS")
         apply_tk_scaling(self.root)
+        # Applied to the hidden root so every Toplevel inherits it.
+        self.palette = theme.apply(self.root, self.cfg.theme)
 
         self.events: deque[tuple[str, str]] = deque(maxlen=300)
         self.settings: SettingsWindow | None = None

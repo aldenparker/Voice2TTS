@@ -175,6 +175,7 @@ class Config:
     schema_version: int = CURRENT_SCHEMA
     start_minimized: bool = True
     run_at_login: bool = False
+    theme: str = "system"            # system | light | dark
     log_level: str = "INFO"
     first_run_complete: bool = False
 
@@ -248,6 +249,7 @@ class Config:
             schema_version=int(data.get("schema_version", 1)),
             start_minimized=bool(data.get("start_minimized", True)),
             run_at_login=bool(data.get("run_at_login", False)),
+            theme=str(data.get("theme", "system")),
             log_level=str(data.get("log_level", "INFO")),
             first_run_complete=bool(data.get("first_run_complete", False)),
         )
@@ -304,6 +306,9 @@ class Config:
         if "github.com/" in self.updates.repo:
             self.updates.repo = self.updates.repo.split("github.com/", 1)[1]
         self.updates.interval_hours = max(0, int(self.updates.interval_hours))
+        if self.theme not in ("system", "light", "dark"):
+            log.warning("unknown theme %r, using system", self.theme)
+            self.theme = "system"
 
     def save(self, path: Path | None = None) -> Path:
         path = path or config_path()

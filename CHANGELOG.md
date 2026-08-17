@@ -5,6 +5,34 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [0.5.0] - 2026-08-16
 
+### Added — quality of life
+
+- **Device pickers now list real endpoints only.** They showed 54 inputs and 54
+  outputs on a machine with 12, because PortAudio exposes every device through four
+  host APIs. A "Show every host API" checkbox restores the old view. Devices that
+  share a name (two identical monitors) get a `#2` ordinal, without which the
+  second was unselectable.
+- **Verify the path to Discord** without opening Discord: plays a tone into the
+  cable and measures it on the recording side. "Find the right device" plays one
+  tone and reports which recording device actually receives it — the only reliable
+  answer for router products. Plus live output level meters.
+- **Speak clipboard** and **stop speaking** hotkeys. All hotkeys now share one
+  keyboard hook rather than one per binding, and conflicting combinations are
+  reported instead of silently leaving the second dead.
+- **Pronunciation dictionary** applied between recognition and speech, with
+  whole-word matching, optional regex, a live preview, and a set of common
+  abbreviations.
+- **History tab** of recent utterances with say-again and copy, kept in memory only.
+- **Review before speaking** (optional): check and edit the transcript first. Times
+  out to discard rather than speak.
+- **Automatic microphone recovery** — unplugging a USB mic no longer needs a
+  restart.
+- **Profiles**: named snapshots of situational settings, with optional per-app
+  switching. Devices and models stay global.
+- **Voice preview** before downloading, **a persistent type-to-speak window** with
+  recent-entry recall, **light/dark theming**, an **in-app log viewer**, and
+  **winget manifests**.
+
 ### Fixed — virtual device detection
 
 - **VB-Audio Matrix was not detected at all**, while a second, inconsistent detector
