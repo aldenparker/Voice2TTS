@@ -36,7 +36,15 @@ jobs:
         run: |
           $tag = "${{ github.event.inputs.tag || github.ref_name }}"
           $version = $tag.TrimStart("v")
-          $declared = python -c "import re,pathlib; print(re.search('__version__ = \"([^\"]+)\"', pathlib.Path('voice2tts/__init__.py').read_text()).group(1))"
+
+          # Parsed with PowerShell rather than an inline python -c: nesting quotes
+          # inside a double-quoted PowerShell string needs backtick escapes, not
+          # backslashes, and getting that wrong is a parse error at job start.
+          # A single-quoted regex sidesteps the whole problem.
+          $found = Select-String -Path voice2tts/__init__.py -Pattern '^__version__\s*=\s*"([^"]+)"'
+          if (-not $found) { throw "Could not find __version__ in voice2tts/__init__.py" }
+          $declared = $found.Matches[0].Groups[1].Value
+
           # The updater compares the tag against __version__. If they disagree, the
           # published build would not recognise itself as the release, so stop here
           # rather than ship something that can never be updated from.
@@ -92,8 +100,13 @@ jobs:
           $notesFile = "release-notes.md"
           # Prefer the hand-written changelog section for this version; fall back to
           # generated notes only if there isn't one.
+          #
+          # Built by concatenating SINGLE-quoted parts. In a double-quoted PowerShell
+          # string "$(" opens a subexpression, so a lookahead like "$(?=...)" is a
+          # parse error rather than a regex.
           $changelog = Get-Content CHANGELOG.md -Raw
-          $match = [regex]::Match($changelog, "(?ms)^## \[$([regex]::Escape($version))\].*?$(?=^## \[|\z)")
+          $pattern = '(?ms)^## \[' + [regex]::Escape($version) + '\].*?(?=^## \[|\z)'
+          $match = [regex]::Match($changelog, $pattern)
           if ($match.Success) {
             $match.Value.Trim() | Out-File $notesFile -Encoding utf8
             $notesArg = @("--notes-file", $notesFile)
@@ -103,14 +116,25 @@ jobs:
             Write-Host "No CHANGELOG section for $version; generating notes"
           }
 
-          $existing = gh release view $tag --json tagName 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "Release $tag exists; replacing assets"
+          # GitHub Actions runs pwsh with $ErrorActionPreference = 'stop'. Redirecting
+          # a native command's stderr under that setting can turn an expected failure
+          # (release does not exist yet) into a fatal error, so probe deliberately.
+          $prev = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          gh release view $tag --json tagName | Out-Null
+          $exists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = $prev
+
+          if ($exists) {
+            Write-Host "Release $tag already exists; replacing its assets"
             gh release upload $tag $setup "$setup.sha256" --clobber
           } else {
-            gh release create $tag $setup "$setup.sha256" --title "Voice2TTS $version" @notesArg
+            $ghArgs = @("release", "create", $tag, $setup, "$setup.sha256",
+                        "--title", "Voice2TTS $version") + $notesArg
+            gh @ghArgs
           }
-          if ($LASTEXITCODE -ne 0) { throw "gh release failed" }
+          if ($LASTEXITCODE -ne 0) { throw "gh release failed with exit $LASTEXITCODE" }
+          Write-Host "Published $tag"
 
       - name: Upload build log on failure
         if: failure()
