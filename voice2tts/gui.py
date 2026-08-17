@@ -13,7 +13,7 @@ import tkinter as tk
 import webbrowser
 from tkinter import messagebox, ttk
 
-from . import DEFAULT_UPDATE_REPO, cable, devices, gpupack, updater, voices
+from . import DEFAULT_UPDATE_REPO, cable, devices, gpupack, loopback, updater, voices
 from .config import MODES, WHISPER_MODELS, Config, OutputTarget
 from .diagnostics import diagnostics
 from .hotkey import describe
@@ -127,20 +127,33 @@ class SettingsWindow(tk.Toplevel):
         )
 
         cable_row = ttk.Frame(tab)
-        cable_row.grid(row=6, column=0, columnspan=2, sticky="w")
-        self.cable_label = ttk.Label(cable_row, text="", cursor="hand2")
-        self.cable_label.pack(side="left")
+        cable_row.grid(row=6, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.cable_label = ttk.Label(cable_row, text="", cursor="hand2",
+                                     wraplength=560, justify="left")
+        self.cable_label.pack(anchor="w")
         self.cable_label.bind("<Button-1>", lambda _e: webbrowser.open(CABLE_URL))
-        self.cable_btn = ttk.Button(cable_row, text="Remove virtual cable",
+
+        verify_row = ttk.Frame(tab)
+        verify_row.grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.verify_btn = ttk.Button(verify_row, text="Test the Discord path",
+                                     command=self._verify_path)
+        self.verify_btn.pack(side="left")
+        self.scan_btn = ttk.Button(verify_row, text="Find the right device",
+                                   command=self._scan_path)
+        self.scan_btn.pack(side="left", padx=6)
+        self.cable_btn = ttk.Button(verify_row, text="Remove virtual cable",
                                     command=self._remove_cable)
-        self.cable_btn.pack(side="left", padx=8)
+        self.cable_btn.pack(side="left")
+        self.verify_status = ttk.Label(tab, text="", foreground="#666",
+                                       wraplength=580, justify="left")
+        self.verify_status.grid(row=8, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         self.mute_var = tk.BooleanVar()
         ttk.Checkbutton(
             tab,
             text="Mute microphone while speaking (prevents the app hearing itself)",
             variable=self.mute_var,
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         self.autostart_var = tk.BooleanVar(value=run_at_login())
         self.autostart_check = ttk.Checkbutton(
@@ -149,14 +162,114 @@ class SettingsWindow(tk.Toplevel):
             variable=self.autostart_var,
             command=self._toggle_autostart,
         )
-        self.autostart_check.grid(row=8, column=0, columnspan=2, sticky="w")
+        self.autostart_check.grid(row=10, column=0, columnspan=2, sticky="w")
         if not is_frozen():
             self.autostart_check.state(["disabled"])
             ttk.Label(tab, text="(only available in an installed build)",
-                      foreground="#666").grid(row=9, column=0, sticky="w")
+                      foreground="#666").grid(row=11, column=0, sticky="w")
 
         tab.columnconfigure(0, weight=1)
         tab.rowconfigure(4, weight=1)
+
+    # -- verifying the path to Discord ---------------------------------------
+
+    def _selected_cable(self):
+        """The configured cable target, falling back to whatever is detected."""
+        for target in self.cfg.audio.outputs:
+            if target.enabled and cable.is_virtual_device(target.match):
+                for info in cable.list_devices():
+                    if info.output_name == target.match or target.match in info.output_name:
+                        return info
+        return cable.detect()
+
+    def _verify_path(self) -> None:
+        info = self._selected_cable()
+        if info is None:
+            self.verify_status.config(
+                text="No virtual cable is configured, so there is no path to test.")
+            return
+        self.verify_btn.state(["disabled"])
+        self.verify_status.config(text="Testing...")
+
+        def work() -> None:
+            try:
+                result = loopback.verify_cable(
+                    info, progress=lambda m: self.after(
+                        0, lambda m=m: self.verify_status.config(text=m))
+                )
+            except Exception as exc:  # noqa: BLE001
+                failure = str(exc)
+                self.after(0, lambda: self._verify_done(None, failure))
+                return
+            self.after(0, lambda: self._verify_done(result, None))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _verify_done(self, result, error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        self.verify_btn.state(["!disabled"])
+        if error:
+            self.verify_status.config(text=f"Test failed: {error}", foreground="#a33")
+            return
+        self.verify_status.config(
+            text=("PASS  " if result.ok else "") + result.message,
+            foreground="#2a7" if result.ok else "#a33",
+        )
+        log.info("loopback %s: %s", "ok" if result.ok else "failed", result.detail)
+
+    def _scan_path(self) -> None:
+        """Find which recording device actually receives our audio.
+
+        For a router the naming tells you nothing, so measuring is the only way to
+        answer 'what do I pick in Discord?'.
+        """
+        info = self._selected_cable()
+        if info is None:
+            self.verify_status.config(text="No virtual cable is configured.")
+            return
+        self.scan_btn.state(["disabled"])
+        self.verify_status.config(text="Scanning every recording device...",
+                                  foreground="#666")
+
+        def work() -> None:
+            try:
+                hits = loopback.scan(
+                    info.output_name,
+                    progress=lambda m: self.after(
+                        0, lambda m=m: self.verify_status.config(text=m)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                failure = str(exc)
+                self.after(0, lambda: self._scan_done(None, failure, info))
+                return
+            self.after(0, lambda: self._scan_done(hits, None, info))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _scan_done(self, hits, error: str | None, info) -> None:
+        if not self.winfo_exists():
+            return
+        self.scan_btn.state(["!disabled"])
+        if error:
+            self.verify_status.config(text=f"Scan failed: {error}", foreground="#a33")
+            return
+        if not hits:
+            extra = ""
+            if info.is_router and not info.app_running:
+                extra = f"  {info.product} is not running, which would explain it."
+            self.verify_status.config(
+                text=f"Nothing received audio played into {info.output_name}."
+                     f"{extra}",
+                foreground="#a33",
+            )
+            return
+        best = hits[0]
+        others = f"  (+{len(hits) - 1} more)" if len(hits) > 1 else ""
+        self.verify_status.config(
+            text=f"PASS  Select this in Discord: {best.input_name}{others}",
+            foreground="#2a7",
+        )
 
     def _toggle_autostart(self) -> None:
         wanted = self.autostart_var.get()
@@ -226,7 +339,13 @@ class SettingsWindow(tk.Toplevel):
         gain_label.pack(side="left", padx=(4, 6))
         gain.trace_add("write", lambda *_: gain_label.config(text=f"{gain.get():.2f}"))
 
-        entry = {"frame": row, "enabled": enabled, "match": match, "gain": gain}
+        # Live level, so you can see audio actually reaching this device rather
+        # than inferring it from silence somewhere downstream.
+        meter = ttk.Progressbar(row, maximum=100, length=70)
+        meter.pack(side="left", padx=(0, 6))
+
+        entry = {"frame": row, "enabled": enabled, "match": match, "gain": gain,
+                 "meter": meter}
         ttk.Button(row, text="X", width=3,
                    command=lambda: self._remove_output_row(entry)).pack(side="left")
         self._output_rows.append(entry)
@@ -1076,6 +1195,18 @@ class SettingsWindow(tk.Toplevel):
         self.state_label.config(text=f"{status['state']}  —  {status['stt']}")
         cap = self.pipeline.capture
         self.level["value"] = min(100.0, (cap.peak if cap else 0.0) * 140)
+
+        sink = self.pipeline.sink
+        levels = sink.levels() if sink is not None else {}
+        for row in self._output_rows:
+            match = devices.strip_display(row["match"].get())
+            value = 0.0
+            if match:
+                value = next((v for name, v in levels.items() if match in name), 0.0)
+            elif levels:
+                value = next(iter(levels.values()))
+            row["meter"]["value"] = min(100.0, value * 140)
+
         self.after(100, self._tick)
 
     def close(self) -> None:

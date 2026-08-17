@@ -44,6 +44,9 @@ class TargetStream:
         self._resampler: soxr.ResampleStream | None = None
         self._producing = False  # True while the synthesizer is still feeding us
         self.underruns = 0
+        # Most recent block peak, decayed so a meter falls smoothly rather than
+        # snapping to zero between words.
+        self.peak = 0.0
 
     @property
     def name(self) -> str:
@@ -129,6 +132,12 @@ class TargetStream:
 
         if filled:
             np.clip(out * self.gain, -1.0, 1.0, out=out)
+            block_peak = float(np.abs(out[:filled]).max())
+        else:
+            block_peak = 0.0
+        # Decay towards the new value so the meter reads smoothly at ~10 Hz refresh.
+        self.peak = max(block_peak, self.peak * 0.75)
+
         outdata[:] = out.reshape(-1, 1) if self.channels == 1 else np.repeat(
             out.reshape(-1, 1), self.channels, axis=1
         )
@@ -177,6 +186,10 @@ class OutputSink:
             if not self.targets:
                 log.warning("no usable output devices")
             return list(self.failures)
+
+    def levels(self) -> dict[str, float]:
+        """Current peak per open target, for meters in the UI."""
+        return {t.name: t.peak for t in self.targets}
 
     def set_gain(self, match: str, gain: float) -> None:
         for t in self.targets:

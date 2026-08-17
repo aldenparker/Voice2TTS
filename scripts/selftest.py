@@ -685,6 +685,71 @@ def test_device_lists() -> None:
         check("hidden-API device still resolves", True, "no such device to test")
 
 
+def test_loopback() -> None:
+    """Tone detection maths, and the cable-vs-router distinction."""
+    print("\n[loopback]")
+    from voice2tts import cable, loopback
+
+    rate = loopback.RATE
+    t = np.arange(rate, dtype=np.float32) / rate
+
+    tone = 0.25 * np.sin(2 * np.pi * loopback.TONE_HZ * t)
+    silence = np.zeros(rate, dtype=np.float32)
+    noise = (np.random.randn(rate) * 0.05).astype(np.float32)
+    other = 0.25 * np.sin(2 * np.pi * 300.0 * t)
+
+    tone_db = loopback._tone_level_db(tone, rate, loopback.TONE_HZ)
+    silence_db = loopback._tone_level_db(silence, rate, loopback.TONE_HZ)
+    noise_db = loopback._tone_level_db(noise, rate, loopback.TONE_HZ)
+    other_db = loopback._tone_level_db(other, rate, loopback.TONE_HZ)
+
+    check("tone detected loudly", tone_db > -20, f"{tone_db:.0f} dB")
+    check("silence reads as nothing", silence_db < -100, f"{silence_db:.0f} dB")
+    check("broadband noise does not look like the tone",
+          tone_db - noise_db > loopback.DETECT_MARGIN_DB,
+          f"tone {tone_db:.0f} vs noise {noise_db:.0f} dB")
+    check("a different frequency is rejected",
+          tone_db - other_db > loopback.DETECT_MARGIN_DB,
+          f"997Hz {tone_db:.0f} vs 300Hz {other_db:.0f} dB")
+
+    # Quiet speech must not be mistaken for the test signal.
+    speech = load_sample_16k()
+    if speech is not None:
+        import soxr
+
+        resampled = soxr.resample(speech, 16000, rate).astype(np.float32)
+        speech_db = loopback._tone_level_db(resampled, rate, loopback.TONE_HZ)
+        check("speech is not mistaken for the tone",
+              tone_db - speech_db > loopback.DETECT_MARGIN_DB,
+              f"tone {tone_db:.0f} vs speech {speech_db:.0f} dB")
+
+    check("missing device reported, not raised",
+          not loopback.verify("no-such-output", "no-such-input").ok)
+
+    # Cable vs router: a router's endpoints are mixer ports, so its pairing can
+    # never be reported as certain and its caveat must mention the application.
+    kinds = {p: k for _, p, _, k in cable._PRODUCTS}
+    check("VB-CABLE is a hardwired cable", kinds["VB-CABLE"] == cable.CABLE)
+    check("Matrix is a router", kinds["VB-Audio Matrix"] == cable.ROUTER)
+    check("VoiceMeeter is a router", kinds["VoiceMeeter"] == cable.ROUTER)
+
+    router = cable.CableInfo(product="VB-Audio Matrix", output_name="VBMatrix In 1",
+                             input_name="VBMatrix Out 1", channel=1, certain=True,
+                             kind=cable.ROUTER)
+    check("router pairing carries a caveat", bool(router.caveat))
+    check("caveat names the application", "VB-Audio Matrix" in router.caveat)
+
+    plain = cable.CableInfo(product="VB-CABLE", output_name="CABLE Input",
+                            input_name="CABLE Output", certain=True)
+    check("a real cable has no caveat", not plain.caveat)
+    check("a real cable needs no application running", plain.app_running)
+
+    found = cable.detect()
+    if found is not None and found.is_router:
+        check("router state reported", isinstance(found.app_running, bool),
+              f"{found.product} running={found.app_running}")
+
+
 def test_platform() -> None:
     """Windows integration bits that do not need audio hardware."""
     print("\n[platform]")
@@ -742,6 +807,8 @@ def main() -> int:
     test_vad()
     test_stt()
     test_device_lists()
+    if not no_audio:
+        test_loopback()
     test_platform()
     test_language_guard()
     if not no_audio:

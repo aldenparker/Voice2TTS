@@ -169,7 +169,8 @@ class Wizard(tk.Toplevel):
         if candidates:
             self._cable_choices = candidates
             chosen = self._cable_choice(candidates)
-            self.cable_status.config(text=f"Found: {chosen.product}", foreground="#2a7")
+            colour = "#2a7" if not (chosen.is_router and not chosen.app_running) else "#c80"
+            self.cable_status.config(text=f"Found: {chosen.product}", foreground=colour)
             self._describe_cable(chosen)
             self._apply_cable_output(chosen.output_name)
 
@@ -246,8 +247,10 @@ class Wizard(tk.Toplevel):
 
         self._run_async(lambda: cable.install_flow(progress=progress), done)
 
-    def _cable_choice(self, candidates: list) -> object:
+    def _cable_choice(self, candidates: list):
         """Keep the user's pick across a re-render; otherwise take the best match."""
+        if not candidates:
+            return None
         wanted = getattr(self, "cable_var", None)
         if wanted is not None:
             match = next((c for c in candidates if c.output_name == wanted.get()), None)
@@ -260,12 +263,9 @@ class Wizard(tk.Toplevel):
             f"Voice2TTS will play into  {chosen.output_name}\n"
             f"In Discord, choose        {chosen.discord_input}  as your input device."
         )
-        if not chosen.certain:
-            detail += (
-                "\n\nThe matching recording device was inferred -- check it in "
-                "Windows Sound settings."
-            )
-        self.cable_detail.config(text=detail)
+        if chosen.caveat:
+            detail += f"\n\n{chosen.caveat}"
+        self.cable_detail.config(text=detail, wraplength=560, justify="left")
 
     def _on_cable_selected(self) -> None:
         chosen = self._cable_choice(self._cable_choices)
@@ -468,7 +468,10 @@ class Wizard(tk.Toplevel):
         row = ttk.Frame(parent)
         row.pack(anchor="w", fill="x")
         ttk.Button(row, text="Play test phrase", command=self._play_test).pack(side="left")
-        self.test_log = ttk.Label(row, text="", foreground="#666")
+        ttk.Button(row, text="Check the Discord path",
+                   command=self._check_path).pack(side="left", padx=6)
+        self.test_log = ttk.Label(row, text="", foreground="#666", wraplength=560,
+                                  justify="left")
         self.test_log.pack(side="left", padx=10)
 
         ttk.Label(
@@ -482,6 +485,33 @@ class Wizard(tk.Toplevel):
             justify="left",
             foreground="#444",
         ).pack(anchor="w")
+
+    def _check_path(self) -> None:
+        """Prove audio reaches the device Discord will listen on."""
+        from . import loopback
+
+        info = self._cable_choice(getattr(self, "_cable_choices", []) or
+                                  cable.list_devices())
+        if info is None:
+            self.test_log.config(text="No virtual cable configured.")
+            return
+
+        def work():
+            return loopback.verify_cable(
+                info, progress=lambda m: self.after(
+                    0, lambda m=m: self.test_log.config(text=m))
+            )
+
+        def done(result, error) -> None:
+            if error is not None:
+                self.test_log.config(text=f"Check failed: {error}")
+                return
+            self.test_log.config(text=result.message)
+            if not result.ok:
+                messagebox.showwarning("Discord path", result.message, parent=self)
+
+        self.test_log.config(text="Checking...")
+        self._run_async(work, done)
 
     def _play_test(self) -> None:
         from .output import OutputSink

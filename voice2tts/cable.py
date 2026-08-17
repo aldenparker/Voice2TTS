@@ -61,20 +61,44 @@ USER_AGENT = "Voice2TTS/0.2 (+https://vb-audio.com/Cable/)"
 #
 # Matched against the driver tag, longest pattern first so "voicemeeter aux vaio"
 # beats "voicemeeter vaio". rank orders which product we pick when several exist.
-_PRODUCTS: tuple[tuple[str, str, int], ...] = (
-    ("vb-audio virtual cable", "VB-CABLE", 0),
-    ("vb-audio cable a", "VB-CABLE A+B", 1),
-    ("vb-audio cable b", "VB-CABLE A+B", 1),
-    ("vb-audio cable c", "VB-CABLE C+D", 1),
-    ("vb-audio cable d", "VB-CABLE C+D", 1),
-    ("vb-audio hi-fi cable", "VB-Audio Hi-Fi Cable", 2),
-    ("vb-audio matrix vaio", "VB-Audio Matrix", 3),
-    ("vb-audio voicemeeter vaio3", "VoiceMeeter Potato", 4),
-    ("vb-audio voicemeeter aux vaio", "VoiceMeeter Banana", 4),
-    ("vb-audio voicemeeter vaio", "VoiceMeeter", 4),
-    ("virtual audio cable", "Virtual Audio Cable (VAC)", 5),
-    ("synchronous audio router", "Synchronous Audio Router", 6),
+# kind distinguishes two very different things that look alike in Windows:
+#
+#   CABLE  - a hardwired loop in the driver. Whatever is played into the playback
+#            endpoint comes straight out of the recording endpoint. Works with no
+#            application running, and the pairing is guaranteed.
+#   ROUTER - a mixer whose endpoints are ports, not a loop. Audio played into
+#            "VBMatrix In 1" goes INTO the Matrix application and only reaches
+#            "VBMatrix Out 1" if the user has routed it there. Nothing passes at
+#            all while the application is closed.
+#
+# Treating a router as a cable produces confident, wrong advice: it names a
+# recording device for Discord that may carry nothing.
+CABLE, ROUTER = "cable", "router"
+
+_PRODUCTS: tuple[tuple[str, str, int, str], ...] = (
+    ("vb-audio virtual cable", "VB-CABLE", 0, CABLE),
+    ("vb-audio cable a", "VB-CABLE A+B", 1, CABLE),
+    ("vb-audio cable b", "VB-CABLE A+B", 1, CABLE),
+    ("vb-audio cable c", "VB-CABLE C+D", 1, CABLE),
+    ("vb-audio cable d", "VB-CABLE C+D", 1, CABLE),
+    ("vb-audio hi-fi cable", "VB-Audio Hi-Fi Cable", 2, CABLE),
+    ("virtual audio cable", "Virtual Audio Cable (VAC)", 3, CABLE),
+    ("vb-audio matrix vaio", "VB-Audio Matrix", 6, ROUTER),
+    ("vb-audio voicemeeter vaio3", "VoiceMeeter Potato", 7, ROUTER),
+    ("vb-audio voicemeeter aux vaio", "VoiceMeeter Banana", 7, ROUTER),
+    ("vb-audio voicemeeter vaio", "VoiceMeeter", 7, ROUTER),
+    ("synchronous audio router", "Synchronous Audio Router", 8, ROUTER),
 )
+
+# Process names for the router applications, so we can say when one is installed
+# but not running -- in which case its endpoints carry nothing at all.
+_ROUTER_PROCESSES: dict[str, tuple[str, ...]] = {
+    "VB-Audio Matrix": ("vbaudiomatrix", "vbaudiomatrix_x64"),
+    "VoiceMeeter": ("voicemeeter",),
+    "VoiceMeeter Banana": ("voicemeeterpro", "voicemeeter"),
+    "VoiceMeeter Potato": ("voicemeeter8", "voicemeeter8x64", "voicemeeter"),
+    "Synchronous Audio Router": ("sar",),
+}
 
 # Anything from these families counts as a virtual cable even when the exact product
 # is unrecognised -- VB-Audio ship new ones, and a device we cannot name is still
@@ -103,20 +127,66 @@ class CableInfo:
     input_name: str       # what Discord listens to
     channel: int | None = None   # e.g. 8 for "VBMatrix In 8"
     certain: bool = True  # False when the Discord-side pairing had to be guessed
+    kind: str = CABLE
 
     @property
     def label(self) -> str:
         return f"{self.product} {self.channel}" if self.channel else self.product
 
     @property
+    def is_router(self) -> bool:
+        return self.kind == ROUTER
+
+    @property
     def discord_input(self) -> str:
         return self.input_name or "(check Windows Sound settings)"
 
     @property
+    def app_running(self) -> bool:
+        """For a router, whether its application is running. True for a cable."""
+        return True if not self.is_router else router_running(self.product)
+
+    @property
+    def caveat(self) -> str:
+        """What the user needs to know beyond the device names, or ''."""
+        if not self.is_router:
+            return "" if self.certain else (
+                "The matching recording device was inferred; verify it in Windows "
+                "Sound settings."
+            )
+        note = (
+            f"{self.product} is an audio router, not a fixed cable. Speech sent to "
+            f"{self.output_name} reaches Discord only if {self.product} is running "
+            f"and routing it to {self.discord_input}."
+        )
+        if not self.app_running:
+            note = f"{self.product} is not running, so nothing will pass. " + note
+        return note
+
+    @property
     def summary(self) -> str:
-        tail = "" if self.certain else "  [pairing inferred - verify in Sound settings]"
+        tail = f"  [{self.caveat.splitlines()[0]}]" if self.caveat else ""
         return (f"{self.label}: play to {self.output_name!r}, "
                 f"Discord selects {self.discord_input!r}{tail}")
+
+
+def router_running(product: str) -> bool:
+    """True if the given router application currently has a process."""
+    names = _ROUTER_PROCESSES.get(product)
+    if not names:
+        return False
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["tasklist", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+        ).stdout.lower()
+    except Exception as exc:  # noqa: BLE001 - absence of proof is not proof
+        log.debug("could not list processes: %s", exc)
+        return False
+    return any(f'"{n}.exe"' in out for n in names)
 
 
 def _driver_tag(name: str) -> str:
@@ -135,17 +205,18 @@ def _channel(name: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _identify(name: str) -> tuple[str, int] | None:
-    """Map a device to (product, rank), or None if it is not a virtual cable."""
+def _identify(name: str) -> tuple[str, int, str] | None:
+    """Map a device to (product, rank, kind), or None if it is not virtual."""
     tag = _driver_tag(name)
     haystack = f"{tag} {name}".lower()
-    for pattern, product, rank in _PRODUCTS:
+    for pattern, product, rank, kind in _PRODUCTS:
         if pattern in haystack:
-            return product, rank
+            return product, rank, kind
     if any(hint in haystack for hint in _FAMILY_HINTS):
         # Unrecognised but clearly from a virtual-audio family; name it after its
-        # own driver so the user can still tell which device this is.
-        return (tag.title() if tag else "Virtual audio device"), _GENERIC_RANK
+        # own driver so the user can still tell which device this is. Assume a
+        # plain cable, since that is the case where our advice is safe.
+        return (tag.title() if tag else "Virtual audio device"), _GENERIC_RANK, CABLE
     return None
 
 
@@ -208,7 +279,7 @@ def list_devices() -> list[CableInfo]:
         identified = _identify(out.name)
         if identified is None:
             continue
-        product, rank = identified
+        product, rank, kind = identified
 
         if rank == _GENERIC_RANK:
             # Only a recognised product is taken on trust. Anything matched by a
@@ -226,8 +297,15 @@ def list_devices() -> list[CableInfo]:
         found.append((
             rank,
             channel if channel is not None else 0,
-            CableInfo(product=product, output_name=out.name, input_name=partner,
-                      channel=channel, certain=certain),
+            CableInfo(
+                product=product, output_name=out.name, input_name=partner,
+                channel=channel,
+                # A router's pairing is never certain: the endpoints are ports on a
+                # mixer, so which recording device carries this audio depends on the
+                # user's routing, not on the naming.
+                certain=certain and kind == CABLE,
+                kind=kind,
+            ),
         ))
     found.sort(key=lambda t: (t[0], t[1], t[2].output_name))
     return [info for _, _, info in found]
