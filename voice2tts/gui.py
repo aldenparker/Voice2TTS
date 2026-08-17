@@ -82,6 +82,7 @@ class SettingsWindow(tk.Toplevel):
         self._build_voice(nb)
         self._build_voice_library(nb)
         self._build_words(nb)
+        self._build_history(nb)
         self._build_recognition(nb)
         self._build_updates(nb)
         self._build_status(nb)
@@ -992,6 +993,101 @@ class SettingsWindow(tk.Toplevel):
             foreground="#2a7" if changed else "#666",
         )
 
+    # -- history tab ----------------------------------------------------------
+
+    def _build_history(self, nb: ttk.Notebook) -> None:
+        tab = ttk.Frame(nb, padding=10)
+        nb.add(tab, text="History")
+
+        top = ttk.Frame(tab)
+        top.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        self.review_var = tk.BooleanVar()
+        ttk.Checkbutton(
+            top, text="Check each transcript before speaking it",
+            variable=self.review_var,
+        ).pack(side="left")
+        ttk.Label(top, text="  discard after").pack(side="left")
+        self.review_timeout_var = tk.DoubleVar(value=30.0)
+        ttk.Spinbox(top, from_=5, to=300, increment=5, width=5,
+                    textvariable=self.review_timeout_var).pack(side="left", padx=4)
+        ttk.Label(top, text="s", foreground="#666").pack(side="left")
+
+        ttk.Label(
+            tab,
+            text="Recent utterances. Kept in memory only — never written to disk.",
+            foreground="#555",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 4))
+
+        cols = ("time", "heard", "spoken")
+        self.hist_tree = ttk.Treeview(tab, columns=cols, show="headings", height=12)
+        for col, width, text in zip(cols, (70, 240, 240),
+                                    ("Time", "Heard", "Spoken"), strict=True):
+            self.hist_tree.heading(col, text=text)
+            self.hist_tree.column(col, width=width, anchor="w")
+        self.hist_tree.grid(row=2, column=0, columnspan=3, sticky="nsew")
+        sb = ttk.Scrollbar(tab, orient="vertical", command=self.hist_tree.yview)
+        sb.grid(row=2, column=3, sticky="ns")
+        self.hist_tree.configure(yscrollcommand=sb.set)
+        self.hist_tree.bind("<Double-1>", lambda _e: self._respeak())
+
+        actions = ttk.Frame(tab)
+        actions.grid(row=3, column=0, columnspan=3, sticky="w", pady=6)
+        ttk.Button(actions, text="Say again", command=self._respeak).pack(side="left")
+        ttk.Button(actions, text="Copy", command=self._copy_history).pack(
+            side="left", padx=6)
+        ttk.Button(actions, text="Clear", command=self._clear_history).pack(side="left")
+        self.hist_status = ttk.Label(actions, text="", foreground="#666")
+        self.hist_status.pack(side="left", padx=10)
+
+        tab.columnconfigure(1, weight=1)
+        tab.rowconfigure(2, weight=1)
+        self._history_shown = 0
+
+    def _refresh_history(self) -> None:
+        entries = list(self.pipeline.history)
+        if len(entries) == self._history_shown:
+            return  # nothing new; do not fight the user's selection every 100 ms
+        self._history_shown = len(entries)
+        self.hist_tree.delete(*self.hist_tree.get_children())
+        for i, entry in enumerate(reversed(entries)):
+            heard = entry.heard if entry.source == "speech" else f"({entry.source})"
+            self.hist_tree.insert("", "end", iid=str(i),
+                                  values=(entry.clock, heard, entry.spoken))
+
+    def _selected_history(self):
+        sel = self.hist_tree.selection()
+        if not sel:
+            self.hist_status.config(text="Select something first.")
+            return None
+        entries = list(reversed(self.pipeline.history))
+        index = int(sel[0])
+        return entries[index] if index < len(entries) else None
+
+    def _respeak(self) -> None:
+        entry = self._selected_history()
+        if entry is None:
+            return
+        if not self.pipeline.running:
+            self.hist_status.config(text="Start the pipeline first.")
+            return
+        self.pipeline.say_text(entry.spoken, source="repeat")
+        self.hist_status.config(text=f"Saying: {entry.spoken[:40]}")
+
+    def _copy_history(self) -> None:
+        entry = self._selected_history()
+        if entry is None:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(entry.spoken)
+        self.update_idletasks()
+        self.hist_status.config(text="Copied")
+
+    def _clear_history(self) -> None:
+        self.pipeline.clear_history()
+        self._history_shown = -1  # force a redraw even though the count is 0
+        self._refresh_history()
+        self.hist_status.config(text="Cleared")
+
     # -- recognition tab ------------------------------------------------------
 
     def _build_recognition(self, nb: ttk.Notebook) -> None:
@@ -1360,6 +1456,8 @@ class SettingsWindow(tk.Toplevel):
         self.stt_device_var.set(c.stt.device)
         self.beam_var.set(c.stt.beam_size)
 
+        self.review_var.set(c.text.review_before_speaking)
+        self.review_timeout_var.set(c.text.review_timeout_s)
         self.subs_enabled_var.set(c.text.substitutions_enabled)
         self._subs = [
             SubstitutionRule(r.pattern, r.replacement, r.enabled, r.whole_word,
@@ -1413,6 +1511,8 @@ class SettingsWindow(tk.Toplevel):
 
         c.text.substitutions_enabled = self.subs_enabled_var.get()
         c.text.substitutions = list(self._subs)
+        c.text.review_before_speaking = self.review_var.get()
+        c.text.review_timeout_s = max(5.0, float(self.review_timeout_var.get()))
 
         c.updates.repo = self.repo_var.get().strip()
         c.updates.check_on_start = self.check_start_var.get()
@@ -1461,6 +1561,7 @@ class SettingsWindow(tk.Toplevel):
                 value = next(iter(levels.values()))
             row["meter"]["value"] = min(100.0, value * 140)
 
+        self._refresh_history()
         self.after(100, self._tick)
 
     def close(self) -> None:

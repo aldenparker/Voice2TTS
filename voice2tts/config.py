@@ -122,6 +122,16 @@ class TextConfig:
     substitutions: list[SubstitutionRule] = field(default_factory=list)
     substitutions_enabled: bool = True
 
+    # Show the transcript for approval before speaking it. Costs latency, but stops
+    # a misrecognition reaching a call.
+    review_before_speaking: bool = False
+    # Seconds to wait for that approval. On timeout the utterance is DISCARDED --
+    # the point of review is that nothing unreviewed gets spoken, and a dialog
+    # hidden behind a game must not blurt something out minutes later.
+    review_timeout_s: float = 30.0
+    # Recent utterances kept in memory for the History tab. Never written to disk.
+    history_size: int = 50
+
 
 @dataclass
 class UpdateConfig:

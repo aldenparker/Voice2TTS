@@ -31,6 +31,7 @@ _TOOLTIP = {
     State.IDLE: "Voice2TTS — ready",
     State.LISTENING: "Voice2TTS — listening",
     State.THINKING: "Voice2TTS — transcribing",
+    State.REVIEWING: "Voice2TTS — waiting for you to approve",
     State.SPEAKING: "Voice2TTS — speaking",
 }
 
@@ -55,7 +56,9 @@ class TrayApp:
         self.pending_update = None
         self._quitting = False
 
+        self._review_window = None
         self.pipeline = Pipeline(self.cfg, on_state=self._on_state, on_event=self._on_event)
+        self.pipeline.review_hook = self._review_hook
         self.icon = pystray.Icon(
             "voice2tts", make_icon(State.STOPPED), "Voice2TTS", self._menu()
         )
@@ -165,6 +168,71 @@ class TrayApp:
         text = simpledialog.askstring("Speak text", "Text to speak:", parent=self.root)
         if text:
             self.pipeline.say_text(text)
+
+    # -- review before speaking ----------------------------------------------
+
+    def _review_hook(self, text: str) -> str | None:
+        """Called on the worker thread; blocks until the user decides.
+
+        The dialog has to be built on the Tk thread, so the decision is passed back
+        through an Event. A timeout is essential: a dialog hidden behind a game
+        would otherwise wedge the pipeline forever.
+        """
+        decision: dict[str, str | None] = {"text": None}
+        done = threading.Event()
+        self._post(self._show_review, text, decision, done)
+
+        timeout = self.cfg.text.review_timeout_s or None
+        if not done.wait(timeout):
+            log.info("review timed out after %ss; discarding", timeout)
+            self._post(self._close_review)
+            return None
+        return decision["text"]
+
+    def _show_review(self, text: str, decision: dict, done: threading.Event) -> None:
+        self._close_review()
+        win = tk.Toplevel(self.root)
+        self._review_window = win
+        win.title("Speak this?")
+        win.geometry("520x220")
+        win.attributes("-topmost", True)  # useless behind a fullscreen game otherwise
+
+        tk.Label(win, text="Check the text, edit if needed, then speak it.",
+                 anchor="w").pack(fill="x", padx=12, pady=(12, 4))
+        entry = tk.Text(win, height=5, wrap="word")
+        entry.pack(fill="both", expand=True, padx=12)
+        entry.insert("1.0", text)
+        entry.focus_force()
+        # Select all, so retyping replaces rather than appends to a bad transcript.
+        entry.tag_add("sel", "1.0", "end-1c")
+
+        def finish(approved: bool) -> None:
+            if not done.is_set():
+                decision["text"] = entry.get("1.0", "end-1c").strip() if approved else None
+                done.set()
+            self._close_review()
+
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=12, pady=10)
+        ttk.Button(bar, text="Speak", command=lambda: finish(True)).pack(side="right")
+        ttk.Button(bar, text="Discard",
+                   command=lambda: finish(False)).pack(side="right", padx=6)
+        ttk.Label(bar, text=f"Discards automatically after "
+                            f"{self.cfg.text.review_timeout_s:.0f}s",
+                  foreground="#666").pack(side="left")
+
+        win.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+        win.bind("<Escape>", lambda _e: finish(False))
+        # Ctrl+Enter speaks; plain Enter inserts a newline, since this is editable.
+        win.bind("<Control-Return>", lambda _e: finish(True))
+
+    def _close_review(self) -> None:
+        win, self._review_window = getattr(self, "_review_window", None), None
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:  # noqa: BLE001 - already gone
+                pass
 
     def _speak_clipboard(self) -> None:
         if not self.pipeline.running:

@@ -15,6 +15,7 @@ _COLORS: dict[State, tuple[int, int, int]] = {
     State.IDLE: (86, 148, 220),        # blue
     State.LISTENING: (72, 186, 108),   # green
     State.THINKING: (222, 158, 54),    # amber
+    State.REVIEWING: (150, 110, 200),  # purple: waiting on you, not on the machine
     State.SPEAKING: (206, 88, 96),     # red
 }
 

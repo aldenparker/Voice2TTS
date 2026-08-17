@@ -16,7 +16,9 @@ import logging
 import queue
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
@@ -39,12 +41,31 @@ _STOP = object()  # queue sentinel
 _MAX_VAD_FAILURES = 5
 
 
+@dataclass
+class HistoryEntry:
+    """One utterance, as heard and as spoken."""
+
+    heard: str
+    spoken: str
+    at: float
+    source: str = "speech"   # speech | clipboard | typed
+
+    @property
+    def edited(self) -> bool:
+        return self.heard != self.spoken
+
+    @property
+    def clock(self) -> str:
+        return time.strftime("%H:%M:%S", time.localtime(self.at))
+
+
 class State(Enum):
     STOPPED = "stopped"
     LOADING = "loading"
     IDLE = "idle"
     LISTENING = "listening"
     THINKING = "thinking"
+    REVIEWING = "reviewing"
     SPEAKING = "speaking"
 
 
@@ -70,6 +91,12 @@ class Pipeline:
         self.apply_text_changes()
         self.last_transcript = ""
         self.output_failures: list[tuple[str, str]] = []
+
+        self.history: deque[HistoryEntry] = deque(maxlen=max(1, cfg.text.history_size))
+        # Set by the UI to approve or edit text before it is spoken. Called on the
+        # worker thread and expected to block; returns the text to speak, or None
+        # to discard.
+        self.review_hook: Callable[[str], str | None] | None = None
 
         self._utterances: queue.Queue = queue.Queue(maxsize=8)
         self._threads: list[threading.Thread] = []
@@ -460,7 +487,36 @@ class Pipeline:
         spoken = self.substituter.apply(text)
         if spoken != text:
             self._emit("substituted", spoken)
+
+        if self.cfg.text.review_before_speaking and self.review_hook is not None:
+            self._set_state(State.REVIEWING)
+            approved = self._review(spoken)
+            if approved is None:
+                self._emit("info", "Discarded before speaking")
+                return
+            spoken = approved
+
+        self.record(text, spoken, "speech")
         self.speak(spoken, _t0=t0)
+
+    def _review(self, text: str) -> str | None:
+        """Ask the UI to approve `text`. Returns the approved text, or None."""
+        try:
+            return self.review_hook(text)
+        except Exception:
+            # A broken hook must not swallow the utterance; speaking unreviewed is
+            # the lesser failure, and the traceback lands in the log.
+            log.exception("review hook failed; speaking unreviewed text")
+            return text
+
+    def record(self, heard: str, spoken: str, source: str = "speech") -> None:
+        """Add to the in-memory history shown in the History tab."""
+        self.history.append(HistoryEntry(heard=heard, spoken=spoken, at=time.time(),
+                                         source=source))
+
+    def clear_history(self) -> None:
+        self.history.clear()
+        self._emit("info", "History cleared")
 
     # -- speech output --------------------------------------------------------
 
@@ -519,17 +575,19 @@ class Pipeline:
             return ""
         preview = text if len(text) <= 60 else text[:57] + "..."
         self._emit("clipboard", preview)
-        self.say_text(text)
+        self.say_text(text, source="clipboard")
         return text
 
-    def say_text(self, text: str) -> None:
+    def say_text(self, text: str, source: str = "typed") -> None:
         """Speak text supplied directly by the UI, off the worker thread."""
         threading.Thread(
-            target=self._say_text_worker, args=(text,), name="v2t-say", daemon=True
+            target=self._say_text_worker, args=(text, source), name="v2t-say",
+            daemon=True,
         ).start()
 
-    def _say_text_worker(self, text: str) -> None:
+    def _say_text_worker(self, text: str, source: str = "typed") -> None:
         try:
+            self.record(text, text, source)
             self.speak(text)
         except Exception:
             log.exception("say_text failed")

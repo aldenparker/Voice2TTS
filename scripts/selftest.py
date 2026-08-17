@@ -272,6 +272,50 @@ def test_substitutions() -> None:
           p.substituter.apply("tell aiden") == "tell aiden")
 
 
+def test_history_and_review() -> None:
+    print("\n[history + review]")
+    from voice2tts.config import Config
+    from voice2tts.pipeline import Pipeline
+
+    cfg = Config()
+    cfg.text.history_size = 3
+    p = Pipeline(cfg)
+
+    p.record("heard one", "spoken one")
+    p.record("heard two", "spoken two", "clipboard")
+    check("entries recorded", len(p.history) == 2)
+    check("heard and spoken kept separately", p.history[0].heard == "heard one"
+          and p.history[0].spoken == "spoken one")
+    check("source recorded", p.history[1].source == "clipboard")
+    check("edited flag set when they differ", p.history[0].edited)
+
+    for i in range(5):
+        p.record(f"x{i}", f"x{i}")
+    check("history bounded by history_size", len(p.history) == 3, str(len(p.history)))
+    check("oldest dropped first", p.history[-1].heard == "x4")
+
+    p.clear_history()
+    check("history clears", not p.history)
+
+    # Review: the hook decides what gets spoken.
+    cfg.text.review_before_speaking = True
+    seen: list[str] = []
+
+    p.review_hook = lambda text: (seen.append(text), text.upper())[1]
+    check("hook receives the text and can rewrite it",
+          p._review("hello") == "HELLO" and seen == ["hello"])
+
+    p.review_hook = lambda _text: None
+    check("returning None discards", p._review("hello") is None)
+
+    # A broken hook must not swallow the utterance silently.
+    def boom(_text):
+        raise RuntimeError("hook exploded")
+
+    p.review_hook = boom
+    check("a failing hook falls back to speaking", p._review("hello") == "hello")
+
+
 def test_vad() -> None:
     print("\n[vad]")
     from voice2tts.config import VadConfig
@@ -927,6 +971,7 @@ def main() -> int:
     test_hotkey_manager()
     test_clipboard()
     test_substitutions()
+    test_history_and_review()
     test_vad()
     test_stt()
     test_device_lists()
