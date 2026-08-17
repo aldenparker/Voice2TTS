@@ -58,6 +58,11 @@ class TriggerConfig:
     ptt_latch: bool = False          # tap to toggle instead of hold
     preroll_ms: int = 300            # audio kept from before speech onset
     max_utterance_s: float = 30.0    # hard cap so a stuck key cannot run forever
+    # Speak whatever is on the clipboard. Empty disables the binding.
+    clipboard_hotkey: str = "ctrl+alt+c"
+    # Cut off speech in progress. Without this, interrupting means starting a whole
+    # new capture just to stop the current one.
+    stop_hotkey: str = "ctrl+alt+x"
 
 
 @dataclass

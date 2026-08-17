@@ -152,6 +152,57 @@ def test_hotkey() -> None:
     check("modifiers extracted", spec.modifiers == {"ctrl", "shift"})
 
 
+def test_hotkey_manager() -> None:
+    """Several bindings over one hook, and the conflict check."""
+    print("\n[hotkey manager]")
+    from voice2tts.hotkey import HotkeyManager
+
+    fired: list[str] = []
+    mgr = HotkeyManager()
+    mgr.bind("ptt", "ctrl+alt+v", lambda: fired.append("ptt-down"),
+             lambda: fired.append("ptt-up"))
+    mgr.bind("clipboard", "ctrl+alt+c", lambda: fired.append("clip"))
+    mgr.bind("stop", "ctrl+alt+x", lambda: fired.append("stop"))
+    check("three bindings registered", mgr.bound == ["clipboard", "ptt", "stop"],
+          str(mgr.bound))
+    check("distinct combos do not conflict", not mgr.conflicts())
+
+    mgr.bind("duplicate", "ctrl+alt+v", lambda: None)
+    clashes = mgr.conflicts()
+    check("identical combos are reported",
+          any({"ptt", "duplicate"} == set(pair) for pair in clashes), str(clashes))
+    mgr.unbind("duplicate")
+
+    # Rebinding must replace, not accumulate.
+    mgr.bind("clipboard", "ctrl+alt+b", lambda: fired.append("clip2"))
+    check("rebinding replaces", len(mgr.bound) == 3, str(mgr.bound))
+
+    try:
+        mgr.bind("bad", "ctrl+nonsense", lambda: None)
+        check("invalid combo rejected", False, "no error raised")
+    except ValueError:
+        check("invalid combo rejected", True)
+    check("failed bind leaves state untouched", "bad" not in mgr.bound)
+
+    mgr.clear()
+    check("clear removes everything", not mgr.bound)
+    mgr.stop()  # must be safe without ever having started
+
+
+def test_clipboard() -> None:
+    print("\n[clipboard]")
+    from voice2tts import clipboard
+
+    text = clipboard.get_text()
+    check("clipboard read without raising", isinstance(text, str),
+          f"{len(text)} chars")
+    speakable = clipboard.get_speakable_text()
+    check("speakable form collapses whitespace",
+          "\n" not in speakable and "  " not in speakable,
+          repr(speakable[:40]))
+    check("truncation limit is sane", clipboard.MAX_CHARS >= 1000)
+
+
 def test_vad() -> None:
     print("\n[vad]")
     from voice2tts.config import VadConfig
@@ -804,6 +855,8 @@ def main() -> int:
     print("Voice2TTS self-test" + (" (no audio hardware)" if no_audio else ""))
     test_config()
     test_hotkey()
+    test_hotkey_manager()
+    test_clipboard()
     test_vad()
     test_stt()
     test_device_lists()

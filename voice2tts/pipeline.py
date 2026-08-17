@@ -24,7 +24,7 @@ import numpy as np
 from .capture import MicCapture
 from .config import Config
 from .devices import resolve_input
-from .hotkey import HotkeyListener
+from .hotkey import HotkeyManager
 from .output import OutputSink
 from .stt import WhisperEngine
 from .tts import PiperEngine
@@ -63,7 +63,7 @@ class Pipeline:
         self.tts: PiperEngine | None = None
         self.sink: OutputSink | None = None
         self.capture: MicCapture | None = None
-        self.hotkey: HotkeyListener | None = None
+        self.hotkey: HotkeyManager | None = None
         self.segmenter: VadSegmenter | None = None
         self.last_transcript = ""
         self.output_failures: list[tuple[str, str]] = []
@@ -71,6 +71,10 @@ class Pipeline:
         self._utterances: queue.Queue = queue.Queue(maxsize=8)
         self._threads: list[threading.Thread] = []
         self._running = threading.Event()
+        # Set to abandon speech already in progress. Checked between synthesized
+        # chunks, so a long utterance stops at the next sentence boundary rather
+        # than only after it has finished.
+        self._cancel_speech = threading.Event()
         self._ptt_engaged = threading.Event()
         self._ptt_buf: list[np.ndarray] = []
         self._ptt_lock = threading.Lock()
@@ -164,16 +168,34 @@ class Pipeline:
         )
 
     def _start_hotkey(self) -> None:
-        if self.cfg.trigger.mode not in ("ptt", "both"):
-            return
-        try:
-            self.hotkey = HotkeyListener(
-                self.cfg.trigger.hotkey, self._on_ptt_press, self._on_ptt_release
-            )
+        """(Re)bind every hotkey. All share one keyboard hook."""
+        if self.hotkey is None:
+            self.hotkey = HotkeyManager()
+        self.hotkey.clear()
+
+        trig = self.cfg.trigger
+        wanted: list[tuple[str, str, object, object]] = []
+        if trig.mode in ("ptt", "both"):
+            wanted.append(("ptt", trig.hotkey, self._on_ptt_press, self._on_ptt_release))
+        if trig.clipboard_hotkey:
+            wanted.append(("clipboard", trig.clipboard_hotkey,
+                           self.speak_clipboard, None))
+        if trig.stop_hotkey:
+            wanted.append(("stop", trig.stop_hotkey, self.stop_speaking, None))
+
+        for name, combo, press, release in wanted:
+            try:
+                self.hotkey.bind(name, combo, press, release)
+            except ValueError as exc:
+                self._emit("error", f"Bad {name} hotkey {combo!r}: {exc}")
+
+        for a, b in self.hotkey.conflicts():
+            self._emit("warning", f"Hotkeys {a} and {b} use the same combination")
+
+        if self.hotkey.bound:
             self.hotkey.start()
-        except ValueError as exc:
-            self._emit("error", f"Bad hotkey {self.cfg.trigger.hotkey!r}: {exc}")
-            self.hotkey = None
+        else:
+            self.hotkey.stop()
 
     def _spawn(self, fn, name: str) -> None:
         t = threading.Thread(target=fn, name=f"v2t-{name}", daemon=True)
@@ -423,12 +445,15 @@ class Pipeline:
         if not text:
             return
 
+        self._cancel_speech.clear()
         self._set_state(State.SPEAKING)
         first = True
         self.sink.begin_utterance()
+        cancelled = False
         try:
             for chunk in self.tts.stream(text):
-                if not self._running.is_set():
+                if not self._running.is_set() or self._cancel_speech.is_set():
+                    cancelled = True
                     return
                 if first and _t0 is not None:
                     self._emit(
@@ -439,7 +464,36 @@ class Pipeline:
                 self.sink.write(chunk)
         finally:
             self.sink.end_utterance()
-        self.sink.wait_drain()
+            if cancelled:
+                # Drop whatever is still queued, or the cancelled sentence keeps
+                # playing for as long as the buffer holds.
+                self.sink.clear()
+        if not cancelled:
+            self.sink.wait_drain()
+
+    def stop_speaking(self) -> bool:
+        """Cut off speech in progress. Returns False if nothing was playing."""
+        if self.sink is None:
+            return False
+        speaking = self.state is State.SPEAKING or self.sink.active
+        self._cancel_speech.set()
+        self.sink.clear()
+        if speaking:
+            self._emit("info", "Speech stopped")
+        return speaking
+
+    def speak_clipboard(self) -> str:
+        """Speak the clipboard. Returns what was said, or "" if there was nothing."""
+        from . import clipboard
+
+        text = clipboard.get_speakable_text()
+        if not text:
+            self._emit("warning", "Clipboard is empty or holds no text")
+            return ""
+        preview = text if len(text) <= 60 else text[:57] + "..."
+        self._emit("clipboard", preview)
+        self.say_text(text)
+        return text
 
     def say_text(self, text: str) -> None:
         """Speak text supplied directly by the UI, off the worker thread."""

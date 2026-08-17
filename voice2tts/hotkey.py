@@ -85,6 +85,155 @@ def describe(text: str) -> str:
     return ""
 
 
+class Binding:
+    """One combo and what it does."""
+
+    def __init__(self, name: str, spec: HotkeySpec,
+                 on_press: Callable[[], None],
+                 on_release: Callable[[], None] | None = None):
+        self.name = name
+        self.spec = spec
+        self.on_press = on_press
+        self.on_release = on_release
+        self.engaged = False
+
+
+class HotkeyManager:
+    """Several hotkeys over a single keyboard hook.
+
+    One pynput Listener per hotkey would mean one low-level Windows keyboard hook
+    each, which adds input latency for the whole system and multiplies the risk of
+    anti-cheat software objecting. One hook, dispatched internally, costs the same
+    as the single hotkey did before.
+    """
+
+    def __init__(self) -> None:
+        self._bindings: dict[str, Binding] = {}
+        self._held_mods: set[str] = set()
+        self._lock = threading.Lock()
+        self._listener: keyboard.Listener | None = None
+
+    # -- registration ---------------------------------------------------------
+
+    def bind(self, name: str, hotkey: str, on_press: Callable[[], None],
+             on_release: Callable[[], None] | None = None) -> None:
+        """Add or replace a binding. Raises ValueError on an unparseable combo."""
+        spec = HotkeySpec(hotkey)  # parse first: a bad string must change nothing
+        with self._lock:
+            self._bindings[name] = Binding(name, spec, on_press, on_release)
+        log.info("hotkey %s bound to %s", name, spec)
+
+    def unbind(self, name: str) -> None:
+        with self._lock:
+            self._bindings.pop(name, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._bindings.clear()
+
+    @property
+    def bound(self) -> list[str]:
+        with self._lock:
+            return sorted(self._bindings)
+
+    def conflicts(self) -> list[tuple[str, str]]:
+        """Pairs of bindings that share a combo, so the UI can warn about them."""
+        with self._lock:
+            items = list(self._bindings.values())
+        clashes = []
+        for i, a in enumerate(items):
+            for b in items[i + 1:]:
+                if (a.spec.modifiers == b.spec.modifiers
+                        and str(a.spec).lower() == str(b.spec).lower()):
+                    clashes.append((a.name, b.name))
+        return clashes
+
+    # -- lifecycle ------------------------------------------------------------
+
+    def start(self) -> None:
+        if self._listener is not None:
+            return
+        self._listener = keyboard.Listener(
+            on_press=self._handle_press, on_release=self._handle_release
+        )
+        self._listener.daemon = True
+        self._listener.start()
+
+    def stop(self) -> None:
+        listener, self._listener = self._listener, None
+        if listener is not None:
+            listener.stop()
+        with self._lock:
+            engaged = [b for b in self._bindings.values() if b.engaged]
+            for b in engaged:
+                b.engaged = False
+            self._held_mods.clear()
+        # Release anything still held, or push-to-talk would stay latched on.
+        for b in engaged:
+            if b.on_release:
+                _safe(b.on_release)
+
+    # -- listener thread ------------------------------------------------------
+
+    def _canonical(self, key):
+        try:
+            return self._listener.canonical(key) if self._listener else key
+        except Exception:  # noqa: BLE001 - canonical() can throw on exotic keys
+            return key
+
+    def _handle_press(self, key) -> None:
+        raw = key
+        key = self._canonical(key)
+        mod = _modifier_name(raw) or _modifier_name(key)
+        fire = []
+        with self._lock:
+            if mod:
+                self._held_mods.add(mod)
+            for b in self._bindings.values():
+                if (not b.engaged
+                        and (b.spec.matches_main(key) or b.spec.matches_main(raw))
+                        and b.spec.modifiers <= self._held_mods):
+                    b.engaged = True
+                    fire.append(b.on_press)
+        for fn in fire:
+            _safe(fn)
+
+    def _handle_release(self, key) -> None:
+        raw = key
+        key = self._canonical(key)
+        mod = _modifier_name(raw) or _modifier_name(key)
+        fire = []
+        with self._lock:
+            if mod:
+                self._held_mods.discard(mod)
+            for b in self._bindings.values():
+                if not b.engaged:
+                    continue
+                is_main = b.spec.matches_main(key) or b.spec.matches_main(raw)
+                if is_main or (mod and mod in b.spec.modifiers):
+                    b.engaged = False
+                    if b.on_release:
+                        fire.append(b.on_release)
+        for fn in fire:
+            _safe(fn)
+
+
+def _modifier_name(key) -> str | None:
+    for name, keys in _MODIFIER_KEYS.items():
+        if key in keys:
+            return name
+    return None
+
+
+def _safe(fn: Callable[[], None]) -> None:
+    # Anything escaping here kills the listener thread, silently disabling every
+    # hotkey at once, so callbacks are always wrapped.
+    try:
+        fn()
+    except Exception:
+        log.exception("hotkey callback failed")
+
+
 class HotkeyListener:
     """Fires on_press when the combo completes and on_release when it breaks."""
 

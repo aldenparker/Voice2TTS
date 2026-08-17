@@ -88,6 +88,13 @@ class TrayApp:
                 ),
             ),
             pystray.MenuItem("Speak text...", lambda _i, _it: self._post(self._speak_prompt)),
+            pystray.MenuItem("Speak clipboard",
+                             lambda _i, _it: self._post(self._speak_clipboard)),
+            pystray.MenuItem(
+                "Stop speaking",
+                lambda _i, _it: self._post(self._stop_speaking),
+                enabled=lambda _it: self.pipeline.state is State.SPEAKING,
+            ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Settings...", lambda _i, _it: self._post(self._open_settings)),
             pystray.MenuItem("Setup wizard...", lambda _i, _it: self._post(self._open_wizard)),
@@ -158,6 +165,20 @@ class TrayApp:
         text = simpledialog.askstring("Speak text", "Text to speak:", parent=self.root)
         if text:
             self.pipeline.say_text(text)
+
+    def _speak_clipboard(self) -> None:
+        if not self.pipeline.running:
+            messagebox.showinfo("Voice2TTS", "Start the pipeline first.")
+            return
+        if not self.pipeline.speak_clipboard():
+            messagebox.showinfo(
+                "Voice2TTS", "The clipboard is empty, or holds something that is "
+                "not text."
+            )
+
+    def _stop_speaking(self) -> None:
+        if self.pipeline.running:
+            self.pipeline.stop_speaking()
 
     def _open_settings(self) -> None:
         if self.settings is not None and self.settings.winfo_exists():

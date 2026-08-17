@@ -459,23 +459,45 @@ class SettingsWindow(tk.Toplevel):
         self.latch_var = tk.BooleanVar()
         ttk.Checkbutton(
             tab, text="Tap to toggle instead of holding", variable=self.latch_var
-        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 10))
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(4, 6))
+
+        ttk.Label(tab, text="Speak clipboard").grid(row=8, column=0, sticky="w")
+        self.clip_hotkey_var = tk.StringVar()
+        ttk.Entry(tab, textvariable=self.clip_hotkey_var, width=24).grid(
+            row=8, column=1, sticky="w", padx=6, pady=2
+        )
+        ttk.Label(tab, text="blank = off", foreground="#666").grid(
+            row=8, column=2, sticky="w")
+
+        ttk.Label(tab, text="Stop speaking").grid(row=9, column=0, sticky="w")
+        self.stop_hotkey_var = tk.StringVar()
+        ttk.Entry(tab, textvariable=self.stop_hotkey_var, width=24).grid(
+            row=9, column=1, sticky="w", padx=6, pady=2
+        )
+        ttk.Label(tab, text="blank = off", foreground="#666").grid(
+            row=9, column=2, sticky="w")
+
+        self.extra_hotkey_error = ttk.Label(tab, text="", foreground="#a33")
+        self.extra_hotkey_error.grid(row=10, column=0, columnspan=3, sticky="w",
+                                     pady=(0, 8))
+        for var in (self.clip_hotkey_var, self.stop_hotkey_var):
+            var.trace_add("write", lambda *_: self._validate_hotkey())
 
         self.vad_header = ttk.Label(tab, text="Detection tuning", font=("", 9, "bold"))
-        self.vad_header.grid(row=8, column=0, columnspan=3, sticky="w", pady=(6, 4))
+        self.vad_header.grid(row=11, column=0, columnspan=3, sticky="w", pady=(6, 4))
 
         # Tracked so they can be greyed out in push-to-talk mode, where VAD is unused.
         self._vad_widgets: list[tk.Widget] = []
         self.vad_threshold = self._slider(
-            tab, 9, "Sensitivity threshold", 0.05, 0.95, "{:.2f}", vad_only=True
+            tab, 12, "Sensitivity threshold", 0.05, 0.95, "{:.2f}", vad_only=True
         )
         self.vad_silence = self._slider(
-            tab, 10, "End-of-speech silence (ms)", 200, 2000, "{:.0f}", vad_only=True
+            tab, 13, "End-of-speech silence (ms)", 200, 2000, "{:.0f}", vad_only=True
         )
         self.vad_min_speech = self._slider(
-            tab, 11, "Minimum speech (ms)", 50, 1000, "{:.0f}", vad_only=True
+            tab, 14, "Minimum speech (ms)", 50, 1000, "{:.0f}", vad_only=True
         )
-        self.preroll = self._slider(tab, 12, "Pre-roll kept (ms)", 0, 1000, "{:.0f}")
+        self.preroll = self._slider(tab, 15, "Pre-roll kept (ms)", 0, 1000, "{:.0f}")
         tab.columnconfigure(1, weight=1)
 
     def _slider(self, parent, row, label, lo, hi, fmt, vad_only: bool = False) -> tk.DoubleVar:
@@ -505,7 +527,29 @@ class SettingsWindow(tk.Toplevel):
     def _validate_hotkey(self) -> bool:
         err = describe(self.hotkey_var.get())
         self.hotkey_error.config(text=err)
-        return not err
+
+        problems = []
+        combos = {"push-to-talk": self.hotkey_var.get().strip()}
+        for label, var in (("speak clipboard", self.clip_hotkey_var),
+                           ("stop speaking", self.stop_hotkey_var)):
+            value = var.get().strip()
+            if not value:
+                continue  # blank means disabled, not invalid
+            extra = describe(value)
+            if extra:
+                problems.append(f"{label}: {extra}")
+            combos[label] = value
+
+        # Two actions on one combination means the second silently never fires.
+        seen: dict[str, str] = {}
+        for label, combo in combos.items():
+            key = combo.lower()
+            if key and key in seen:
+                problems.append(f"{seen[key]} and {label} use the same combination")
+            seen[key] = label
+
+        self.extra_hotkey_error.config(text="; ".join(problems))
+        return not err and not problems
 
     def _record_hotkey(self) -> None:
         self.record_btn.config(text="Press keys...")
@@ -1101,6 +1145,8 @@ class SettingsWindow(tk.Toplevel):
 
         self.mode_var.set(c.trigger.mode)
         self.hotkey_var.set(c.trigger.hotkey)
+        self.clip_hotkey_var.set(c.trigger.clipboard_hotkey)
+        self.stop_hotkey_var.set(c.trigger.stop_hotkey)
         self.latch_var.set(c.trigger.ptt_latch)
         self.vad_threshold.set(c.vad.threshold)
         self.vad_silence.set(c.vad.min_silence_ms)
@@ -1144,6 +1190,8 @@ class SettingsWindow(tk.Toplevel):
 
         c.trigger.mode = self.mode_var.get()
         c.trigger.hotkey = self.hotkey_var.get().strip()
+        c.trigger.clipboard_hotkey = self.clip_hotkey_var.get().strip()
+        c.trigger.stop_hotkey = self.stop_hotkey_var.get().strip()
         c.trigger.ptt_latch = self.latch_var.get()
         c.trigger.preroll_ms = int(self.preroll.get())
 
@@ -1172,12 +1220,9 @@ class SettingsWindow(tk.Toplevel):
         self.pipeline.apply_audio_changes()
         self.pipeline.apply_tts_changes()
         self.pipeline.apply_vad_changes()
+        # set_mode rebinds every hotkey from the config, so the clipboard and stop
+        # combos are picked up along with the push-to-talk one.
         self.pipeline.set_mode(self.cfg.trigger.mode)
-        if self.pipeline.hotkey is not None:
-            try:
-                self.pipeline.hotkey.set_hotkey(self.cfg.trigger.hotkey)
-            except ValueError as exc:
-                messagebox.showerror("Hotkey", str(exc), parent=self)
 
     def _save(self) -> None:
         if not self._collect():
