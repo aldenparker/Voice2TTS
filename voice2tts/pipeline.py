@@ -23,6 +23,7 @@ from enum import Enum
 
 import numpy as np
 
+from . import devices
 from .capture import MicCapture
 from .config import Config
 from .devices import resolve_input
@@ -39,6 +40,10 @@ _STOP = object()  # queue sentinel
 
 # Consecutive VAD errors before we stop trying and fall back to push-to-talk.
 _MAX_VAD_FAILURES = 5
+
+# How often to retry a microphone that has gone away. Long enough not to thrash
+# PortAudio, short enough that replugging feels like it just works.
+_RECOVERY_INTERVAL_S = 3.0
 
 
 @dataclass
@@ -378,28 +383,37 @@ class Pipeline:
         max_ptt = int(self.cfg.trigger.max_utterance_s * SAMPLE_RATE / WINDOW)
         vad_failures = 0
         capture_reported = False
+        next_recovery = 0.0
 
         while self._running.is_set():
             # The capture stream can die under us -- unplugging a USB microphone is
             # the usual cause. Report it once and keep the thread alive so the user
             # can pick a different device without restarting.
-            if (
-                self.capture is not None
-                and not capture_reported
-                and not self.capture.check_alive()
-            ):
-                capture_reported = True
-                self._emit(
-                    "error",
-                    f"Microphone stopped: {self.capture.failure_reason}. "
-                    "Pick another device in Settings -> Audio.",
-                )
+            if self.capture is not None and not self.capture.check_alive():
+                if not capture_reported:
+                    capture_reported = True
+                    self._emit(
+                        "error",
+                        f"Microphone stopped: {self.capture.failure_reason}. "
+                        "Waiting for it to come back...",
+                    )
+                    self._set_state(State.IDLE)
+                # Unplugging a USB microphone should not mean restarting the app.
+                # Retry on a timer rather than only when something else pokes us.
+                if time.monotonic() >= next_recovery:
+                    next_recovery = time.monotonic() + _RECOVERY_INTERVAL_S
+                    if self._try_recover_capture():
+                        capture_reported = False
+                continue
             try:
                 window = self.capture.queue.get(timeout=0.2)
             except queue.Empty:
                 continue
-            except AttributeError:  # capture torn down mid-loop
-                break
+            except AttributeError:
+                # capture is momentarily absent; _running is the authority on
+                # whether we should stop, so wait rather than killing the thread.
+                time.sleep(0.05)
+                continue
 
             if self._ptt_engaged.is_set():
                 with self._ptt_lock:
@@ -454,6 +468,34 @@ class Pipeline:
                 self._set_state(State.IDLE)
             if utterance is not None:
                 self._submit(utterance)
+
+    def _try_recover_capture(self) -> bool:
+        """Reopen the microphone if it is available again. Returns True on success."""
+        wanted = self.cfg.audio.input_match
+        # Re-enumerate: a device that was unplugged and replugged gets a new
+        # PortAudio index, so the cached list would point at nothing.
+        devices.refresh()
+        device = resolve_input(wanted, all_apis=not self.cfg.audio.prefer_wasapi)
+        if device is None:
+            return False
+
+        try:
+            fresh = MicCapture(device)
+            fresh.start()
+        except Exception as exc:  # noqa: BLE001 - the device may still be settling
+            log.debug("microphone not ready yet: %s", exc)
+            return False
+
+        # Swap in one assignment and only then close the old one. Nulling
+        # self.capture first would make the segmenter loop see None and treat it as
+        # teardown, killing the thread mid-recovery.
+        old, self.capture = self.capture, fresh
+        if old is not None:
+            old.stop()
+        if self.segmenter is not None:
+            self.segmenter.reset()
+        self._emit("info", f"Microphone reconnected: {device.name}")
+        return True
 
     def _worker_loop(self) -> None:
         while self._running.is_set():

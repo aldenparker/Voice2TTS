@@ -272,6 +272,45 @@ def test_substitutions() -> None:
           p.substituter.apply("tell aiden") == "tell aiden")
 
 
+def test_device_recovery() -> None:
+    """A microphone that goes away must be retried, not written off."""
+    print("\n[device recovery]")
+    from voice2tts import devices as devices_mod
+    from voice2tts.capture import MicCapture
+    from voice2tts.config import Config
+    from voice2tts.pipeline import Pipeline
+
+    device = devices_mod.default_input() or next(iter(devices_mod.list_inputs()), None)
+    if device is None:
+        check("an input device exists to test with", False, "none found")
+        return
+
+    cap = MicCapture(device)
+    check("an unstarted capture is not 'failed'", cap.check_alive() and not cap.failed)
+
+    cap.start()
+    check("starts healthy", cap.check_alive() and not cap.failed)
+    # Simulate the callback silently stopping, which is how an unplugged USB device
+    # usually presents -- PortAudio does not always raise.
+    cap._last_callback -= 99
+    check("silence is detected as failure", not cap.check_alive())
+    check("failure reason recorded", bool(cap.failure_reason), cap.failure_reason)
+    cap.stop()
+
+    cap2 = MicCapture(device)
+    cap2._mark_failed("test")
+    check("failure is sticky until reopened", not cap2.check_alive())
+
+    p = Pipeline(Config())
+    p.capture = cap2
+    recovered = p._try_recover_capture()
+    check("recovery reopens the device", recovered)
+    check("a live capture replaces the dead one",
+          p.capture is not cap2 and not p.capture.failed)
+    check("recovered capture reports alive", p.capture.check_alive())
+    p.capture.stop()
+
+
 def test_history_and_review() -> None:
     print("\n[history + review]")
     from voice2tts.config import Config
@@ -971,6 +1010,8 @@ def main() -> int:
     test_hotkey_manager()
     test_clipboard()
     test_substitutions()
+    if not no_audio:
+        test_device_recovery()
     test_history_and_review()
     test_vad()
     test_stt()
