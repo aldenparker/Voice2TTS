@@ -373,6 +373,54 @@ def test_theme() -> None:
     finally:
         root.destroy()
 
+    # Every mode must leave comboboxes usable. The dropdown is a plain Tk listbox
+    # coloured only through the option database, and a bad value there does not
+    # raise at apply() time -- it fails when the user clicks the arrow, which no
+    # amount of widget-construction testing catches. Post one for real.
+    def dropdown_opens(mode: str) -> str:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            theme.apply(root, mode)
+            win = tk.Toplevel(root)
+            combo = ttk.Combobox(win, values=["one", "two"])
+            combo.pack()
+            root.update()
+            try:
+                root.tk.call("ttk::combobox::Post", str(combo))
+                root.update()
+                return ""
+            except tk.TclError as exc:
+                return str(exc)
+        finally:
+            root.destroy()
+
+    for mode in theme.MODES:
+        error = dropdown_opens(mode)
+        check(f"dropdowns open in {mode} mode", not error, error)
+
+    # Switching away from a repainted theme must restore usable colours, not
+    # leave the empty strings that broke every picker in 0.5.1.
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        theme.apply(root, "dark")
+        theme.apply(root, "native")
+        win = tk.Toplevel(root)
+        combo = ttk.Combobox(win, values=["one", "two"])
+        combo.pack()
+        root.update()
+        try:
+            root.tk.call("ttk::combobox::Post", str(combo))
+            root.update()
+            switched = ""
+        except tk.TclError as exc:
+            switched = str(exc)
+    finally:
+        root.destroy()
+    check("dropdowns still open after switching back to native",
+          not switched, switched)
+
 
 def test_release_is_gated() -> None:
     """A tag must not be able to publish without the checks having run.

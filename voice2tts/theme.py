@@ -115,7 +115,7 @@ def apply(root: tk.Misc, mode: str = "native") -> Palette:
                     break
                 except tk.TclError:
                     continue
-        _clear_listbox_colours(root)
+        _restore_listbox_colours(root)
         return palette
 
     try:
@@ -184,14 +184,36 @@ def apply(root: tk.Misc, mode: str = "native") -> Palette:
     return palette
 
 
-def _clear_listbox_colours(root: tk.Misc) -> None:
-    """Undo combobox dropdown colours set by a previous light/dark apply()."""
-    for option in ("background", "foreground", "selectBackground",
-                   "selectForeground"):
+# The combobox dropdown is a plain Tk listbox reached only through the option
+# database. Windows' own colours are used by name so the dropdown follows a
+# high-contrast or custom system theme; the hex values are a fallback for anywhere
+# those names are not recognised.
+_NATIVE_LISTBOX = (
+    ("background", "SystemWindow", NATIVE.field),
+    ("foreground", "SystemWindowText", NATIVE.text),
+    ("selectBackground", "SystemHighlight", NATIVE.selection),
+    ("selectForeground", "SystemHighlightText", NATIVE.text),
+)
+
+
+def _restore_listbox_colours(root: tk.Misc) -> None:
+    """Put the combobox dropdown back to the platform colours.
+
+    These options are sticky, so a previous light/dark apply() has to be undone
+    explicitly. Setting them to "" does NOT unset them -- it stores an empty string
+    that Tk then fails to parse, and every dropdown in the application silently
+    stops opening with 'unknown color name ""'. Always write a real colour.
+    """
+    for option, system_name, fallback in _NATIVE_LISTBOX:
+        colour = system_name
         try:
-            root.option_add(f"*TCombobox*Listbox.{option}", "")
+            root.winfo_rgb(system_name)
         except tk.TclError:
-            pass
+            colour = fallback
+        try:
+            root.option_add(f"*TCombobox*Listbox.{option}", colour)
+        except tk.TclError as exc:
+            log.debug("could not restore %s: %s", option, exc)
 
 
 def style_text_widget(widget: tk.Text, palette: Palette) -> None:
