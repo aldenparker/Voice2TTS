@@ -159,6 +159,21 @@ multi-speaker model and shaping the result.
 25 of 174 catalogue voices are multi-speaker; `en_US-libritts-high` has 904
 speakers and `en_GB-vctk-medium` has 109.
 
+**A designed voice is baked, not patched** (`spike/07_bake_blend.py`). Phase 0
+turned `sid` into a graph input, which would have left the designer needing its
+own synthesis path — and so its own sentence splitting, streaming, phonemizer
+and previews. Freezing the blended vector as an initializer instead produces an
+ordinary single-speaker voice: `PiperVoice` loads it, the library lists it, and
+profiles work on it, with no engine changes. Baking speaker 0 reproduces speaker
+0 to 1.3e-6, and the file gets *smaller*, since the speaker table is dropped.
+
+**Voices cannot be compared as waveforms.** The duration predictor is
+conditioned on the speaker embedding, so two speakers say the same sentence in
+different numbers of samples even with both noise terms pinned to zero. A
+sample-domain difference measures the misalignment, not the timbre — which is
+how the first run of the spike managed to call a correct blend "beyond both
+parents". Comparison uses a long-term average spectrum.
+
 - [ ] **Similarity map** — project speaker embeddings to 2D (UMAP or PCA),
       scatter plot, click to blend nearest neighbours by inverse distance,
       audition on hover. Projection precomputed and shipped as a small array.
