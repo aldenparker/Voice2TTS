@@ -45,6 +45,12 @@ if not vad_model.exists():
     raise SystemExit("Missing Silero VAD. Run: python scripts/fetch_models.py --bundle")
 datas.append((str(vad_model), "models/vad"))
 
+# The Voice Studio's recording script. ~75 KB of text; absence is survivable
+# (prompts.py falls back to a built-in set) so this does not abort the build.
+prompts = PROJECT / "models" / "prompts" / "arctic.txt"
+if prompts.exists():
+    datas.append((str(prompts), "models/prompts"))
+
 voice_files = sorted((PROJECT / "models" / "voices").glob("*.onnx*"))
 if not voice_files:
     raise SystemExit("No Piper voices. Run: python scripts/fetch_models.py --bundle")

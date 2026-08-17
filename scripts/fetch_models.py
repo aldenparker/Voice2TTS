@@ -68,6 +68,52 @@ def fetch_voice(name: str, force: bool = False) -> None:
     print(f"  saved to {VOICES_DIR / name}.onnx")
 
 
+# festvox.org serves no HTTPS at all -- port 443 is actively refused -- so this
+# can only be fetched over plain HTTP. The file is therefore COMMITTED rather than
+# downloaded at build time: 75 KB is small enough to version, it makes builds
+# reproducible and offline, and it removes an unauthenticated download from the
+# path of something we ship inside the installer. The checksum below is what was
+# reviewed; refreshing verifies against it.
+PROMPTS_URL = "http://festvox.org/cmu_arctic/cmuarctic.data"
+PROMPTS_SHA256 = "60e3d9a4dc33732c9100baadd747312bdc1a200fc891766507397289753a25c7"
+PROMPTS_DEST = ROOT / "models" / "prompts" / "arctic.txt"
+
+
+def fetch_prompts(force: bool = False) -> None:
+    """Refresh the CMU ARCTIC prompt list. Normally unnecessary -- it is committed.
+
+    1132 phonetically balanced sentences drawn from out-of-copyright Project
+    Gutenberg texts, published by CMU for building voices.
+    """
+    if PROMPTS_DEST.exists() and not force:
+        count = sum(1 for ln in PROMPTS_DEST.read_text(encoding="utf-8").splitlines()
+                    if ln.strip())
+        print(f"Prompt corpus present ({count} prompts, committed to the repo)")
+        return
+
+    import hashlib
+
+    PROMPTS_DEST.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading the CMU ARCTIC prompt list from {PROMPTS_URL}...")
+    tmp = PROMPTS_DEST.with_suffix(".tmp")
+    urllib.request.urlretrieve(PROMPTS_URL, tmp, _progress("arctic.txt"))
+
+    digest = hashlib.sha256(tmp.read_bytes()).hexdigest()
+    if digest != PROMPTS_SHA256:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(
+            "Prompt corpus checksum mismatch -- refusing it.\n"
+            f"  expected {PROMPTS_SHA256}\n  got      {digest}\n"
+            "This is fetched over plain HTTP, so a mismatch means either the "
+            "upstream file changed or the download was tampered with. Review the "
+            "content before updating PROMPTS_SHA256."
+        )
+    tmp.replace(PROMPTS_DEST)
+    count = sum(1 for ln in PROMPTS_DEST.read_text(encoding="utf-8").splitlines()
+                if ln.strip())
+    print(f"  {count} prompts, checksum verified -> {PROMPTS_DEST}")
+
+
 def fetch_whisper(model: str) -> None:
     """Pull the CTranslate2 weights into our cache ahead of first run."""
     print(f"Fetching Whisper model {model} (this can take a few minutes)...")
@@ -125,6 +171,7 @@ def main() -> int:
 
     if args.bundle:
         fetch_vad(args.force)
+        fetch_prompts(args.force)
         for voice in BUNDLED_VOICES:
             fetch_voice(voice, args.force)
         bundle_whisper(BUNDLED_WHISPER, args.force)

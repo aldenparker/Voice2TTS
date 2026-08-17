@@ -81,6 +81,32 @@ def load_sample_16k() -> np.ndarray | None:
     return audio
 
 
+def speech_like(seconds: float, rate: int, room_tone: float = 0.001) -> np.ndarray:
+    """A signal shaped like speech: word-length bursts separated by gaps.
+
+    A continuous tone is not a stand-in for speech. The quality checks work by
+    comparing the loud and quiet parts of a clip, and a tone has neither -- it
+    reads as both "noisy" (never quiet) and "silent" (never above its own level),
+    which tells us nothing about whether the checks are right.
+    """
+    t = np.arange(int(rate * seconds), dtype=np.float32) / rate
+    voiced = (np.sin(2 * np.pi * 130 * t)
+              + 0.5 * np.sin(2 * np.pi * 260 * t)
+              + 0.25 * np.sin(2 * np.pi * 390 * t))
+    voiced *= 0.3 / np.abs(voiced).max()
+
+    envelope = np.zeros_like(t)
+    pos = 0.0
+    while pos < seconds:                      # ~0.35 s words, ~0.12 s gaps
+        envelope[int(pos * rate):int(min(pos + 0.35, seconds) * rate)] = 1.0
+        pos += 0.47
+    ramp = np.hanning(max(2, int(rate * 0.02)))
+    envelope = np.convolve(envelope, ramp / ramp.sum(), mode="same")
+
+    tone = np.random.default_rng(0).standard_normal(len(t)) * room_tone
+    return (voiced * envelope + tone).astype(np.float32)
+
+
 def check(name: str, ok: bool, detail: str = "") -> None:
     global passed, failed
     if ok:
@@ -420,6 +446,181 @@ def test_theme() -> None:
         root.destroy()
     check("dropdowns still open after switching back to native",
           not switched, switched)
+
+
+def test_prompts() -> None:
+    print("\n[prompts]")
+    from voice2tts import prompts
+
+    corpus = prompts.load()
+    check("corpus loads", len(corpus) > 100, f"{len(corpus)} prompts")
+    check("prompts have text", all(p.text for p in corpus))
+    check("prompts have keys", len({p.key for p in corpus}) == len(corpus),
+          "keys unique")
+
+    parsed = prompts.parse('( arctic_a0001 "Author of the danger trail." )')
+    check("festival format parsed",
+          len(parsed) == 1 and parsed[0].key == "arctic_a0001"
+          and parsed[0].text == "Author of the danger trail.", str(parsed))
+    plain = prompts.parse("Just a plain sentence.\n; a comment\n\nAnother one.")
+    check("plain text accepted, comments skipped", len(plain) == 2, str(plain))
+
+    p = prompts.Prompt("k", "one two three four five six")
+    check("word count", p.words == 6)
+    check("estimate scales with rate",
+          p.estimated_seconds(100) > p.estimated_seconds(200))
+
+    # The estimate must be driven by measured speech, not a sentence count:
+    # a slow reader needs far fewer sentences for the same audio.
+    check("rate defaults until there is data",
+          prompts.measured_wpm(10, 5.0) == prompts.DEFAULT_WPM)
+    fast = prompts.measured_wpm(600, 120.0)
+    slow = prompts.measured_wpm(200, 120.0)
+    check("measured rate reflects the speaker", fast > slow, f"{fast:.0f} vs {slow:.0f}")
+    check("absurd rates are clamped",
+          60.0 <= prompts.measured_wpm(100000, 60.0) <= 320.0)
+
+    count_slow, secs_slow = prompts.remaining_estimate(corpus, set(), 600.0, wpm=90)
+    count_fast, secs_fast = prompts.remaining_estimate(corpus, set(), 600.0, wpm=220)
+    check("a slower reader needs fewer sentences", count_slow < count_fast,
+          f"{count_slow} vs {count_fast} for 10 minutes")
+    check("estimate reaches the target", secs_slow >= 600.0 and secs_fast >= 600.0)
+    check("nothing needed when the target is met",
+          prompts.remaining_estimate(corpus, set(), 0.0) == (0, 0.0))
+
+    done = {p.key for p in corpus[:50]}
+    offered = prompts.next_prompts(corpus, done, 600.0)
+    check("recorded prompts are not offered again",
+          not any(p.key in done for p in offered),
+          f"{len(offered)} offered, {len(done)} already done")
+    check("the next prompt follows what was recorded",
+          offered and offered[0].key == corpus[50].key,
+          offered[0].key if offered else "none")
+    # Skipping prompts must not shorten the session: the target is an amount of
+    # audio, so the same time still has to be read either way.
+    _, secs_done = prompts.remaining_estimate(corpus, done, 600.0)
+    check("skipping still reaches the target", secs_done >= 600.0, f"{secs_done:.0f}s")
+
+    # Reading in file order means the first session is all one author's prose.
+    order_a = [p.key for p in prompts.shuffled(corpus, seed=1)[:10]]
+    order_b = [p.key for p in prompts.shuffled(corpus, seed=1)[:10]]
+    check("shuffle is deterministic", order_a == order_b)
+    check("shuffle actually reorders",
+          order_a != [p.key for p in corpus[:10]])
+
+
+def test_dataset() -> None:
+    print("\n[dataset]")
+    import tempfile
+
+    from voice2tts import dataset
+
+    rate = dataset.TARGET_RATE
+    speech = speech_like(2.0, rate)
+
+    stats, issues = dataset.analyse(speech, rate, "one two three four five")
+    check("a clean clip passes", not issues, str(issues))
+    check("speech is measured as mostly speech",
+          stats["speech_fraction"] > 0.5, f"{stats['speech_fraction']:.2f}")
+
+    _s, issues = dataset.analyse(speech * 0.001, rate)
+    check("silence is rejected", any("quiet" in i for i in issues), str(issues))
+
+    _s, issues = dataset.analyse(np.ones(rate, dtype=np.float32), rate)
+    check("clipping is caught", any("clipping" in i for i in issues), str(issues))
+
+    _s, issues = dataset.analyse(speech[:1000], rate)
+    check("a too-short clip is caught", any("short" in i for i in issues), str(issues))
+
+    noisy = speech + (np.random.randn(len(speech)) * 0.08).astype(np.float32)
+    _s, issues = dataset.analyse(noisy, rate)
+    check("background noise is caught", any("noisy" in i for i in issues), str(issues))
+
+    mostly_silence = np.concatenate(
+        [np.zeros(int(rate * 3), dtype=np.float32), speech_like(1.0, rate)])
+    _s, issues = dataset.analyse(mostly_silence, rate)
+    check("mostly-silence is caught", any("silence" in i for i in issues), str(issues))
+
+    # Quiet-but-clean must pass where an absolute noise floor would have failed it,
+    # and loud-but-hissy must fail where an absolute floor would have passed it.
+    _s, issues = dataset.analyse(speech * 0.15, rate)
+    check("a quiet clean clip is accepted", not issues, str(issues))
+    loud_hiss = speech_like(2.0, rate, room_tone=0.05) * 3.0
+    _s, issues = dataset.analyse(np.clip(loud_hiss, -0.99, 0.99), rate)
+    check("a loud hissy clip is rejected", any("noisy" in i for i in issues),
+          str(issues))
+
+    _s, issues = dataset.analyse(speech, rate, " ".join(["word"] * 40))
+    check("a clip far shorter than its prompt is caught",
+          any("cut off" in i for i in issues), str(issues))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "voice"
+        session = dataset.RecordingSession("Test Voice", root=root,
+                                           target_minutes=1.0)
+        session.add("p1", "First sentence here.", speech, rate)
+        session.add("p2", "Second sentence here.", speech, rate)
+        check("clips stored", len(session.usable) == 2, session.summary())
+        check("audio written", len(list(session.audio_dir.glob("*.wav"))) == 2)
+        check("duration accumulates", session.seconds > 3.5, f"{session.seconds:.1f}s")
+
+        # Recording a prompt again should replace it, not train on it twice.
+        session.add("p1", "First sentence here.", speech, rate)
+        check("re-recording replaces the take", len(session.clips) == 2,
+              f"{len(session.clips)} clips")
+
+        session.add("bad", "A rejected clip.", speech * 0.0005, rate)
+        check("unusable clips are kept but excluded",
+              len(session.clips) == 3 and len(session.usable) == 2,
+              session.summary())
+
+        # Resuming must survive closing the app mid-session.
+        reloaded = dataset.RecordingSession.load(root)
+        check("session reloads", len(reloaded.clips) == 3
+              and abs(reloaded.seconds - session.seconds) < 0.01)
+        check("target survives the round-trip",
+              abs(reloaded.target_seconds - 60.0) < 0.01)
+
+        csv_path = session.prepare()
+        rows = csv_path.read_text(encoding="utf-8").strip().splitlines()
+        check("metadata written", len(rows) == 2, f"{len(rows)} rows")
+        check("pipe-delimited wav|text",
+              all(r.count("|") == 1 and r.startswith("wav/") for r in rows),
+              rows[0] if rows else "")
+        check("only usable clips exported",
+              "bad" not in csv_path.read_text(encoding="utf-8"))
+        exported = list((csv_path.parent / "wav").glob("*.wav"))
+        check("audio copied beside the csv", len(exported) == 2, str(len(exported)))
+
+        _audio, out_rate = dataset.read_wav(exported[0])
+        check("exported audio is at the training rate", out_rate == dataset.TARGET_RATE,
+              f"{out_rate} Hz")
+
+        # Imported files take the same path and the same checks.
+        source = Path(tmp) / "imported.wav"
+        dataset.write_wav(source, speech, rate)
+        clip = session.import_file(source, "An imported line.")
+        check("import works", clip.ok and clip.source == "imported", str(clip.issues))
+
+        empty = dataset.RecordingSession("Empty", root=Path(tmp) / "empty")
+        try:
+            empty.prepare()
+            check("preparing an empty session is refused", False, "no error")
+        except RuntimeError:
+            check("preparing an empty session is refused", True)
+
+    # The checks above all use a signal I built to satisfy them, which proves only
+    # that they are self-consistent. Real speech is the thing they have to accept.
+    real = load_sample_16k()
+    if real is None:
+        print("  SKIP  real speech passes the quality checks (no sample available)")
+    else:
+        import soxr
+
+        resampled = soxr.resample(real, 16000, rate, quality="VHQ").astype(np.float32)
+        stats, issues = dataset.analyse(resampled, rate)
+        check("real speech passes the quality checks", not issues,
+              f"{issues} {stats}")
 
 
 def test_studio_gate() -> None:
@@ -1357,6 +1558,8 @@ def main() -> int:
     if not no_audio:
         test_device_recovery()
     test_theme()
+    test_prompts()
+    test_dataset()
     test_studio_gate()
     test_release_is_gated()
     test_winget_manifests()

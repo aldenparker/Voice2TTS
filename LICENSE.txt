@@ -46,6 +46,12 @@ Piper / piper-tts (GPL-3.0-or-later) - https://github.com/OHF-Voice/piper1-gpl
   https://huggingface.co/rhasspy/piper-voices
   Bundled voices: en_US-lessac-medium, en_US-amy-medium, en_US-ryan-high.
 
+CMU ARCTIC prompt list - http://festvox.org/cmu_arctic/
+  The recording script used by the Voice Studio. 1132 phonetically balanced
+  sentences selected by CMU from out-of-copyright Project Gutenberg texts, and
+  published by them for building speech databases. Text only; no audio from the
+  ARCTIC databases is included.
+
 faster-whisper (MIT) - https://github.com/SYSTRAN/faster-whisper
 CTranslate2 (MIT) - https://github.com/OpenNMT/CTranslate2
 ONNX Runtime (MIT) - https://github.com/microsoft/onnxruntime
