@@ -35,6 +35,16 @@ class PiperEngine:
 
         self.rate = int(self.voice.config.sample_rate)
         self.num_speakers = int(getattr(self.voice.config, "num_speakers", 1) or 1)
+
+        # A voice built in the Voice Designer carries an effects chain beside it.
+        # Ordinary voices have no sidecar and pay nothing for this.
+        from .designer import read_design
+
+        self.design = read_design(path)
+        if self.design is not None and self.design.is_neutral:
+            self.design = None
+        if self.design is not None:
+            log.info("voice has a design chain: %s", self.design.to_dict())
         self.apply(cfg)
 
     @staticmethod
@@ -54,6 +64,10 @@ class PiperEngine:
     def apply(self, cfg: TtsConfig) -> None:
         """Update synthesis parameters without reloading the model."""
         self.cfg = cfg
+        # The designer's macros never touch length_scale. An earlier version
+        # compensated the `size` resampling by asking the model to speak faster,
+        # which does not work: Piper's duration is not proportional to
+        # length_scale. The chain restores its own timing instead.
         self.syn = self._SynthesisConfig(
             # Single-speaker models reject an explicit speaker id.
             speaker_id=cfg.speaker_id if self.num_speakers > 1 else None,
@@ -92,6 +106,14 @@ class PiperEngine:
                 # back at the wrong pitch, so trust the chunk and re-tag.
                 log.warning("chunk rate %d != voice rate %d", chunk.sample_rate, self.rate)
                 self.rate = int(chunk.sample_rate)
+            if self.design is not None:
+                # Per sentence rather than per utterance, so the first sentence
+                # still starts playing while the second is being generated. The
+                # cost is that the reverb tail does not cross a sentence
+                # boundary, which is inaudible at these tail lengths.
+                from . import dsp
+
+                audio = dsp.apply(audio, self.rate, self.design)
             yield audio
 
     def synth(self, text: str) -> np.ndarray:

@@ -2,6 +2,11 @@
 faster-whisper==1.2.1        # STT (CTranslate2 backend)
 piper-tts==1.7.0             # TTS
 onnxruntime==1.28.0          # Silero VAD + Piper
+onnx==1.20.0                 # Voice Studio only: reads and rewrites the speaker
+                             # table when baking a designed voice. onnxruntime
+                             # cannot substitute -- it drops unused initializers,
+                             # so the speaker embeddings are not readable from a
+                             # loaded session.
 sounddevice==0.5.5           # PortAudio bindings
 soxr==1.1.0                  # streaming resampler
 numpy>=2.0

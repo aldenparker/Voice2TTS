@@ -623,6 +623,469 @@ def test_dataset() -> None:
               f"{issues} {stats}")
 
 
+def test_dsp() -> None:
+    """The designer's effects chain, measured rather than assumed.
+
+    Every macro is checked for the direction it claims. That is not pedantry:
+    `size` shipped inverted in the first draft -- "larger" made the voice
+    brighter and shorter -- and nothing but a measurement catches that.
+    """
+    print("\n[dsp]")
+    from voice2tts import dsp
+
+    rate = 22050
+    real = load_sample_16k()
+    if real is None:
+        print("  SKIP  dsp checks (no speech sample available)")
+        return
+    import soxr
+
+    audio = soxr.resample(real, 16000, rate, quality="VHQ").astype(np.float32)
+
+    def centroid(x: np.ndarray) -> float:
+        frame = 1024
+        usable = len(x) // frame * frame
+        if not usable:
+            return 0.0
+        frames = x[:usable].reshape(-1, frame) * np.hanning(frame)
+        mag = np.abs(np.fft.rfft(frames, axis=1))
+        freqs = np.fft.rfftfreq(frame, 1.0 / rate)
+        total = mag.sum(axis=1)
+        live = total > 1e-9
+        return float(((mag * freqs).sum(axis=1)[live] / total[live]).mean())
+
+    def crest(x: np.ndarray) -> float:
+        rms = float(np.sqrt((x.astype(np.float64) ** 2).mean()))
+        return float(np.abs(x).max()) / rms if rms > 0 else 0.0
+
+    base_centroid, base_crest = centroid(audio), crest(audio)
+
+    neutral = dsp.apply(audio, rate, dsp.Design())
+    check("a neutral design changes nothing at all",
+          np.array_equal(neutral, audio))
+    check("neutral is recognised as neutral", dsp.Design().is_neutral)
+    check("any macro makes it non-neutral", not dsp.Design(warmth=0.1).is_neutral)
+
+    # SIZE. A larger speaker is lower and longer, not higher and shorter.
+    big = dsp.apply(audio, rate, dsp.Design(size=1.0))
+    small = dsp.apply(audio, rate, dsp.Design(size=-1.0))
+    check("a larger size lowers the voice", centroid(big) < base_centroid,
+          f"{centroid(big):.0f} < {base_centroid:.0f} Hz")
+    check("a smaller size raises it", centroid(small) > base_centroid,
+          f"{centroid(small):.0f} > {base_centroid:.0f} Hz")
+    # ...and takes just as long to say. Resampling alone would make a deeper
+    # voice a slower one; the stretch puts the timing back.
+    for label, shaped in (("larger", big), ("smaller", small)):
+        drift = abs(len(shaped) - len(audio)) / len(audio)
+        check(f"a {label} voice still takes the same time to speak", drift < 0.02,
+              f"{drift * 100:.1f}% drift ({len(shaped)} vs {len(audio)})")
+
+    ratio = dsp.Design(size=1.0).size_ratio
+    check("a larger voice resamples downward", ratio < 1.0, f"{ratio:.4f}")
+    check("size stays within a fifth either way",
+          0.79 < ratio < 1.0 and 1.0 < dsp.Design(size=-1.0).size_ratio < 1.27,
+          f"{ratio:.3f} / {dsp.Design(size=-1.0).size_ratio:.3f}")
+
+    # Pitch is the thing size is actually for, so measure it rather than infer
+    # it from the spectral centroid.
+    def pitch(x: np.ndarray) -> float:
+        frame, hop = 2048, 512
+        low, high = int(rate / 350), int(rate / 70)
+        found = []
+        for start in range(0, len(x) - frame, hop):
+            seg = x[start:start + frame].astype(np.float64)
+            if np.sqrt((seg ** 2).mean()) < 0.02:
+                continue
+            seg = seg - seg.mean()
+            auto = np.correlate(seg, seg, mode="full")[frame - 1:]
+            if auto[0] <= 0:
+                continue
+            auto = auto / auto[0]
+            band = auto[low:high]
+            if not len(band):
+                continue
+            peak = int(np.argmax(band)) + low
+            if auto[peak] > 0.3:
+                found.append(rate / peak)
+        return float(np.median(found)) if found else 0.0
+
+    base_pitch = pitch(audio)
+    check("the sample has a measurable pitch", 60 < base_pitch < 350,
+          f"{base_pitch:.0f} Hz")
+    for label, shaped, expect in (("larger", big, base_pitch * ratio),
+                                  ("smaller", small,
+                                   base_pitch * dsp.Design(size=-1.0).size_ratio)):
+        got = pitch(shaped)
+        check(f"a {label} voice shifts pitch by the resampling ratio",
+              abs(got - expect) / expect < 0.05,
+              f"{got:.0f} Hz, expected {expect:.0f}")
+
+    # The stretcher on its own.
+    stretched = dsp.time_stretch(audio, rate, 1.25)
+    check("time stretching lengthens by the factor",
+          abs(len(stretched) / len(audio) - 1.25) < 0.05,
+          f"x{len(stretched) / len(audio):.3f}")
+    check("and leaves the pitch alone",
+          abs(pitch(stretched) - base_pitch) / base_pitch < 0.05,
+          f"{pitch(stretched):.0f} vs {base_pitch:.0f} Hz")
+    check("a factor of one is a passthrough",
+          np.array_equal(dsp.time_stretch(audio, rate, 1.0), audio))
+    check("a fragment too short to splice still comes back",
+          len(dsp.time_stretch(np.zeros(64, dtype=np.float32), rate, 1.2)) > 0)
+
+    # TONE.
+    warm = dsp.apply(audio, rate, dsp.Design(warmth=1.0))
+    bright = dsp.apply(audio, rate, dsp.Design(brightness=1.0))
+    check("warmth darkens", centroid(warm) < base_centroid,
+          f"{centroid(warm):.0f} < {base_centroid:.0f} Hz")
+    check("brightness brightens", centroid(bright) > base_centroid,
+          f"{centroid(bright):.0f} > {base_centroid:.0f} Hz")
+    check("tone does not change the length",
+          len(warm) == len(bright) == len(audio))
+
+    # BREATH. Some lift in the top end, but breath rather than hiss: the first
+    # attempt took the centroid from 2330 Hz to 6300, which is not a voice.
+    breathy = dsp.apply(audio, rate, dsp.Design(breathiness=1.0))
+    lift = centroid(breathy) / base_centroid
+    check("breathiness adds air", lift > 1.15, f"x{lift:.2f}")
+    check("but does not drown the voice in hiss", lift < 2.0, f"x{lift:.2f}")
+
+    # DYNAMICS. Evenness means a lower crest factor. An RMS detector actually
+    # made this worse, which is why the compressor follows peaks.
+    even = dsp.apply(audio, rate, dsp.Design(dynamics=1.0))
+    check("dynamics evens the level out", crest(even) < base_crest * 0.8,
+          f"crest {crest(even):.2f} from {base_crest:.2f}")
+    check("and does not just turn it down",
+          abs(float(np.abs(even).max()) - float(np.abs(audio).max())) < 0.05,
+          f"peak {float(np.abs(even).max()):.3f} vs {float(np.abs(audio).max()):.3f}")
+
+    # SPACE adds a tail.
+    roomy = dsp.apply(audio, rate, dsp.Design(space=1.0))
+    check("space adds a tail", len(roomy) > len(audio),
+          f"+{len(roomy) - len(audio)} samples")
+
+    # Nothing in the chain may leave the signal outside full scale.
+    hot = dsp.apply(audio * 0.99, rate,
+                    dsp.Design(size=0.5, warmth=1.0, brightness=1.0,
+                               breathiness=1.0, dynamics=1.0, space=1.0))
+    check("the chain never clips", float(np.abs(hot).max()) <= 1.0,
+          f"peak {float(np.abs(hot).max()):.4f}")
+
+    # This runs on the live call path, so it has to be cheap.
+    full = dsp.Design(size=0.5, warmth=0.4, brightness=0.3, breathiness=0.3,
+                      dynamics=0.5, space=0.3)
+    start = time.perf_counter()
+    dsp.apply(audio, rate, full)
+    cost = (time.perf_counter() - start) / (len(audio) / rate)
+    check("the whole chain runs far faster than realtime", cost < 0.1,
+          f"{cost * 100:.1f}% of realtime")
+
+    check("macros are clamped to their range",
+          dsp.Design(warmth=5.0).clamped().warmth == 1.0
+          and dsp.Design(size=-9.0).clamped().size == -1.0)
+    check("empty audio survives the chain",
+          len(dsp.apply(np.zeros(0, dtype=np.float32), rate,
+                        dsp.Design(space=1.0))) == 0)
+
+
+def test_designer() -> None:
+    """Blending, projection and baking. Offline: no model needed."""
+    print("\n[designer]")
+    from voice2tts import designer
+
+    rng = np.random.default_rng(7)
+    table = rng.standard_normal((40, 16)).astype(np.float32)
+
+    mid = designer.blend(table, {0: 1.0, 1: 1.0})
+    check("an even blend is the midpoint",
+          np.allclose(mid, (table[0] + table[1]) / 2, atol=1e-6))
+    check("weights are normalised, not summed",
+          np.allclose(designer.blend(table, {0: 5.0, 1: 5.0}), mid, atol=1e-6),
+          "doubling every weight must not move the result")
+    check("a single speaker blends to itself",
+          np.allclose(designer.blend(table, {3: 0.7}), table[3], atol=1e-6))
+    check("blend width matches the table", designer.blend(table, {0: 1.0}).size == 16)
+
+    for weights, why in (({}, "no speakers"), ({0: 0.0}, "all-zero weights")):
+        try:
+            designer.blend(table, weights)
+            check(f"a blend with {why} is refused", False, "no error")
+        except ValueError:
+            check(f"a blend with {why} is refused", True)
+    try:
+        designer.blend(table, {99: 1.0})
+        check("a speaker outside the model is refused", False, "no error")
+    except IndexError:
+        check("a speaker outside the model is refused", True)
+
+    coords = designer.project(table)
+    check("projection is 2D, one point per speaker", coords.shape == (40, 2),
+          str(coords.shape))
+    check("projection fits the unit square", float(np.abs(coords).max()) <= 1.0001,
+          f"{float(np.abs(coords).max()):.3f}")
+    check("projection is deterministic",
+          np.array_equal(coords, designer.project(table)),
+          "the same model must always give the same map")
+    check("projection spreads the speakers out",
+          float(coords[:, 0].std()) > 0.05 and float(coords[:, 1].std()) > 0.05,
+          f"sd {coords[:, 0].std():.3f}, {coords[:, 1].std():.3f}")
+
+    # Clicking exactly on a speaker gives that speaker, not a near-miss blend
+    # weighted by a division by almost zero.
+    x, y = float(coords[5][0]), float(coords[5][1])
+    vector, weights = designer.from_map(table, coords, x, y)
+    check("clicking a speaker selects it exactly", weights == {5: 1.0}, str(weights))
+    check("and returns that speaker's own vector",
+          np.allclose(vector, table[5], atol=1e-6))
+
+    between = (coords[5] + coords[6]) / 2
+    _v, weights = designer.from_map(table, coords, float(between[0]),
+                                    float(between[1]), count=3)
+    check("clicking between speakers blends several", len(weights) == 3, str(weights))
+    check("nearer speakers weigh more",
+          max(weights.values()) > min(weights.values()))
+
+    found = designer.nearest(table, table[9], count=3)
+    check("nearest finds the speaker itself first",
+          found[0][0] == 9 and found[0][1] < 1e-5, str(found[:1]))
+    check("and returns them in order",
+          [d for _i, d in found] == sorted(d for _i, d in found))
+
+    recipe = designer.Recipe(base_voice="x", weights={"a": 3.0, "b": 1.0})
+    check("a recipe normalises to one",
+          abs(sum(recipe.normalised().values()) - 1.0) < 1e-9)
+    check("recipe keeps the proportions",
+          abs(recipe.normalised()["a"] - 0.75) < 1e-9)
+    check("an all-zero recipe is empty rather than a division by zero",
+          designer.Recipe(weights={"a": 0.0}).is_empty)
+
+
+def _toy_multispeaker(path: Path, speakers: int = 4, width: int = 8) -> np.ndarray:
+    """A minimal ONNX model shaped like the part of VITS the designer touches.
+
+    Real Piper voices are 70-120 MB and only downloaded on demand, so baking
+    could not otherwise be tested anywhere the models are absent -- which
+    includes CI. This has the same three features that matter: an `emb_g` table,
+    a Gather indexing it with `sid`, and something downstream consuming the
+    result.
+    """
+    import json
+
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    table = (np.arange(speakers * width, dtype=np.float32)
+             .reshape(speakers, width) / 10.0)
+    graph = helper.make_graph(
+        nodes=[
+            helper.make_node("Gather", ["emb_g.weight", "sid"], ["gathered"],
+                             name="lookup", axis=0),
+            helper.make_node("Identity", ["gathered"], ["output"], name="out"),
+        ],
+        name="toy",
+        inputs=[helper.make_tensor_value_info("sid", TensorProto.INT64, [1])],
+        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT,
+                                               [1, width])],
+        initializer=[numpy_helper.from_array(table, name="emb_g.weight")],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 15)])
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+    onnx.save(model, str(path))
+    path.with_suffix(".onnx.json").write_text(
+        json.dumps({"num_speakers": speakers, "sample_rate": 22050,
+                    "speaker_id_map": {f"p{i}": i for i in range(speakers)}}),
+        encoding="utf-8")
+    return table
+
+
+def test_baking() -> None:
+    """Freezing a blend into a model, which is what makes a designed voice."""
+    print("\n[baking]")
+    import json
+    import tempfile
+
+    import onnxruntime as ort
+
+    from voice2tts import designer
+
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp) / "base.onnx"
+        table = _toy_multispeaker(base)
+
+        read_back = designer.speaker_table(base)
+        check("the speaker table is readable from a model",
+              np.allclose(read_back, table), str(read_back.shape))
+        check("speaker names come from the config",
+              designer.speaker_names(base.with_suffix(".onnx.json"), 4)
+              == ["p0", "p1", "p2", "p3"])
+        check("multi-speaker models are recognised",
+              designer.is_multi_speaker(base.with_suffix(".onnx.json")))
+
+        vector = designer.blend(table, {0: 1.0, 2: 1.0})
+        baked = designer.bake(base, base.with_suffix(".onnx.json"), vector,
+                              Path(tmp) / "designed.onnx", name="Test")
+
+        check("baked model exists", baked.is_file())
+        check("its config exists too", baked.with_suffix(".onnx.json").is_file(),
+              "a voice without its config loads and then speaks nonsense")
+        config = json.loads(baked.with_suffix(".onnx.json").read_text(encoding="utf-8"))
+        check("the baked voice reports one speaker", config["num_speakers"] == 1,
+              str(config["num_speakers"]))
+        check("and carries no speaker map", config["speaker_id_map"] == {})
+
+        session = ort.InferenceSession(str(baked),
+                                       providers=["CPUExecutionProvider"])
+        names = [i.name for i in session.get_inputs()]
+        check("sid is no longer an input", "sid" not in names, str(names))
+        check("nothing replaced it", names == [], str(names))
+
+        out = session.run(None, {})[0].reshape(-1)
+        check("the baked vector is what comes out",
+              np.allclose(out, vector, atol=1e-6), f"{out[:3]} vs {vector[:3]}")
+
+        # Baking a speaker must give that speaker back, or every designed voice
+        # is subtly not the thing that was auditioned.
+        for speaker in range(4):
+            solo = designer.bake(base, base.with_suffix(".onnx.json"),
+                                 table[speaker], Path(tmp) / f"s{speaker}.onnx")
+            got = ort.InferenceSession(
+                str(solo), providers=["CPUExecutionProvider"]).run(None, {})[0]
+            if not np.allclose(got.reshape(-1), table[speaker], atol=1e-6):
+                check("baking a speaker reproduces that speaker", False,
+                      f"speaker {speaker}")
+                break
+        else:
+            check("baking a speaker reproduces that speaker", True,
+                  "all 4 exact")
+
+        # The table is dead weight once a single vector is frozen in.
+        check("the speaker table is dropped from the baked model",
+              baked.stat().st_size < base.stat().st_size,
+              f"{baked.stat().st_size} < {base.stat().st_size} bytes")
+
+        try:
+            designer.bake(base, base.with_suffix(".onnx.json"),
+                          np.zeros(3, dtype=np.float32), Path(tmp) / "bad.onnx")
+            check("a wrongly sized embedding is refused", False, "no error")
+        except ValueError:
+            check("a wrongly sized embedding is refused", True)
+
+        # Single-speaker models have no space to move through.
+        plain = Path(tmp) / "plain.onnx"
+        plain.write_bytes(baked.read_bytes())
+        try:
+            designer.speaker_table(plain)
+            check("a single-speaker model is rejected", False, "no error")
+        except designer.NotMultiSpeaker:
+            check("a single-speaker model is rejected", True)
+
+        # The effects sidecar rides beside the model, not inside Piper's config.
+        from voice2tts.dsp import Design
+
+        check("a plain voice has no design", designer.read_design(baked) is None)
+        designer.write_design(baked, Design(warmth=0.4, size=-0.2), "Test")
+        loaded = designer.read_design(baked)
+        check("the design sidecar round-trips",
+              loaded and abs(loaded.warmth - 0.4) < 1e-4
+              and abs(loaded.size + 0.2) < 1e-4, str(loaded))
+        check("the sidecar sits outside Piper's config",
+              "warmth" not in baked.with_suffix(".onnx.json").read_text(
+                  encoding="utf-8"))
+
+        designer.design_path(baked).write_text("{ broken", encoding="utf-8")
+        check("a corrupt sidecar is ignored rather than fatal",
+              designer.read_design(baked) is None,
+              "a voice that speaks without effects beats one that will not speak")
+
+        check("removing a designed voice takes its files with it",
+              designer.remove_designed(baked) and not baked.exists()
+              and not baked.with_suffix(".onnx.json").exists())
+
+
+def test_v2tvoice() -> None:
+    """The recipe format: round trip, and refusing what it cannot read."""
+    print("\n[v2tvoice]")
+    import tempfile
+
+    from voice2tts import v2tvoice
+    from voice2tts.dsp import Design
+
+    voice = v2tvoice.DesignedVoice(
+        name="Narrator", base_voice="en_GB-vctk-medium",
+        speakers={"p225": 0.6, "p243": 0.4},
+        design=Design(size=0.2, warmth=0.35),
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = voice.save(Path(tmp) / "narrator")
+        check("saved with the right suffix", path.suffix == ".v2tvoice", path.name)
+        # The whole point of a recipe is that it is small enough to paste.
+        check("a recipe is tiny", path.stat().st_size < 1024,
+              f"{path.stat().st_size} bytes")
+        text = path.read_text(encoding="utf-8")
+        check("it is readable text naming the base voice",
+              "en_GB-vctk-medium" in text and "p225" in text)
+        check("it does not embed the model",
+              "onnx" not in text.lower() and path.stat().st_size < 4096)
+
+        back = v2tvoice.load(path)
+        check("round trip keeps the name", back.name == "Narrator")
+        check("round trip keeps the speakers", back.speakers == voice.speakers,
+              str(back.speakers))
+        check("round trip keeps the macros",
+              abs(back.design.size - 0.2) < 1e-4
+              and abs(back.design.warmth - 0.35) < 1e-4)
+
+        # A plain blend should not write six zeroes it does not need.
+        plain = v2tvoice.DesignedVoice(base_voice="b", speakers={"0": 1.0})
+        plain_path = plain.save(Path(tmp) / "plain")
+        check("a design with no effects writes no design section",
+              "[design]" not in plain_path.read_text(encoding="utf-8"))
+        check("and still loads", v2tvoice.load(plain_path).design.is_neutral)
+
+    for data, why in (
+        ({"name": "x", "base_voice": "b", "speakers": {"0": 1}}, "no schema"),
+        ({"schema": 99, "base_voice": "b", "speakers": {"0": 1}}, "a future schema"),
+        ({"schema": 1, "speakers": {"0": 1}}, "no base voice"),
+        ({"schema": 1, "base_voice": "b"}, "no speakers"),
+        ({"schema": 1, "base_voice": "b", "speakers": {}}, "an empty speaker list"),
+        ({"schema": 1, "base_voice": "b", "speakers": {"0": 0}}, "all-zero weights"),
+        ({"schema": 1, "base_voice": "b", "speakers": {"0": "loud"}},
+         "a non-numeric weight"),
+    ):
+        try:
+            v2tvoice.from_dict(data)
+            check(f"a recipe with {why} is refused", False, "no error")
+        except v2tvoice.UnreadableVoice:
+            check(f"a recipe with {why} is refused", True)
+
+    # Unknown macros from a newer build are ignored, not fatal.
+    forward = v2tvoice.from_dict({
+        "schema": 1, "base_voice": "b", "speakers": {"0": 1.0},
+        "design": {"warmth": 0.5, "rasp": 0.9},
+    })
+    check("an unknown macro does not stop the voice loading",
+          abs(forward.design.warmth - 0.5) < 1e-6)
+
+    names = ["p225", "p226", "p243"]
+    resolved = v2tvoice.resolve_speakers(
+        v2tvoice.DesignedVoice(base_voice="b", speakers={"p225": 0.6, "p243": 0.4}),
+        names)
+    check("speaker labels map to indices", resolved == {0: 0.6, 2: 0.4},
+          str(resolved))
+    numeric = v2tvoice.resolve_speakers(
+        v2tvoice.DesignedVoice(base_voice="b", speakers={"1": 1.0}), names)
+    check("bare indices still work", numeric == {1: 1.0}, str(numeric))
+    try:
+        v2tvoice.resolve_speakers(
+            v2tvoice.DesignedVoice(base_voice="b", speakers={"nobody": 1.0}), names)
+        check("a speaker the model lacks is refused, not dropped", False, "no error")
+    except v2tvoice.UnreadableVoice:
+        # Dropping it would silently change the voice into something the author
+        # never heard.
+        check("a speaker the model lacks is refused, not dropped", True)
+
+
 def test_checkpoints() -> None:
     """Locating base checkpoints. Offline: listings are real captured responses."""
     print("\n[checkpoints]")
@@ -1893,6 +2356,10 @@ def main() -> int:
     test_prompts()
     test_dataset()
     test_recorder()
+    test_dsp()
+    test_designer()
+    test_baking()
+    test_v2tvoice()
     test_checkpoints()
     test_training()
     test_studio_gate()
