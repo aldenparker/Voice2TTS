@@ -223,6 +223,32 @@ first; the updater ignores drafts. Requires `gh auth login`.
 and the Inno script both read it, and the updater compares against it. Don't set a
 version anywhere else.
 
+Pushing a tag is enough on its own; the Release workflow lints, runs both test
+suites, builds and publishes. It refuses tags it does not recognise, so a typo
+stops the release rather than shipping under the wrong version.
+
+### Beta releases
+
+Tag `vX.Y.Z-beta-N` to publish a pre-release:
+
+```bash
+git tag v0.6.0-beta-1 && git push origin v0.6.0-beta-1
+```
+
+`N` starts at 1 and goes up with each beta of that version. `__version__` stays
+at the release being worked towards — `0.6.0` — and the build stamps the full
+`0.6.0-beta-1` in, so an installed beta reports exactly which one it is.
+
+Betas are published as GitHub **pre-releases**. That is what keeps them away
+from everyone else: the in-app updater asks for `/releases/latest`, which skips
+pre-releases, so people on the stable build are never offered one. When `v0.6.0`
+proper is tagged, beta testers are offered it as an upgrade — pre-releases sort
+below the release they lead to.
+
+There is no in-app update from one beta to the next; install those by hand.
+Release notes come from the `[X.Y.Z]` CHANGELOG section if there is one, falling
+back to `[Unreleased]`.
+
 ## Everyday use
 
 | | |

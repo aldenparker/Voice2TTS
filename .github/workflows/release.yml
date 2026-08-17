@@ -30,7 +30,9 @@ jobs:
     timeout-minutes: 30
     outputs:
       version: ${{ steps.version.outputs.version }}
+      base: ${{ steps.version.outputs.base }}
       tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,6 +51,22 @@ jobs:
           $tag = "${{ github.event.inputs.tag || github.ref_name }}"
           $version = $tag.TrimStart("v")
 
+          # Two tag shapes, and nothing else. A typo like v0.6.0-beta1 or
+          # v0.6.0-rc-1 would otherwise be treated as a normal release and go
+          # out to everyone as the latest stable build.
+          #   v0.6.0          -> release
+          #   v0.6.0-beta-1   -> pre-release, beta 1 of the coming 0.6.0
+          if ($version -match '^(\d+\.\d+\.\d+)$') {
+            $base = $Matches[1]
+            $prerelease = 'false'
+          } elseif ($version -match '^(\d+\.\d+\.\d+)-beta-(\d+)$') {
+            $base = $Matches[1]
+            $prerelease = 'true'
+            if ([int]$Matches[2] -lt 1) { throw "Beta numbering starts at 1, got $tag" }
+          } else {
+            throw "Tag $tag is not vX.Y.Z or vX.Y.Z-beta-N"
+          }
+
           # Parsed with PowerShell rather than an inline python -c: nesting quotes
           # inside a double-quoted PowerShell string needs backtick escapes, not
           # backslashes, and getting that wrong is a parse error at job start.
@@ -56,15 +74,17 @@ jobs:
           if (-not $found) { throw "Could not find __version__ in voice2tts/__init__.py" }
           $declared = $found.Matches[0].Groups[1].Value
 
-          # The updater compares the tag against __version__. If they disagree, the
-          # published build would not recognise itself as the release, so stop here
-          # rather than ship something that can never be updated from.
-          if ($version -ne $declared) {
-            throw "Tag $tag says $version but voice2tts/__init__.py says $declared. Bump the version and re-tag."
+          # __version__ tracks the release being worked towards, so a beta of
+          # 0.6.0 is cut from a tree that already says 0.6.0. The build stamps
+          # the full tag in, so an installed beta still reports which beta it is.
+          if ($base -ne $declared) {
+            throw "Tag $tag targets $base but voice2tts/__init__.py says $declared. Bump the version and re-tag."
           }
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "Releasing $tag (version $version)"
+          "version=$version"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "base=$base"             | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$tag"               | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "prerelease=$prerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Releasing $tag (version $version, prerelease $prerelease)"
 
       - name: Install ruff
         run: pip install ruff
@@ -126,6 +146,24 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 
+      # build.ps1 -Version only names the installer; it does not touch the code.
+      # Without this an installed beta would report itself as the plain release,
+      # so a tester could not tell which beta they were running and the updater
+      # could not tell it was behind.
+      - name: Stamp the version into the build
+        shell: pwsh
+        run: |
+          $version = "${{ needs.verify.outputs.version }}"
+          $path = "voice2tts/__init__.py"
+          $text = Get-Content $path -Raw
+          $stamped = [regex]::Replace(
+            $text, '(?m)^__version__\s*=\s*"[^"]+"', "__version__ = `"$version`"")
+          if ($stamped -eq $text -and $version -ne "${{ needs.verify.outputs.base }}") {
+            throw "Could not stamp $version into $path"
+          }
+          Set-Content $path $stamped -Encoding utf8 -NoNewline
+          Write-Host "Building as $version"
+
       - name: Build installer
         shell: pwsh
         run: .\build.ps1 -Python "$env:pythonLocation\python.exe" -Version "${{ needs.verify.outputs.version }}"
@@ -159,16 +197,23 @@ jobs:
           # Built by concatenating SINGLE-quoted parts. In a double-quoted PowerShell
           # string "$(" opens a subexpression, so a lookahead like "$(?=...)" is a
           # parse error rather than a regex.
+          # A beta has no changelog section of its own, so fall back to the
+          # section for the release it leads to, then to Unreleased. Otherwise
+          # every beta would ship with auto-generated commit-list notes.
           $changelog = Get-Content CHANGELOG.md -Raw
-          $pattern = '(?ms)^## \[' + [regex]::Escape($version) + '\].*?(?=^## \[|\z)'
-          $match = [regex]::Match($changelog, $pattern)
-          if ($match.Success) {
-            $match.Value.Trim() | Out-File $notesFile -Encoding utf8
-            $notesArg = @("--notes-file", $notesFile)
-            Write-Host "Using CHANGELOG section for $version"
-          } else {
-            $notesArg = @("--generate-notes")
-            Write-Host "No CHANGELOG section for $version; generating notes"
+          $notesArg = @("--generate-notes")
+          foreach ($heading in @($version, "${{ needs.verify.outputs.base }}", "Unreleased")) {
+            $pattern = '(?ms)^## \[' + [regex]::Escape($heading) + '\].*?(?=^## \[|\z)'
+            $match = [regex]::Match($changelog, $pattern)
+            if ($match.Success) {
+              $match.Value.Trim() | Out-File $notesFile -Encoding utf8
+              $notesArg = @("--notes-file", $notesFile)
+              Write-Host "Using CHANGELOG section [$heading]"
+              break
+            }
+          }
+          if ($notesArg[0] -eq "--generate-notes") {
+            Write-Host "No CHANGELOG section found; generating notes"
           }
 
           # GitHub Actions runs pwsh with $ErrorActionPreference = 'stop'. Redirecting
@@ -180,12 +225,21 @@ jobs:
           $exists = ($LASTEXITCODE -eq 0)
           $ErrorActionPreference = $prev
 
+          # --prerelease keeps a beta out of the API's "latest release", which is
+          # the endpoint the in-app updater asks. That is what stops a beta being
+          # offered to everyone running the stable build; it is not cosmetic.
+          $flags = @()
+          if ("${{ needs.verify.outputs.prerelease }}" -eq "true") {
+            $flags += "--prerelease"
+            Write-Host "Publishing $tag as a pre-release"
+          }
+
           if ($exists) {
             Write-Host "Release $tag already exists; replacing its assets"
             gh release upload $tag $setup "$setup.sha256" --clobber
           } else {
             $ghArgs = @("release", "create", $tag, $setup, "$setup.sha256",
-                        "--title", "Voice2TTS $version") + $notesArg
+                        "--title", "Voice2TTS $version") + $notesArg + $flags
             gh @ghArgs
           }
           if ($LASTEXITCODE -ne 0) { throw "gh release failed with exit $LASTEXITCODE" }

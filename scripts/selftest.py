@@ -9,7 +9,9 @@ on. Does not touch the microphone.
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import subprocess
 import sys
 import time
 import wave
@@ -1508,6 +1510,29 @@ def test_release_is_gated() -> None:
     # against the commit that actually ships. 0.5.1 shipped with every dropdown
     # broken because the GUI suite was not part of the gate.
     check("verify runs the GUI test", "gui test" in verify_steps, verify_steps)
+    # Betas. The tag filter already matches them, so the danger is not that they
+    # fail to build -- it is that they build and publish as the latest stable
+    # release, and every user is offered one.
+    verify_job = jobs.get("verify", {})
+    resolve = next((s for s in verify_job.get("steps", [])
+                    if "version" in str(s.get("name", "")).lower()), {})
+    resolve_run = str(resolve.get("run", ""))
+    check("the tag shape is validated, not just trimmed",
+          "beta" in resolve_run and "not vX.Y.Z" in resolve_run,
+          "a typo like v0.6.0-beta1 must be rejected, not shipped as stable")
+    check("verify reports whether the tag is a pre-release",
+          "prerelease=" in resolve_run)
+
+    publish = " ".join(str(s.get("run", "")) for s in publisher.get("steps", []))
+    check("betas are published as pre-releases", "--prerelease" in publish,
+          "the updater reads /releases/latest, which skips pre-releases")
+    check("the pre-release flag is conditional, not always on",
+          "outputs.prerelease" in publish,
+          "a stable release must not be marked as a pre-release")
+    check("the build stamps the tag version into the code",
+          "__version__" in publish,
+          "otherwise an installed beta reports itself as the plain release")
+
     ci_steps = " ".join(name for job in ci.get("jobs", {}).values()
                         for name in step_names(job)).lower()
     for suite in ("self-test", "gui test"):
@@ -1759,6 +1784,183 @@ def test_tts_and_sink() -> None:
     sink.close()
 
 
+def _powershell() -> str | None:
+    """pwsh if present (what Actions uses), else Windows PowerShell, else None."""
+    return shutil.which("pwsh") or shutil.which("powershell")
+
+
+def _run_ps(script: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    shell = _powershell()
+    full = dict(os.environ, **(env or {}))
+    return subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120, env=full,
+    )
+
+
+_EXPRESSION = re.compile(r"\$\{\{[^}]*\}\}")
+
+
+def test_release_powershell() -> None:
+    """The workflows' PowerShell must parse, and tag resolution must be right.
+
+    Both halves exist because of how this fails otherwise: a workflow is not
+    compiled until it runs, and it only runs when a release is tagged. A stray
+    quote or a wrong regex is therefore discovered at the worst possible moment,
+    with a tag already pushed.
+    """
+    print("\n[release powershell]")
+    import tempfile
+
+    shell = _powershell()
+    if shell is None:
+        print("  SKIP  no PowerShell on this machine")
+        return
+    # Actions always uses pwsh (PowerShell 7). Falling back to Windows
+    # PowerShell 5.1 still catches syntax and logic errors, but the two differ
+    # in places -- notably "-Encoding utf8", which writes a BOM in 5.1 and none
+    # in 7 -- so it is worth knowing which one ran.
+    print(f"  (using {Path(shell).name})")
+
+    import yaml
+
+    workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+    check("workflows found", bool(workflows), str([w.name for w in workflows]))
+
+    # -- every pwsh block must parse -----------------------------------------
+    blocks: list[tuple[str, str, str]] = []
+    for path in workflows:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job_name, job in (data.get("jobs") or {}).items():
+            for step in job.get("steps", []):
+                if step.get("shell") == "pwsh" and step.get("run"):
+                    blocks.append((path.name, f"{job_name}/{step.get('name', '?')}",
+                                   step["run"]))
+    check("pwsh blocks found to check", len(blocks) >= 3, f"{len(blocks)} blocks")
+
+    broken = []
+    for source, where, body in blocks:
+        # ${{ }} is substituted by Actions before PowerShell ever sees it. A
+        # placeholder keeps the surrounding syntax intact while making the
+        # result parseable.
+        script = _EXPRESSION.sub("PLACEHOLDER", body)
+        probe = (
+            "$errors = $null; $tokens = $null;\n"
+            "[void][System.Management.Automation.Language.Parser]::ParseInput("
+            "$env:V2T_SCRIPT, [ref]$tokens, [ref]$errors)\n"
+            "if ($errors.Count) { $errors | ForEach-Object { $_.Message }; exit 1 }\n"
+        )
+        result = _run_ps(probe, {"V2T_SCRIPT": script})
+        if result.returncode != 0:
+            broken.append(f"{source}:{where}: {result.stdout.strip()[:160]}")
+    check("every pwsh block parses", not broken,
+          "; ".join(broken) if broken else f"{len(blocks)} blocks")
+
+    # -- tag resolution actually works ---------------------------------------
+    release = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8"))
+    resolve = next(
+        (s for s in release["jobs"]["verify"]["steps"]
+         if "version" in str(s.get("name", "")).lower() and s.get("run")), None)
+    check("the version resolution step is findable", resolve is not None)
+    if resolve is None:
+        return
+
+    import voice2tts
+
+    declared = voice2tts.__version__
+
+    def resolve_tag(tag: str) -> tuple[bool, dict]:
+        """Run the real step with a given tag. Returns (succeeded, outputs)."""
+        script = resolve["run"].replace(
+            "${{ github.event.inputs.tag || github.ref_name }}", tag)
+        script = _EXPRESSION.sub("", script)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_file = Path(tmp) / "out.txt"
+            out_file.touch()
+            result = _run_ps(
+                f"$ErrorActionPreference='Stop'\nSet-Location '{ROOT}'\n{script}",
+                {"GITHUB_OUTPUT": str(out_file)})
+            values = {}
+            # utf-8-sig: under Windows PowerShell 5.1 the first append writes a
+            # BOM, which would otherwise turn the key "version" into "
+            # version". Actions runs pwsh, where it does not happen; this is
+            # about the local fallback, not about the workflow.
+            for line in out_file.read_text(encoding="utf-8-sig").splitlines():
+                key, _, value = line.partition("=")
+                if key:
+                    values[key.strip()] = value.strip()
+            return result.returncode == 0, values
+
+    ok, outputs = resolve_tag(f"v{declared}")
+    check("a plain release tag resolves", ok and outputs.get("version") == declared,
+          str(outputs))
+    check("and is not marked as a pre-release",
+          outputs.get("prerelease") == "false", str(outputs))
+
+    ok, outputs = resolve_tag(f"v{declared}-beta-1")
+    check("a beta tag resolves", ok, str(outputs))
+    check("the beta keeps its full version",
+          outputs.get("version") == f"{declared}-beta-1", str(outputs))
+    check("the beta reports the release it targets",
+          outputs.get("base") == declared, str(outputs))
+    check("and IS marked as a pre-release",
+          outputs.get("prerelease") == "true",
+          "otherwise it becomes the latest stable release for every user")
+
+    ok, outputs = resolve_tag(f"v{declared}-beta-12")
+    check("beta numbers past nine work",
+          ok and outputs.get("version") == f"{declared}-beta-12", str(outputs))
+
+    # -- the build stamps the tag version into the code ----------------------
+    stamp = next((s for s in release["jobs"]["release"]["steps"]
+                  if "stamp" in str(s.get("name", "")).lower() and s.get("run")), None)
+    check("the stamping step is findable", stamp is not None,
+          "without it an installed beta reports the plain release version")
+    if stamp is not None:
+        def run_stamp(version: str, base: str) -> str:
+            script = (stamp["run"]
+                      .replace("${{ needs.verify.outputs.version }}", version)
+                      .replace("${{ needs.verify.outputs.base }}", base))
+            with tempfile.TemporaryDirectory() as tmp:
+                package = Path(tmp) / "voice2tts"
+                package.mkdir()
+                target = package / "__init__.py"
+                target.write_text(
+                    f'"""Doc."""\n\n__version__ = "{base}"\n'
+                    'DEFAULT_UPDATE_REPO = "aldenparker/Voice2TTS"\n',
+                    encoding="utf-8")
+                out = _run_ps(
+                    f"$ErrorActionPreference='Stop'\nSet-Location '{tmp}'\n{script}")
+                if out.returncode != 0:
+                    return f"FAILED: {(out.stderr or out.stdout).strip()[:200]}"
+                return target.read_text(encoding="utf-8-sig")
+
+        stamped = run_stamp(f"{declared}-beta-3", declared)
+        check("stamping writes the beta version",
+              f'__version__ = "{declared}-beta-3"' in stamped,
+              stamped.strip().replace("\n", " | ")[:120])
+        check("and leaves the rest of the file alone",
+              "DEFAULT_UPDATE_REPO" in stamped and stamped.count("__version__") == 1,
+              "a greedy replace would take the repo line with it")
+        plain = run_stamp(declared, declared)
+        check("stamping a plain release is a no-op it accepts",
+              f'__version__ = "{declared}"' in plain, plain[:80])
+
+    # Typos must stop the release, not quietly ship as stable.
+    for bad, why in (
+        (f"v{declared}-beta1", "missing the separator"),
+        (f"v{declared}-rc-1", "a channel that does not exist"),
+        (f"v{declared}-beta-0", "beta numbering starts at 1"),
+        (f"v{declared}-beta", "no beta number"),
+        ("v1.2", "not three components"),
+        ("v9.9.9", "does not match __version__"),
+    ):
+        ok, _out = resolve_tag(bad)
+        check(f"tag {bad!r} is rejected ({why})", not ok)
+
+
 def test_packaging_bits() -> None:
     """Offline checks for the cable, voices and GPU-pack modules."""
     print("\n[packaging]")
@@ -1975,9 +2177,30 @@ def test_updates() -> None:
         ("0.10.0", "0.9.0", True),      # numeric, not lexicographic
         ("v0.3.0", "0.2.0", True),      # tolerates a v prefix
         ("0.3.0-beta", "0.2.0", True),  # tolerates a pre-release suffix
+        ("0.2.0", "0.2", False),        # 0.2 and 0.2.0 are the same version
+        ("1.2.3+build7", "1.2.3", False),   # build metadata is not a version
     ]
     wrong = [(a, b, e) for a, b, e in cases if updater.is_newer(a, b) != e]
     check("version comparison", not wrong, f"failed: {wrong}" if wrong else f"{len(cases)} cases")
+
+    # Betas must order BELOW the release they lead to. Getting this wrong is
+    # invisible until a beta tester is silently stranded on the beta, because
+    # the app cannot tell it is behind the finished release.
+    beta_cases = [
+        ("0.6.0", "0.6.0-beta-1", True),        # the release supersedes its betas
+        ("0.6.0-beta-2", "0.6.0-beta-1", True),  # betas advance
+        ("0.6.0-beta-1", "0.6.0-beta-2", False),
+        ("0.6.0-beta-1", "0.6.0", False),       # a beta never supersedes a release
+        ("0.6.0-beta-1", "0.5.2", True),        # but it is ahead of the last one
+        ("0.6.0-beta-1", "0.6.0-beta-1", False),
+        ("0.6.0-beta-10", "0.6.0-beta-9", True),  # numeric, not lexicographic
+    ]
+    wrong = [(a, b, e) for a, b, e in beta_cases if updater.is_newer(a, b) != e]
+    check("betas order below the release they lead to", not wrong,
+          f"failed: {wrong}" if wrong else f"{len(beta_cases)} cases")
+    check("a full release outranks its own beta",
+          updater.parse_version("0.6.0") > updater.parse_version("0.6.0-beta-99"),
+          "no number of betas reaches the release")
 
     check("throttle blocks a recent check",
           not updater.should_check(time.time(), 24))
@@ -2380,6 +2603,7 @@ def main() -> int:
     test_training()
     test_studio_gate()
     test_release_is_gated()
+    test_release_powershell()
     test_winget_manifests()
     test_profiles()
     test_history_and_review()

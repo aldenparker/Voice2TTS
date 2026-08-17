@@ -65,13 +65,34 @@ class Release:
 
 
 def parse_version(text: str) -> tuple[int, ...]:
-    """Loose semver parse: 'v1.2.3' and '1.2.3-beta' both work.
+    """Loose semver parse: 'v1.2.3', '1.2.3-beta-4' and '1.2.3+build' all work.
 
-    Pre-release suffixes are ignored rather than ordered, so 1.2.3-beta and 1.2.3
-    compare equal. Good enough while there is one channel; revisit if betas ship.
+    Pre-releases sort BELOW the release they lead to, which is the semver rule
+    and the reason this is not just a tuple of the numbers:
+
+        1.2.2  <  1.2.3-beta-1  <  1.2.3-beta-2  <  1.2.3
+
+    Betas did not exist when this was first written and the suffix was simply
+    discarded, which made 1.2.3-beta-1 compare EQUAL to 1.2.3. The visible
+    consequence would have been a beta tester never being offered the finished
+    release, because the app could not tell it was behind.
+
+    The numeric part is padded to a fixed width so the pre-release marker is
+    always compared in the same position; without that, 1.2 and 1.2.0 would
+    order by length instead of by value.
     """
-    numbers = _VERSION_PART.findall(text.split("-")[0].split("+")[0])
-    return tuple(int(n) for n in numbers[:4]) or (0,)
+    head, _, _build = text.partition("+")
+    base, _, pre = head.partition("-")
+
+    numbers = [int(n) for n in _VERSION_PART.findall(base)][:4]
+    numbers += [0] * (4 - len(numbers))
+
+    if not pre:
+        # A release outranks every pre-release of the same numbers.
+        return (*numbers, 1, 0)
+    # "beta-2", "beta.2" and "rc2" all yield 2; an unnumbered "beta" yields 0.
+    found = _VERSION_PART.findall(pre)
+    return (*numbers, 0, int(found[0]) if found else 0)
 
 
 def is_newer(candidate: str, current: str = __version__) -> bool:
