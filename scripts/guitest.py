@@ -119,6 +119,43 @@ def main() -> int:
         win._use_voice()
         check("can select an installed voice", win.voice_var.get() == bundled, bundled)
 
+    # The Design tab tells people to fetch a multi-speaker voice from here, so
+    # here has to be able to show them which ones those are.
+    check("library has a speakers column",
+          "speakers" in win.lib_tree.cget("columns"),
+          str(win.lib_tree.cget("columns")))
+    check("bundled voices show no speaker count",
+          all(win.lib_tree.set(r, "speakers") == "" for r in rows),
+          "all three bundled voices are single-speaker")
+
+    from voice2tts.voices import VoiceEntry
+
+    win._catalogue = [
+        VoiceEntry(key="en_GB-vctk-medium", language="en_GB", name="vctk",
+                   quality="medium", language_label="English (GB)", size_mb=77.0,
+                   num_speakers=109),
+        VoiceEntry(key="en_US-amy-medium", language="en_US", name="amy",
+                   quality="medium", language_label="English (US)", size_mb=63.0),
+    ]
+    win.lib_lang.set("(all)")
+    win.lib_multi.set(False)
+    win._refresh_library()
+    check("catalogue rows show the speaker count",
+          win.lib_tree.set("en_GB-vctk-medium", "speakers") == "109",
+          win.lib_tree.set("en_GB-vctk-medium", "speakers"))
+    check("single-speaker voices leave it blank",
+          win.lib_tree.set("en_US-amy-medium", "speakers") == "")
+
+    win.lib_multi.set(True)
+    win._refresh_library()
+    filtered = win.lib_tree.get_children()
+    check("the multi-speaker filter narrows the list",
+          list(filtered) == ["en_GB-vctk-medium"], str(filtered))
+    win.lib_multi.set(False)
+    win._refresh_library()
+    check("clearing the filter restores the list",
+          len(win.lib_tree.get_children()) == 2)
+
     print("\n[words tab]")
     win._subs = []
     win._render_subs()

@@ -120,6 +120,72 @@ catalogue](https://huggingface.co/rhasspy/piper-voices) — 100+ voices across m
 languages — and downloads them into `%APPDATA%\Voice2TTS\voices`. Bundled voices
 can't be deleted; downloaded ones can.
 
+## Making your own voice
+
+Settings → **Studio**. Two ways to get a voice nobody else has, with very
+different costs.
+
+### Design one — minutes, no training
+
+**Studio → Design.** Some Piper voices contain many speakers rather than one:
+`en_GB-vctk-medium` has 109, `en_US-libritts-high` has 904. Every point *between*
+those speakers is also a voice, and the Design tab lets you go there.
+
+The speakers are laid out on a map by similarity. Click anywhere to blend the
+ones around that point, press **Listen**, and adjust. Six controls shape the
+result — Size, Warmth, Brightness, Breathiness, Dynamics and Space. Size moves
+pitch and formants together, so a larger voice is deeper without being slower.
+
+**Add to my voices** builds it into a real voice file. It then behaves like any
+other voice: pick it on the Voice tab, use it in profiles, hear it in Discord.
+
+You need a multi-speaker voice installed first. Tick **Multi-speaker only** in
+the Voice library to find one — the Speakers column shows how many each has.
+
+**Save recipe** writes a `.v2tvoice` file, a couple of hundred bytes of TOML:
+
+```toml
+schema = 1
+name = "Narrator"
+base_voice = "en_GB-vctk-medium"
+
+[speakers]
+p294 = 0.498
+p288 = 0.224
+
+[design]
+size = 0.35
+warmth = 0.3
+```
+
+It names the base voice rather than containing it, so it is small enough to
+paste into a chat message and carries none of anyone's model weights. Whoever
+opens it needs the same base voice, from the same place you got it.
+
+### Train one from your own voice — hours, needs an NVIDIA GPU
+
+**Studio → Record**, then **Train**. This fine-tunes a real model on recordings
+of you.
+
+*Setup* checks the machine and installs the training environment — PyTorch and
+the Piper trainer, several GB, kept separate from the app and removable from the
+same tab. The hardware check is advice, not a refusal: under-spec hardware runs
+out of memory rather than breaking anything, so there is an override.
+
+*Record* shows one sentence at a time from a phonetically balanced script and
+tracks how much usable audio you have banked. Each take is checked immediately —
+too quiet, clipping, background noise, cut off — because a fault found now costs
+thirty seconds and a fault found later costs the whole session. Existing audio
+files can be imported instead, behind a confirmation that the speaker agreed to
+it.
+
+*Train* picks a voice to start from, downloads its training checkpoint (about
+850 MB, resumable, with its licence shown first, since your voice inherits it),
+and runs. Expect a few hours on a good card. It can be stopped and picked up
+later — progress is saved every epoch — and **Listen** plays the current
+checkpoint mid-run, so a run that is going nowhere can be heard rather than
+waited out. **Export voice** installs the result.
+
 ## Updates
 
 Updates work out of the box — the repository is baked into the build, so there is
@@ -328,6 +394,16 @@ catalogue checks; `--no-e2e` skips the pipeline run.
       cable.py        virtual cable detection and assisted install
       voices.py       Piper catalogue and downloader
       gpupack.py      on-demand CUDA download
+      studioui.py     Voice Studio panels: record, train, design
+      studiopack.py   training environment install and hardware gate
+      recorder.py     clip capture at the microphone's own rate
+      prompts.py      the recording script and time estimates
+      dataset.py      clip quality checks and Piper dataset layout
+      training.py     runs piper.train, exports, auditions
+      checkpoints.py  base checkpoints to fine-tune from
+      designer.py     speaker blending, projection, baking
+      dsp.py          the designer's effects chain
+      v2tvoice.py     the .v2tvoice recipe format
       updater.py      GitHub release checks and one-click install
       cuda.py         Windows CUDA DLL preloading
       config.py       TOML-backed settings

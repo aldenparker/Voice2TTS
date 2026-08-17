@@ -694,9 +694,17 @@ class SettingsWindow(tk.Toplevel):
         entry.pack(side="left")
         self.lib_query.trace_add("write", lambda *_: self._refresh_library())
 
-        cols = ("voice", "language", "quality", "size", "state")
+        self.lib_multi = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="Multi-speaker only",
+                        variable=self.lib_multi,
+                        command=self._refresh_library).pack(side="left", padx=(12, 0))
+
+        # "Speakers" is here for the Voice Designer, which needs a voice with
+        # more than one. Without it the Design tab can only say "download a
+        # multi-speaker voice" and leave you guessing which of 174 those are.
+        cols = ("voice", "language", "quality", "size", "speakers", "state")
         self.lib_tree = ttk.Treeview(tab, columns=cols, show="headings", height=13)
-        for col, width in zip(cols, (170, 150, 70, 70, 90), strict=True):
+        for col, width in zip(cols, (170, 140, 65, 65, 70, 80), strict=True):
             self.lib_tree.heading(col, text=col.title())
             self.lib_tree.column(col, width=width, anchor="w")
         self.lib_tree.grid(row=1, column=0, columnspan=4, sticky="nsew")
@@ -724,7 +732,11 @@ class SettingsWindow(tk.Toplevel):
         self.lib_tree.delete(*self.lib_tree.get_children())
         for key in voices.installed_keys():
             state = "bundled" if key in voices.BUNDLED else "installed"
-            self.lib_tree.insert("", "end", iid=key, values=(key, "-", "-", "-", state))
+            # The speaker count is only known from the catalogue, so it stays
+            # blank until that is loaded. One value per column, or every field
+            # after the gap shows the wrong thing.
+            self.lib_tree.insert("", "end", iid=key,
+                                 values=(key, "-", "-", "-", "", state))
         self.lib_status.config(text="Load the catalogue to browse more voices.")
 
     def _load_catalogue(self) -> None:
@@ -759,6 +771,8 @@ class SettingsWindow(tk.Toplevel):
             language_prefix="" if lang in ("", "(all)") else lang,
             query=self.lib_query.get().strip(),
         )
+        if self.lib_multi.get():
+            entries = [e for e in entries if e.multi_speaker]
         self.lib_tree.delete(*self.lib_tree.get_children())
         for e in entries[:600]:  # the full catalogue is long; keep the widget usable
             if e.bundled:
@@ -769,7 +783,8 @@ class SettingsWindow(tk.Toplevel):
                 state = ""
             self.lib_tree.insert(
                 "", "end", iid=e.key,
-                values=(e.key, e.language_label, e.quality, f"{e.size_mb:.0f} MB", state),
+                values=(e.key, e.language_label, e.quality, f"{e.size_mb:.0f} MB",
+                        str(e.num_speakers) if e.multi_speaker else "", state),
             )
         shown = min(len(entries), 600)
         self.lib_status.config(
