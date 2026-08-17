@@ -1227,6 +1227,7 @@ def test_tts_and_sink() -> None:
 def test_packaging_bits() -> None:
     """Offline checks for the cable, voices and GPU-pack modules."""
     print("\n[packaging]")
+    import re
     import zipfile
 
     from voice2tts import cable, gpupack, voices
@@ -1238,6 +1239,20 @@ def test_packaging_bits() -> None:
     check("base.en bundled for offline install", bundled_whisper("base.en") is not None,
           str(bundled_whisper("base.en")))
     check("absent model reports None", bundled_whisper("nonexistent-model") is None)
+
+    # --- the spec must name what Analysis cannot see
+    # PyInstaller walks module-level imports reliably; imports tucked inside a
+    # function are the ones that go missing from a frozen build, and the failure
+    # only shows up when a user clicks the tab that needs them.
+    spec = (Path(__file__).resolve().parent.parent / "Voice2TTS.spec").read_text(
+        encoding="utf-8")
+    gui_src = (Path(__file__).resolve().parent.parent / "voice2tts" / "gui.py"
+               ).read_text(encoding="utf-8")
+    lazy = set(re.findall(r"^\s+from \.(\w+) import ", gui_src, re.MULTILINE))
+    unlisted = sorted(m for m in lazy if f'"voice2tts.{m}"' not in spec)
+    check("lazily imported gui modules are declared in the spec",
+          not unlisted, f"missing from hiddenimports: {unlisted}" if unlisted
+          else ", ".join(sorted(lazy)) or "none are lazy")
 
     # --- voices
     installed = voices.installed_keys()

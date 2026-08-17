@@ -92,6 +92,12 @@ a = Analysis(
         "voice2tts.cable",
         "voice2tts.voices",
         "voice2tts.gpupack",
+        # The Studio panels are imported inside _build_studio, so they are named
+        # here rather than relying on Analysis to find a function-level import.
+        # They pull in training, checkpoints and recorder with them. Note
+        # piper.train is deliberately absent: training runs in the studio pack's
+        # own interpreter, not this one.
+        "voice2tts.studioui",
         # Backends chosen by runtime import; Analysis cannot see these.
         "pystray._win32",
         "pynput.keyboard._win32",
