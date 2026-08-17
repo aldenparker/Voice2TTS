@@ -53,8 +53,11 @@ TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 TORCH_SPEC = "torch==2.9.1+cu128"
 TORCH_CPU_SPEC = "torch==2.9.1"
 
+# Pinned for the same reason as torch: training.py builds a command line against
+# this exact version's LightningCLI arguments, and an upstream rename would turn
+# into a failure hours into a run rather than at install time.
 TRAINING_PACKAGES = (
-    "piper-tts[train]",
+    "piper-tts[train]==1.7.0",
     "torchaudio",
     "librosa",
 )

@@ -623,6 +623,124 @@ def test_dataset() -> None:
               f"{issues} {stats}")
 
 
+def test_training() -> None:
+    """The training command line, progress parsing, and export guards.
+
+    Training itself is hours of GPU time and is not run here. What is checked is
+    everything that decides whether those hours are wasted: the arguments, which
+    checkpoint gets picked up, and that a half-finished export cannot be
+    mistaken for a working voice.
+    """
+    print("\n[training]")
+    import json
+    import tempfile
+
+    from voice2tts import training
+
+    cfg = training.TrainingConfig(
+        voice_name="my-voice",
+        dataset_csv=Path("D:/ds/metadata.csv"),
+        work_dir=Path("D:/work"),
+        base_checkpoint=Path("D:/base/lessac.ckpt"),
+    )
+    fresh = training.build_command(cfg)
+    joined = " ".join(fresh)
+    check("command invokes the studio interpreter",
+          fresh[1:4] == ["-m", "piper.train", "fit"], str(fresh[1:4]))
+    for flag in ("--data.csv_path", "--data.audio_dir", "--data.config_path",
+                 "--data.espeak_voice", "--data.voice_name", "--model.sample_rate",
+                 "--trainer.default_root_dir"):
+        check(f"passes {flag}", flag in fresh)
+    check("audio dir is the csv's own directory",
+          fresh[fresh.index("--data.audio_dir") + 1] == str(Path("D:/ds")))
+    # sample_rate is linked model -> data by the CLI; setting both is an error.
+    check("sample rate is set once, on the model", "--data.sample_rate" not in fresh)
+
+    # The distinction that costs hours if inverted.
+    check("a base voice warm-starts", "--model.warmstart_ckpt" in fresh, joined)
+    check("a base voice does not resume its trainer state",
+          "--ckpt_path" not in fresh, joined)
+    resumed = training.build_command(cfg, resume_from=Path("D:/work/last.ckpt"))
+    check("resuming our own run restores trainer state",
+          "--ckpt_path" in resumed, " ".join(resumed))
+    check("resuming does not also warm-start",
+          "--model.warmstart_ckpt" not in resumed, " ".join(resumed))
+
+    sizes = [training.suggest_batch_size(v) for v in (6, 8, 12, 16, 24, 80)]
+    check("batch size grows with VRAM", sizes == sorted(sizes), str(sizes))
+    check("a weak card still gets a usable batch", sizes[0] >= 4, str(sizes[0]))
+
+    # Progress parsing, against Lightning's actual bar format.
+    bar = ("Epoch 3:  45%|####5     | 45/100 [00:12<00:15,  3.55it/s, "
+           "v_num=0, loss=42.125]")
+    p = training.parse_progress(bar)
+    check("epoch parsed", p and p.epoch == 3, str(p))
+    check("steps parsed", p and (p.step, p.total_steps) == (45, 100), str(p))
+    check("loss parsed", p and abs(p.loss - 42.125) < 1e-6, str(p))
+    check("fraction computed", p and abs(p.fraction - 0.45) < 1e-6, str(p.fraction))
+    check("unrelated output is ignored",
+          training.parse_progress("INFO: seeding everything with 1234") is None)
+    check("a bar without an epoch keeps the last one",
+          training.parse_progress("60/100 [00:20<00:10]", p).epoch == 3)
+    check("fraction is zero before any steps",
+          training.Progress().fraction == 0.0)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp) / "work"
+        nested = work / "lightning_logs" / "version_1" / "checkpoints"
+        nested.mkdir(parents=True)
+        check("no checkpoints yet", training.best_checkpoint(work) is None)
+        check("nothing to resume from", training.resume_point(work) is None)
+
+        for name in ("epoch=4-val_mel=0.4000.ckpt", "epoch=9-val_mel=0.2100.ckpt",
+                     "epoch=9-val_mos=3.9000.ckpt", "last.ckpt"):
+            (nested / name).write_bytes(b"x")
+
+        check("checkpoints found in Lightning's nested layout",
+              len(training.checkpoints(work)) == 4,
+              str(len(training.checkpoints(work))))
+        best = training.best_checkpoint(work)
+        check("best is the lowest val_mel, not the newest file",
+              best and best.name == "epoch=9-val_mel=0.2100.ckpt", str(best))
+        check("resume uses last.ckpt",
+              training.resume_point(work).name == "last.ckpt")
+
+        # An interrupted run has only last.ckpt, and must still be exportable.
+        bare = Path(tmp) / "bare"
+        (bare / "ckpt").mkdir(parents=True)
+        (bare / "ckpt" / "last.ckpt").write_bytes(b"x")
+        check("an unscored run still offers something to export",
+              training.best_checkpoint(bare).name == "last.ckpt")
+
+        # Export guards. Neither of these should reach the subprocess.
+        try:
+            training.export(Path(tmp) / "missing.ckpt", Path(tmp) / "config.json",
+                            Path(tmp) / "out", "v")
+            check("a missing checkpoint is refused", False, "no error")
+        except FileNotFoundError:
+            check("a missing checkpoint is refused", True)
+
+        ckpt = Path(tmp) / "real.ckpt"
+        ckpt.write_bytes(b"x")
+        try:
+            training.export(ckpt, Path(tmp) / "config.json", Path(tmp) / "out", "v")
+            check("a missing voice config is refused", False, "no error")
+        except FileNotFoundError as exc:
+            # A voice exported without its config loads and then speaks nonsense,
+            # so the message has to say where the config comes from.
+            check("a missing voice config is refused",
+                  "written by training" in str(exc), str(exc))
+
+    prov = training.Provenance(voice_name="mine", dataset_clips=120,
+                               dataset_seconds=1800.0, epochs=400,
+                               base_checkpoint="lessac.ckpt")
+    data = json.loads(json.dumps(prov.to_dict()))
+    check("provenance survives json", data["voice_name"] == "mine")
+    check("provenance records where it came from",
+          data["base_checkpoint"] == "lessac.ckpt" and data["dataset_clips"] == 120)
+    check("provenance stamps the app version", bool(data["app_version"]))
+
+
 def test_studio_gate() -> None:
     """The hardware gate, and that the override is a real escape hatch."""
     print("\n[studio gate]")
@@ -1560,6 +1678,7 @@ def main() -> int:
     test_theme()
     test_prompts()
     test_dataset()
+    test_training()
     test_studio_gate()
     test_release_is_gated()
     test_winget_manifests()
