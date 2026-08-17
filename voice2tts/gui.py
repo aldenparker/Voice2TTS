@@ -91,8 +91,19 @@ class SettingsWindow(tk.Toplevel):
 
         ttk.Label(tab, text="Microphone").grid(row=0, column=0, sticky="w")
         self.input_var = tk.StringVar()
-        self.input_combo = ttk.Combobox(tab, textvariable=self.input_var, width=52)
-        self.input_combo.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 10))
+        self.input_combo = ttk.Combobox(tab, textvariable=self.input_var, width=52,
+                                        state="readonly")
+        self.input_combo.grid(row=0, column=1, sticky="ew", padx=6)
+
+        opts = ttk.Frame(tab)
+        opts.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        self.all_apis_var = tk.BooleanVar()
+        ttk.Checkbutton(
+            opts, text="Show every host API (advanced)", variable=self.all_apis_var,
+            command=self._toggle_all_apis,
+        ).pack(side="left")
+        self.device_count = ttk.Label(opts, text="", foreground="#666")
+        self.device_count.pack(side="left", padx=10)
 
         header = ttk.Frame(tab)
         header.grid(row=2, column=0, columnspan=2, sticky="ew")
@@ -206,7 +217,7 @@ class SettingsWindow(tk.Toplevel):
 
         match = tk.StringVar(value=target.match)
         combo = ttk.Combobox(row, textvariable=match, width=34)
-        combo["values"] = [""] + [d.name for d in devices.list_outputs()]
+        combo["values"] = ["", *self._device_names("out")]
         combo.pack(side="left", padx=(0, 6))
 
         gain = tk.DoubleVar(value=target.gain)
@@ -224,16 +235,48 @@ class SettingsWindow(tk.Toplevel):
         entry["frame"].destroy()
         self._output_rows.remove(entry)
 
+    def _device_names(self, kind: str) -> list[str]:
+        """Names for a picker, virtual cables tagged so they are easy to spot."""
+        all_apis = not self.cfg.audio.prefer_wasapi
+        listing = (devices.list_inputs(all_apis) if kind == "in"
+                   else devices.list_outputs(all_apis))
+        # annotate() handles the system-default marker and disambiguates devices
+        # that share a name; the virtual-cable tag is added on top of that.
+        labels = devices.annotate(listing)
+        return [
+            label if d.default or not cable.is_virtual_device(d.name)
+            else label + devices.VIRTUAL_TAG
+            for d, label in zip(listing, labels, strict=True)
+        ]
+
+    @staticmethod
+    def _strip_tag(value: str) -> str:
+        return devices.strip_display(value)
+
     def _refresh_devices(self) -> None:
         devices.refresh()
-        inputs = [""] + [d.name for d in devices.list_inputs()]
-        outputs = [""] + [d.name for d in devices.list_outputs()]
+        inputs = ["", *self._device_names("in")]
+        outputs = ["", *self._device_names("out")]
         self.input_combo["values"] = inputs
         for row in self._output_rows:
             for child in row["frame"].winfo_children():
                 if isinstance(child, ttk.Combobox):
                     child["values"] = outputs
         self._update_cable_hint()
+        self._update_device_count()
+
+    def _update_device_count(self) -> None:
+        all_apis = not self.cfg.audio.prefer_wasapi
+        n_in = len(devices.list_inputs(all_apis))
+        n_out = len(devices.list_outputs(all_apis))
+        extra = "" if all_apis else "  (duplicates across host APIs hidden)"
+        self.device_count.config(text=f"{n_in} inputs, {n_out} outputs{extra}")
+
+    def _toggle_all_apis(self) -> None:
+        # Inverted: the checkbox offers the advanced view, the config stores the
+        # normal one.
+        self.cfg.audio.prefer_wasapi = not self.all_apis_var.get()
+        self._refresh_devices()
 
     def _update_cable_hint(self) -> None:
         found = cable.detect()
@@ -926,9 +969,11 @@ class SettingsWindow(tk.Toplevel):
 
     def _load_from_config(self) -> None:
         c = self.cfg
-        self.input_combo["values"] = [""] + [d.name for d in devices.list_inputs()]
+        self.all_apis_var.set(not c.audio.prefer_wasapi)
+        self.input_combo["values"] = ["", *self._device_names("in")]
         self.input_var.set(c.audio.input_match)
         self.mute_var.set(c.audio.mute_mic_during_playback)
+        self._update_device_count()
         for target in c.audio.outputs:
             self._add_output_row(target)
         if not c.audio.outputs:
@@ -966,11 +1011,12 @@ class SettingsWindow(tk.Toplevel):
             messagebox.showerror("Invalid hotkey", "Fix the hotkey first.", parent=self)
             return False
         c = self.cfg
-        c.audio.input_match = self.input_var.get().strip()
+        c.audio.input_match = self._strip_tag(self.input_var.get())
         c.audio.mute_mic_during_playback = self.mute_var.get()
+        c.audio.prefer_wasapi = not self.all_apis_var.get()
         c.audio.outputs = [
             OutputTarget(
-                match=r["match"].get().strip(),
+                match=self._strip_tag(r["match"].get()),
                 gain=round(float(r["gain"].get()), 3),
                 enabled=bool(r["enabled"].get()),
             )

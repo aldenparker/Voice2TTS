@@ -370,7 +370,7 @@ class Wizard(tk.Toplevel):
         ttk.Label(parent, text="Microphone").grid(row=0, column=0, sticky="w", pady=3)
         self.w_input = tk.StringVar(value=self.cfg.audio.input_match)
         combo = ttk.Combobox(parent, textvariable=self.w_input, width=44)
-        combo["values"] = [""] + [d.name for d in devices.list_inputs()]
+        combo["values"] = ["", *devices.annotate(devices.list_inputs())]
         combo.grid(row=0, column=1, sticky="ew", padx=6)
 
         ttk.Label(parent, text="Voice").grid(row=1, column=0, sticky="w", pady=3)
@@ -383,7 +383,7 @@ class Wizard(tk.Toplevel):
         ttk.Label(parent, text="Hear yourself on").grid(row=2, column=0, sticky="w", pady=3)
         self.w_monitor = tk.StringVar(value="")
         mcombo = ttk.Combobox(parent, textvariable=self.w_monitor, width=44)
-        mcombo["values"] = ["(none)"] + [d.name for d in devices.list_outputs()]
+        mcombo["values"] = ["(none)", *devices.annotate(devices.list_outputs())]
         existing = next(
             (t.match for t in self.cfg.audio.outputs
              if t.enabled and "cable" not in t.match.lower()),
@@ -422,14 +422,14 @@ class Wizard(tk.Toplevel):
     def _collect_devices(self) -> None:
         if not hasattr(self, "w_input"):
             return
-        self.cfg.audio.input_match = self.w_input.get().strip()
+        self.cfg.audio.input_match = devices.strip_display(self.w_input.get())
         self.cfg.tts.voice = self.w_voice.get().strip() or self.cfg.tts.voice
         self.cfg.trigger.mode = self.w_mode.get()
         hotkey = self.w_hotkey.get().strip()
         if not describe(hotkey):
             self.cfg.trigger.hotkey = hotkey
 
-        monitor = self.w_monitor.get().strip()
+        monitor = devices.strip_display(self.w_monitor.get())
         monitor = "" if monitor == "(none)" else monitor
         # Rewrite the non-cable output row to match the chosen monitor.
         others = [t for t in self.cfg.audio.outputs if "cable" not in t.match.lower()]

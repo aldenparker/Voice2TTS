@@ -149,7 +149,9 @@ class Pipeline:
                 "Fix this in Settings -> Audio.",
             )
 
-        device = resolve_input(self.cfg.audio.input_match, self.cfg.audio.prefer_wasapi)
+        device = resolve_input(
+            self.cfg.audio.input_match, all_apis=not self.cfg.audio.prefer_wasapi
+        )
         if device is None:
             raise RuntimeError("no usable input device")
         self.capture = MicCapture(device)

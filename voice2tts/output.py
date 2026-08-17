@@ -159,7 +159,7 @@ class OutputSink:
             for spec in wanted:
                 if not spec.enabled:
                     continue
-                device = resolve_output(spec.match, self.cfg.prefer_wasapi)
+                device = resolve_output(spec.match, all_apis=not self.cfg.prefer_wasapi)
                 if device is None:
                     self.failures.append((spec.label, "device not found"))
                     log.warning("output %r not found; skipping", spec.label)

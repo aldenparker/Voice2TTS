@@ -612,6 +612,79 @@ def test_pipeline_end_to_end() -> None:
     check("shut down cleanly", not pipeline.running)
 
 
+def test_device_lists() -> None:
+    """The pickers must show one row per real endpoint, not one per host API."""
+    print("\n[device lists]")
+    from voice2tts import devices
+
+    trimmed_in = devices.list_inputs()
+    trimmed_out = devices.list_outputs()
+    all_in = devices.list_inputs(all_apis=True)
+    all_out = devices.list_outputs(all_apis=True)
+
+    check("trimmed list is smaller than the raw one",
+          len(trimmed_in) < len(all_in) and len(trimmed_out) < len(all_out),
+          f"{len(trimmed_in)}/{len(all_in)} in, {len(trimmed_out)}/{len(all_out)} out")
+    check("trimmed lists are WASAPI only",
+          all(d.hostapi == devices.WASAPI for d in trimmed_in + trimmed_out))
+    # Devices CAN legitimately share a name -- two identical monitors on one GPU.
+    # What must be unique is the dropdown label, or the second is unselectable.
+    for listing in (trimmed_in, trimmed_out):
+        labels = devices.annotate(listing)
+        if len(set(labels)) != len(labels):
+            dupes = [x for x in labels if labels.count(x) > 1]
+            check("dropdown labels are unique", False, str(sorted(set(dupes))))
+            break
+    else:
+        check("dropdown labels are unique", True)
+
+    # And each ordinal must resolve to a different device.
+    dup_names = [n for n in {d.name for d in trimmed_out}
+                 if sum(1 for d in trimmed_out if d.name == n) > 1]
+    if dup_names:
+        name = dup_names[0]
+        first = devices.resolve_output(f"{name}   #1")
+        second = devices.resolve_output(f"{name}   #2")
+        check("same-named devices resolve separately",
+              first is not None and second is not None and first.index != second.index,
+              f"{name[:32]}: #{getattr(first,'index','?')} vs #{getattr(second,'index','?')}")
+    else:
+        check("same-named devices resolve separately", True, "none present")
+
+    check("ordinal parsing", devices.split_ordinal("Speakers   #3") == ("Speakers", 3)
+          and devices.split_ordinal("Speakers") == ("Speakers", 1))
+
+    pseudo = [d.name for d in trimmed_in + trimmed_out
+              if devices.is_pseudo_device(d.name)]
+    check("routing aggregates hidden", not pseudo, str(pseudo))
+    check("pseudo-device detection works",
+          devices.is_pseudo_device("Microsoft Sound Mapper - Input")
+          and devices.is_pseudo_device("Primary Sound Driver")
+          and devices.is_pseudo_device(
+              "Headset (@System32\\drivers\\bthhfenum.sys,#2;%1 Hands-Free%0)")
+          and not devices.is_pseudo_device("Headphones (MOMENTUM 3)"))
+
+    # Display annotations must round-trip, or a saved config keeps a suffix that
+    # stops the device resolving.
+    for raw in ("Headphones (MOMENTUM 3)", "VBMatrix In 1 (VB-Audio Matrix VAIO)"):
+        for tag in ("", devices.DEFAULT_TAG, devices.VIRTUAL_TAG):
+            if devices.strip_display(raw + tag) != raw:
+                check("display tags strip cleanly", False, repr(raw + tag))
+                break
+    else:
+        check("display tags strip cleanly", True)
+
+    # A device only reachable through a hidden host API must still resolve, so an
+    # older config does not silently fall back to the default microphone.
+    hidden = next((d for d in all_in if d.hostapi != devices.WASAPI
+                   and not any(t.name == d.name for t in trimmed_in)), None)
+    if hidden is not None:
+        found = devices.resolve_input(hidden.name)
+        check("hidden-API device still resolves", found is not None, hidden.name[:40])
+    else:
+        check("hidden-API device still resolves", True, "no such device to test")
+
+
 def test_platform() -> None:
     """Windows integration bits that do not need audio hardware."""
     print("\n[platform]")
@@ -668,6 +741,7 @@ def main() -> int:
     test_hotkey()
     test_vad()
     test_stt()
+    test_device_lists()
     test_platform()
     test_language_guard()
     if not no_audio:

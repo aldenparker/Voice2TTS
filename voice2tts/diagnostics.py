@@ -91,10 +91,12 @@ def diagnostics(cfg=None, pipeline=None) -> str:
     out.extend(f"  {k}" for k in voices.installed_keys())
 
     section("Audio devices")
+    # all_apis: a support report should show everything, including the host APIs the
+    # pickers hide, since "my device is missing" is a common reason to file one.
     try:
-        for d in devices.list_inputs():
+        for d in devices.list_inputs(all_apis=True):
             out.append(f"  IN   {d.rate:>6} Hz  {d.hostapi:<18} {d.name}")
-        for d in devices.list_outputs():
+        for d in devices.list_outputs(all_apis=True):
             out.append(f"  OUT  {d.rate:>6} Hz  {d.hostapi:<18} {d.name}")
     except Exception as exc:  # noqa: BLE001
         out.append(f"  (enumeration failed: {exc})")
