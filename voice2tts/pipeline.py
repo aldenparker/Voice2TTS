@@ -27,6 +27,7 @@ from .devices import resolve_input
 from .hotkey import HotkeyManager
 from .output import OutputSink
 from .stt import WhisperEngine
+from .substitutions import Rule, Substituter
 from .tts import PiperEngine
 from .vad import SAMPLE_RATE, WINDOW, VadSegmenter
 
@@ -65,6 +66,8 @@ class Pipeline:
         self.capture: MicCapture | None = None
         self.hotkey: HotkeyManager | None = None
         self.segmenter: VadSegmenter | None = None
+        self.substituter = Substituter()
+        self.apply_text_changes()
         self.last_transcript = ""
         self.output_failures: list[tuple[str, str]] = []
 
@@ -262,6 +265,24 @@ class Pipeline:
             return
         self.tts.apply(self.cfg.tts)
 
+    def apply_text_changes(self) -> int:
+        """Recompile the substitution rules. Returns how many are active."""
+        cfg = self.cfg.text
+        if not cfg.substitutions_enabled:
+            return self.substituter.load([])
+        rules = [
+            Rule(
+                pattern=r.pattern,
+                replacement=r.replacement,
+                enabled=r.enabled,
+                whole_word=r.whole_word,
+                regex=r.regex,
+                case_sensitive=r.case_sensitive,
+            )
+            for r in cfg.substitutions
+        ]
+        return self.substituter.load(rules)
+
     def apply_vad_changes(self) -> None:
         if self._running.is_set():
             self.segmenter = VadSegmenter(
@@ -433,7 +454,13 @@ class Pipeline:
             return
         self.last_transcript = text
         self._emit("transcript", text)
-        self.speak(text, _t0=t0)
+
+        # Rewrite before speaking, not before displaying: the transcript shown is
+        # what was heard, so a wrong substitution is visible rather than mysterious.
+        spoken = self.substituter.apply(text)
+        if spoken != text:
+            self._emit("substituted", spoken)
+        self.speak(spoken, _t0=t0)
 
     # -- speech output --------------------------------------------------------
 

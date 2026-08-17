@@ -20,6 +20,7 @@ from voice2tts.gui import SettingsWindow  # noqa: E402
 from voice2tts.icon import make_icon  # noqa: E402
 from voice2tts.logging_setup import setup_logging  # noqa: E402
 from voice2tts.pipeline import Pipeline, State  # noqa: E402
+from voice2tts.substitutions import STARTER_RULES  # noqa: E402
 from voice2tts.wizard import Wizard  # noqa: E402
 
 passed = failed = 0
@@ -117,6 +118,56 @@ def main() -> int:
               win.lib_status.cget("text"))
         win._use_voice()
         check("can select an installed voice", win.voice_var.get() == bundled, bundled)
+
+    print("\n[words tab]")
+    win._subs = []
+    win._render_subs()
+    win.sub_pattern.set("aiden")
+    win.sub_replacement.set("Aidan")
+    win._add_sub()
+    check("rule added", len(win._subs) == 1, str(win.subs_status.cget("text")))
+    win.subs_sample.set("tell aiden")
+    root.update()
+    check("preview shows the result", "Aidan" in win.subs_preview.cget("text"),
+          win.subs_preview.cget("text"))
+
+    # Adding the same pattern again must update, not duplicate.
+    win.sub_replacement.set("Aiden")
+    win._add_sub()
+    check("same pattern updates in place",
+          len(win._subs) == 1 and win._subs[0].replacement == "Aiden",
+          f"{len(win._subs)} rules")
+
+    win.sub_pattern.set("(bad")
+    win.sub_regex.set(True)
+    win._add_sub()
+    check("invalid regex refused",
+          len(win._subs) == 1 and "invalid" in win.subs_status.cget("text").lower(),
+          win.subs_status.cget("text"))
+    win.sub_regex.set(False)
+
+    before = len(win._subs)
+    win._add_starter_subs()
+    check("starter rules added", len(win._subs) > before,
+          f"{before} -> {len(win._subs)}")
+    win._add_starter_subs()
+    check("starter rules are not duplicated",
+          "Already present" in win.subs_status.cget("text"),
+          win.subs_status.cget("text"))
+
+    win.subs_tree.selection_set("0")
+    win._toggle_sub_row()
+    check("double-click disables a rule", not win._subs[0].enabled)
+    win.subs_tree.selection_set("0")
+    win._remove_sub()
+    check("rule removed", len(win._subs) == before + len(STARTER_RULES) - 1)
+
+    win.subs_enabled_var.set(False)
+    win._refresh_subs_preview()
+    check("disabling is reflected in the preview",
+          "switched off" in win.subs_preview.cget("text"),
+          win.subs_preview.cget("text"))
+    win.subs_enabled_var.set(True)
 
     print("\n[updates tab]")
     import voice2tts as pkg

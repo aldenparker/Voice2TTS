@@ -104,6 +104,26 @@ class TtsConfig:
 
 
 @dataclass
+class SubstitutionRule:
+    """One text rewrite applied between recognition and speech."""
+
+    pattern: str = ""
+    replacement: str = ""
+    enabled: bool = True
+    whole_word: bool = True
+    regex: bool = False
+    case_sensitive: bool = False
+
+
+@dataclass
+class TextConfig:
+    # Applied to the transcript before synthesis: fixes names Whisper mishears,
+    # expands abbreviations, and corrects words Piper pronounces badly.
+    substitutions: list[SubstitutionRule] = field(default_factory=list)
+    substitutions_enabled: bool = True
+
+
+@dataclass
 class UpdateConfig:
     # "owner/name" on GitHub, prefilled with this build's own repository so updates
     # work out of the box. Clearing it disables update checking entirely.
@@ -121,6 +141,7 @@ class Config:
     vad: VadConfig = field(default_factory=VadConfig)
     stt: SttConfig = field(default_factory=SttConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
+    text: TextConfig = field(default_factory=TextConfig)
     updates: UpdateConfig = field(default_factory=UpdateConfig)
     # New configs are written at the current schema; files predating the field are
     # read as 1 in from_dict() so migrate() can bring them forward.
@@ -161,12 +182,28 @@ class Config:
             if isinstance(o, dict)
         ]
 
+        text_cfg = section(TextConfig, data.get("text"))
+        raw_rules = (data.get("text") or {}).get("substitutions") or []
+        text_cfg.substitutions = [
+            SubstitutionRule(
+                pattern=str(r.get("pattern", "")),
+                replacement=str(r.get("replacement", "")),
+                enabled=bool(r.get("enabled", True)),
+                whole_word=bool(r.get("whole_word", True)),
+                regex=bool(r.get("regex", False)),
+                case_sensitive=bool(r.get("case_sensitive", False)),
+            )
+            for r in raw_rules
+            if isinstance(r, dict)
+        ]
+
         cfg = cls(
             audio=audio,
             trigger=section(TriggerConfig, data.get("trigger")),
             vad=section(VadConfig, data.get("vad")),
             stt=section(SttConfig, data.get("stt")),
             tts=section(TtsConfig, data.get("tts")),
+            text=text_cfg,
             updates=section(UpdateConfig, data.get("updates")),
             schema_version=int(data.get("schema_version", 1)),
             start_minimized=bool(data.get("start_minimized", True)),

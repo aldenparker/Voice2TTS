@@ -203,6 +203,75 @@ def test_clipboard() -> None:
     check("truncation limit is sane", clipboard.MAX_CHARS >= 1000)
 
 
+def test_substitutions() -> None:
+    print("\n[substitutions]")
+    from voice2tts.substitutions import STARTER_RULES, Rule, Substituter, preview
+
+    sub = Substituter([Rule("brb", "be right back"), Rule("gg", "good game")])
+    check("simple replacement", sub.apply("brb") == "be right back")
+    check("case-insensitive by default", sub.apply("BRB") == "be right back")
+    check("multiple rules in one pass",
+          sub.apply("gg, brb") == "good game, be right back")
+    check("untouched text passes through", sub.apply("hello there") == "hello there")
+    check("empty input is safe", sub.apply("") == "")
+
+    # Whole-word matching is the whole point: a substring rule would maul ordinary
+    # words containing the pattern.
+    check("whole word does not match inside a word",
+          Substituter([Rule("al", "ALPHA")]).apply("also always metal")
+          == "also always metal")
+    check("partial matching still available when asked for",
+          Substituter([Rule("al", "X", whole_word=False)]).apply("metal") == "metX")
+
+    check("punctuation-adjacent still matches",
+          sub.apply("brb, back soon") == "be right back, back soon")
+
+    case_rule = Substituter([Rule("IT", "information technology",
+                                  case_sensitive=True)])
+    check("case-sensitive rule respects case",
+          case_rule.apply("IT is it") == "information technology is it")
+
+    regex = Substituter([Rule(r"\bv(\d+)\b", r"version \1", regex=True)])
+    check("regex with backreference", regex.apply("v2 release") == "version 2 release",
+          regex.apply("v2 release"))
+    # ...but a backslash typed into a PLAIN rule must stay literal rather than
+    # becoming a capture reference (or raising "invalid group reference").
+    literal = Substituter([Rule("path", r"C:\1\temp")])
+    check("backslashes literal in a plain rule",
+          literal.apply("path") == r"C:\1\temp", literal.apply("path"))
+
+    bad = Rule("(unclosed", "x", regex=True)
+    check("invalid regex reported", "invalid regular expression" in bad.describe_error())
+    check("invalid regex does not crash the substituter",
+          Substituter([bad]).apply("(unclosed") == "(unclosed")
+    check("empty pattern rejected", "empty" in Rule("", "x").describe_error())
+
+    check("disabled rules are skipped",
+          Substituter([Rule("brb", "nope", enabled=False)]).apply("brb") == "brb")
+
+    # Rules that rewrite each other must terminate rather than spin.
+    looping = Substituter([Rule("a", "b"), Rule("b", "a")])
+    result = looping.apply("a")
+    check("looping rules terminate", result in ("a", "b"), repr(result))
+
+    check("starter rules are usable",
+          preview(list(STARTER_RULES), "brb afk") == "be right back away from keyboard")
+
+    # Live wiring: the pipeline must actually apply them.
+    from voice2tts.config import Config, SubstitutionRule
+    from voice2tts.pipeline import Pipeline
+
+    cfg = Config()
+    cfg.text.substitutions = [SubstitutionRule("aiden", "Aidan")]
+    p = Pipeline(cfg)
+    check("pipeline compiles configured rules", p.apply_text_changes() == 1)
+    check("pipeline applies them", p.substituter.apply("tell aiden") == "tell Aidan")
+    cfg.text.substitutions_enabled = False
+    check("disabling switches them all off", p.apply_text_changes() == 0)
+    check("nothing rewritten when disabled",
+          p.substituter.apply("tell aiden") == "tell aiden")
+
+
 def test_vad() -> None:
     print("\n[vad]")
     from voice2tts.config import VadConfig
@@ -857,6 +926,7 @@ def main() -> int:
     test_hotkey()
     test_hotkey_manager()
     test_clipboard()
+    test_substitutions()
     test_vad()
     test_stt()
     test_device_lists()

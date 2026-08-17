@@ -13,13 +13,23 @@ import tkinter as tk
 import webbrowser
 from tkinter import messagebox, ttk
 
-from . import DEFAULT_UPDATE_REPO, cable, devices, gpupack, loopback, updater, voices
-from .config import MODES, WHISPER_MODELS, Config, OutputTarget
+from . import (
+    DEFAULT_UPDATE_REPO,
+    cable,
+    devices,
+    gpupack,
+    loopback,
+    substitutions,
+    updater,
+    voices,
+)
+from .config import MODES, WHISPER_MODELS, Config, OutputTarget, SubstitutionRule
 from .diagnostics import diagnostics
 from .hotkey import describe
 from .paths import config_path, is_frozen, list_voices, log_path
 from .pipeline import Pipeline
 from .platform_win import run_at_login, set_run_at_login
+from .substitutions import STARTER_RULES, Rule
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +81,7 @@ class SettingsWindow(tk.Toplevel):
         self._build_trigger(nb)
         self._build_voice(nb)
         self._build_voice_library(nb)
+        self._build_words(nb)
         self._build_recognition(nb)
         self._build_updates(nb)
         self._build_status(nb)
@@ -796,6 +807,191 @@ class SettingsWindow(tk.Toplevel):
             self._show_installed_only()
         self.lib_status.config(text=message)
 
+    # -- words tab ------------------------------------------------------------
+
+    def _build_words(self, nb: ttk.Notebook) -> None:
+        tab = ttk.Frame(nb, padding=10)
+        nb.add(tab, text="Words")
+
+        ttk.Label(
+            tab,
+            text="Rewrite text between recognition and speech. Fixes names the "
+                 "recogniser mishears,\nexpands abbreviations, and corrects words "
+                 "the voice pronounces badly.",
+            foreground="#555", justify="left",
+        ).grid(row=0, column=0, columnspan=4, sticky="w")
+
+        self.subs_enabled_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(tab, text="Apply these rules", variable=self.subs_enabled_var,
+                        command=self._refresh_subs_preview).grid(
+            row=1, column=0, columnspan=4, sticky="w", pady=(6, 4))
+
+        cols = ("pattern", "replacement", "opts")
+        self.subs_tree = ttk.Treeview(tab, columns=cols, show="headings", height=10)
+        for col, width, text in zip(cols, (170, 230, 110),
+                                    ("Heard", "Spoken as", "Options"), strict=True):
+            self.subs_tree.heading(col, text=text)
+            self.subs_tree.column(col, width=width, anchor="w")
+        self.subs_tree.grid(row=2, column=0, columnspan=4, sticky="nsew")
+        sb = ttk.Scrollbar(tab, orient="vertical", command=self.subs_tree.yview)
+        sb.grid(row=2, column=4, sticky="ns")
+        self.subs_tree.configure(yscrollcommand=sb.set)
+        self.subs_tree.bind("<<TreeviewSelect>>", lambda _e: self._load_sub_row())
+        self.subs_tree.bind("<Double-1>", lambda _e: self._toggle_sub_row())
+
+        editor = ttk.Frame(tab)
+        editor.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 4))
+        ttk.Label(editor, text="Heard").grid(row=0, column=0, sticky="w")
+        self.sub_pattern = tk.StringVar()
+        ttk.Entry(editor, textvariable=self.sub_pattern, width=24).grid(
+            row=0, column=1, padx=4)
+        ttk.Label(editor, text="Spoken as").grid(row=0, column=2, sticky="w",
+                                                 padx=(10, 0))
+        self.sub_replacement = tk.StringVar()
+        ttk.Entry(editor, textvariable=self.sub_replacement, width=28).grid(
+            row=0, column=3, padx=4)
+
+        flags = ttk.Frame(tab)
+        flags.grid(row=4, column=0, columnspan=4, sticky="w")
+        self.sub_whole = tk.BooleanVar(value=True)
+        self.sub_regex = tk.BooleanVar(value=False)
+        self.sub_case = tk.BooleanVar(value=False)
+        ttk.Checkbutton(flags, text="Whole word", variable=self.sub_whole).pack(
+            side="left")
+        ttk.Checkbutton(flags, text="Regular expression", variable=self.sub_regex).pack(
+            side="left", padx=8)
+        ttk.Checkbutton(flags, text="Match case", variable=self.sub_case).pack(
+            side="left")
+
+        buttons = ttk.Frame(tab)
+        buttons.grid(row=5, column=0, columnspan=4, sticky="w", pady=6)
+        ttk.Button(buttons, text="Add / update", command=self._add_sub).pack(side="left")
+        ttk.Button(buttons, text="Remove", command=self._remove_sub).pack(
+            side="left", padx=6)
+        ttk.Button(buttons, text="Add common abbreviations",
+                   command=self._add_starter_subs).pack(side="left")
+        self.subs_status = ttk.Label(buttons, text="", foreground="#666")
+        self.subs_status.pack(side="left", padx=10)
+
+        ttk.Separator(tab, orient="horizontal").grid(
+            row=6, column=0, columnspan=4, sticky="ew", pady=6)
+        ttk.Label(tab, text="Try it").grid(row=7, column=0, sticky="w")
+        self.subs_sample = tk.StringVar(value="brb, tell Aiden gg")
+        ttk.Entry(tab, textvariable=self.subs_sample).grid(
+            row=7, column=1, columnspan=3, sticky="ew", padx=4)
+        self.subs_sample.trace_add("write", lambda *_: self._refresh_subs_preview())
+        self.subs_preview = ttk.Label(tab, text="", foreground="#2a7",
+                                      wraplength=560, justify="left")
+        self.subs_preview.grid(row=8, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        tab.columnconfigure(1, weight=1)
+        tab.rowconfigure(2, weight=1)
+        self._subs: list[SubstitutionRule] = []
+
+    def _render_subs(self) -> None:
+        self.subs_tree.delete(*self.subs_tree.get_children())
+        for i, rule in enumerate(self._subs):
+            opts = []
+            if not rule.enabled:
+                opts.append("off")
+            if rule.regex:
+                opts.append("regex")
+            if rule.case_sensitive:
+                opts.append("case")
+            if not rule.whole_word:
+                opts.append("partial")
+            self.subs_tree.insert("", "end", iid=str(i),
+                                  values=(rule.pattern, rule.replacement,
+                                          ", ".join(opts)))
+        self._refresh_subs_preview()
+
+    def _selected_sub(self) -> int | None:
+        sel = self.subs_tree.selection()
+        return int(sel[0]) if sel else None
+
+    def _load_sub_row(self) -> None:
+        index = self._selected_sub()
+        if index is None or index >= len(self._subs):
+            return
+        rule = self._subs[index]
+        self.sub_pattern.set(rule.pattern)
+        self.sub_replacement.set(rule.replacement)
+        self.sub_whole.set(rule.whole_word)
+        self.sub_regex.set(rule.regex)
+        self.sub_case.set(rule.case_sensitive)
+
+    def _toggle_sub_row(self) -> None:
+        index = self._selected_sub()
+        if index is None or index >= len(self._subs):
+            return
+        self._subs[index].enabled = not self._subs[index].enabled
+        self._render_subs()
+
+    def _add_sub(self) -> None:
+        pattern = self.sub_pattern.get().strip()
+        if not pattern:
+            self.subs_status.config(text="Enter what is heard first.")
+            return
+        rule = SubstitutionRule(
+            pattern=pattern,
+            replacement=self.sub_replacement.get(),
+            whole_word=self.sub_whole.get(),
+            regex=self.sub_regex.get(),
+            case_sensitive=self.sub_case.get(),
+        )
+        error = Rule(rule.pattern, rule.replacement, regex=rule.regex).describe_error()
+        if error:
+            self.subs_status.config(text=error)
+            return
+        existing = next((i for i, r in enumerate(self._subs)
+                         if r.pattern.lower() == pattern.lower()), None)
+        if existing is None:
+            self._subs.append(rule)
+            self.subs_status.config(text=f"Added {pattern}")
+        else:
+            rule.enabled = self._subs[existing].enabled
+            self._subs[existing] = rule
+            self.subs_status.config(text=f"Updated {pattern}")
+        self._render_subs()
+
+    def _remove_sub(self) -> None:
+        index = self._selected_sub()
+        if index is None or index >= len(self._subs):
+            self.subs_status.config(text="Select a rule first.")
+            return
+        removed = self._subs.pop(index)
+        self.subs_status.config(text=f"Removed {removed.pattern}")
+        self._render_subs()
+
+    def _add_starter_subs(self) -> None:
+        have = {r.pattern.lower() for r in self._subs}
+        added = 0
+        for starter in STARTER_RULES:
+            if starter.pattern.lower() in have:
+                continue
+            self._subs.append(SubstitutionRule(
+                pattern=starter.pattern, replacement=starter.replacement))
+            added += 1
+        self.subs_status.config(text=f"Added {added}" if added else "Already present")
+        self._render_subs()
+
+    def _refresh_subs_preview(self) -> None:
+        if not hasattr(self, "subs_preview"):
+            return
+        sample = self.subs_sample.get()
+        if not self.subs_enabled_var.get():
+            self.subs_preview.config(text="(rules are switched off)",
+                                     foreground="#666")
+            return
+        rules = [Rule(r.pattern, r.replacement, r.enabled, r.whole_word,
+                      r.regex, r.case_sensitive) for r in self._subs]
+        result = substitutions.preview(rules, sample)
+        changed = result != sample
+        self.subs_preview.config(
+            text=f"Spoken as:  {result}" if changed else "(no rule matches)",
+            foreground="#2a7" if changed else "#666",
+        )
+
     # -- recognition tab ------------------------------------------------------
 
     def _build_recognition(self, nb: ttk.Notebook) -> None:
@@ -1164,6 +1360,14 @@ class SettingsWindow(tk.Toplevel):
         self.stt_device_var.set(c.stt.device)
         self.beam_var.set(c.stt.beam_size)
 
+        self.subs_enabled_var.set(c.text.substitutions_enabled)
+        self._subs = [
+            SubstitutionRule(r.pattern, r.replacement, r.enabled, r.whole_word,
+                             r.regex, r.case_sensitive)
+            for r in c.text.substitutions
+        ]
+        self._render_subs()
+
         self.repo_var.set(c.updates.repo)
         self.check_start_var.set(c.updates.check_on_start)
         self.interval_var.set(c.updates.interval_hours)
@@ -1207,6 +1411,9 @@ class SettingsWindow(tk.Toplevel):
         c.stt.device = self.stt_device_var.get()
         c.stt.beam_size = int(self.beam_var.get())
 
+        c.text.substitutions_enabled = self.subs_enabled_var.get()
+        c.text.substitutions = list(self._subs)
+
         c.updates.repo = self.repo_var.get().strip()
         c.updates.check_on_start = self.check_start_var.get()
         c.updates.interval_hours = int(self.interval_var.get())
@@ -1220,6 +1427,8 @@ class SettingsWindow(tk.Toplevel):
         self.pipeline.apply_audio_changes()
         self.pipeline.apply_tts_changes()
         self.pipeline.apply_vad_changes()
+        active = self.pipeline.apply_text_changes()
+        self.subs_status.config(text=f"{active} rule(s) active")
         # set_mode rebinds every hotkey from the config, so the clipboard and stop
         # combos are picked up along with the push-to-talk one.
         self.pipeline.set_mode(self.cfg.trigger.mode)
