@@ -1266,7 +1266,7 @@ class SettingsWindow(tk.Toplevel):
         tab.columnconfigure(2, weight=1)
         self._refresh_studio()
 
-        from .studioui import RecordingPanel, TrainingPanel
+        from .studioui import DesignPanel, RecordingPanel, TrainingPanel
 
         self.record_panel = RecordingPanel(
             self.studio_nb, self.palette,
@@ -1275,6 +1275,9 @@ class SettingsWindow(tk.Toplevel):
 
         self.train_panel = TrainingPanel(self.studio_nb, self.palette)
         self.studio_nb.add(self.train_panel, text="Train")
+
+        self.design_panel = DesignPanel(self.studio_nb, self.palette)
+        self.studio_nb.add(self.design_panel, text="Design")
 
     def _refresh_studio(self, force: bool = False) -> None:
         # Cached unless asked: the hardware does not change while the app is

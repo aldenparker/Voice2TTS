@@ -1032,6 +1032,15 @@ def test_v2tvoice() -> None:
         check("round trip keeps the name", back.name == "Narrator")
         check("round trip keeps the speakers", back.speakers == voice.speakers,
               str(back.speakers))
+
+        # Weights are rounded so the file stays readable. That is fine, but the
+        # rounding has to be far below anything audible.
+        precise = v2tvoice.DesignedVoice(
+            base_voice="b", speakers={"a": 0.5123456789, "b": 0.4876543211})
+        again = v2tvoice.load(precise.save(Path(tmp) / "precise"))
+        drift = max(abs(again.speakers[k] - v) for k, v in precise.speakers.items())
+        check("rounding a recipe stays well below audible", drift < 1e-6,
+              f"largest drift {drift:.2e}")
         check("round trip keeps the macros",
               abs(back.design.size - 0.2) < 1e-4
               and abs(back.design.warmth - 0.35) < 1e-4)

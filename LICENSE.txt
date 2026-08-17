@@ -55,6 +55,9 @@ CMU ARCTIC prompt list - http://festvox.org/cmu_arctic/
 faster-whisper (MIT) - https://github.com/SYSTRAN/faster-whisper
 CTranslate2 (MIT) - https://github.com/OpenNMT/CTranslate2
 ONNX Runtime (MIT) - https://github.com/microsoft/onnxruntime
+ONNX (Apache-2.0) - https://github.com/onnx/onnx
+  Used by the Voice Designer to read a model's speaker table and write a new
+  model with one blended speaker frozen into it.
 Silero VAD (MIT) - https://github.com/snakers4/silero-vad
 Whisper models by OpenAI (MIT), CTranslate2 conversions by Systran
 sounddevice (MIT) and PortAudio (MIT)

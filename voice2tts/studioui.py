@@ -18,14 +18,19 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+import numpy as np
+
 from . import (
     checkpoints,
     dataset,
+    designer,
     devices,
+    dsp,
     prompts,
     recorder,
     studiopack,
     training,
+    v2tvoice,
     voices,
 )
 from .theme import Palette
@@ -808,6 +813,427 @@ class TrainingPanel(ttk.Frame):
             (self.dataset_box, not busy),
         ):
             widget.state(["!disabled"] if enabled else ["disabled"])
+
+
+class DesignPanel(ttk.Frame):
+    """Build a voice by moving through a multi-speaker model's speaker space.
+
+    Speaker ids are opaque -- `p239`, `TXHC` -- and the catalogue carries no
+    gender, age or accent metadata for them. With 904 unlabelled speakers in
+    en_US-libritts-high a list is useless, so the map is the interface: click
+    somewhere, hear what is there, adjust.
+    """
+
+    SIZE = 320          # map is square; kept modest so the panel still fits
+    PREVIEW_TEXT = "This is what the voice sounds like."
+
+    def __init__(self, parent, palette: Palette):
+        super().__init__(parent, padding=10)
+        self.palette = palette
+
+        self.base_key: str = ""
+        self.table = None            # [speakers, width] embeddings
+        self.coords = None           # [speakers, 2] projection
+        self.names: list[str] = []
+        self.weights: dict[int, float] = {}
+        self.macro_vars: dict[str, tk.DoubleVar] = {}
+        self._busy = False
+        # Dry audio for the last blend previewed, so moving a macro slider does
+        # not pay to bake and load the model again.
+        self._dry: np.ndarray | None = None
+        self._dry_rate = 22050
+        self._dry_key: tuple | None = None
+
+        self._build()
+        self.refresh()
+
+    # -- layout --------------------------------------------------------------
+
+    def _build(self) -> None:
+        ttk.Label(self, text="Design a voice", font=("", 10, "bold")).grid(
+            row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(
+            self,
+            text="Blend the speakers inside a multi-speaker voice. "
+                 "No training, no recording —\nclick the map, listen, adjust.",
+            foreground=self.palette.muted, justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 8))
+
+        row = ttk.Frame(self)
+        row.grid(row=2, column=0, columnspan=3, sticky="ew")
+        ttk.Label(row, text="Built on").pack(side="left")
+        self.base_var = tk.StringVar()
+        self.base_box = ttk.Combobox(row, textvariable=self.base_var,
+                                     state="readonly", width=30)
+        self.base_box.pack(side="left", padx=6)
+        self.base_box.bind("<<ComboboxSelected>>", lambda _e: self._load_base())
+        ttk.Button(row, text="Refresh", command=self.refresh).pack(side="left")
+
+        self.base_note = ttk.Label(self, text="", foreground=self.palette.muted,
+                                   wraplength=560, justify="left")
+        self.base_note.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 8))
+
+        # -- map -------------------------------------------------------------
+        left = ttk.Frame(self)
+        left.grid(row=4, column=0, sticky="nw")
+        self.canvas = tk.Canvas(left, width=self.SIZE, height=self.SIZE,
+                                highlightthickness=1,
+                                highlightbackground=self.palette.muted,
+                                background=self.palette.field)
+        self.canvas.pack()
+        self.canvas.bind("<Button-1>", self._on_click)
+        self.canvas.bind("<B1-Motion>", self._on_click)
+        ttk.Label(left, text="Each dot is a speaker. Nearby dots sound alike.",
+                  foreground=self.palette.muted).pack(anchor="w", pady=(4, 0))
+
+        # -- macros ----------------------------------------------------------
+        right = ttk.Frame(self)
+        right.grid(row=4, column=1, sticky="nw", padx=(14, 0))
+
+        self.recipe_label = ttk.Label(right, text="Click the map to begin.",
+                                      wraplength=250, justify="left")
+        self.recipe_label.pack(anchor="w", pady=(0, 8))
+
+        ttk.Label(right, text="Shape", font=("", 9, "bold")).pack(anchor="w")
+        for macro, low, high in (
+            ("size", "smaller", "larger"),
+            ("warmth", "thin", "warm"),
+            ("brightness", "dull", "bright"),
+            ("breathiness", "clear", "breathy"),
+            ("dynamics", "natural", "even"),
+            ("space", "close", "roomy"),
+        ):
+            block = ttk.Frame(right)
+            block.pack(anchor="w", fill="x", pady=(4, 0))
+            ttk.Label(block, text=macro.title()).pack(anchor="w")
+            var = tk.DoubleVar(value=0.0)
+            self.macro_vars[macro] = var
+            ttk.Scale(block, from_=-1.0, to=1.0, variable=var,
+                      orient="horizontal", length=230).pack(anchor="w")
+            legend = ttk.Frame(block)
+            legend.pack(fill="x")
+            ttk.Label(legend, text=low, foreground=self.palette.muted).pack(side="left")
+            ttk.Label(legend, text=high, foreground=self.palette.muted).pack(side="right")
+
+        ttk.Button(right, text="Reset shape", command=self._reset_macros).pack(
+            anchor="w", pady=(8, 0))
+
+        # -- actions ---------------------------------------------------------
+        actions = ttk.Frame(self)
+        actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+        ttk.Label(actions, text="Name").pack(side="left")
+        self.name_var = tk.StringVar(value="My Design")
+        ttk.Entry(actions, textvariable=self.name_var, width=20).pack(
+            side="left", padx=(6, 12))
+        self.preview_btn = ttk.Button(actions, text="Listen",
+                                      command=self._preview)
+        self.preview_btn.pack(side="left")
+        self.install_btn = ttk.Button(actions, text="Add to my voices",
+                                      command=self._install)
+        self.install_btn.pack(side="left", padx=6)
+        ttk.Button(actions, text="Save recipe…", command=self._save).pack(side="left")
+        ttk.Button(actions, text="Open recipe…", command=self._open).pack(
+            side="left", padx=6)
+
+        self.status = ttk.Label(self, text="", wraplength=580, justify="left")
+        self.status.grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        self.columnconfigure(2, weight=1)
+
+    # -- base voice ----------------------------------------------------------
+
+    def refresh(self) -> None:
+        """List installed voices that have a speaker space to move through."""
+        usable = []
+        for key in voices.installed_keys():
+            path = voices.installed_path(key)
+            if path and designer.is_multi_speaker(path.with_suffix(".onnx.json")):
+                usable.append(key)
+        self.base_box["values"] = usable
+
+        if not usable:
+            self.base_note.config(
+                text="None of your installed voices have more than one speaker.\n"
+                     "Download a multi-speaker one from the Voice library — "
+                     "en_GB-vctk-medium has 109 speakers, en_US-libritts-high "
+                     "has 904.",
+                foreground=self.palette.warn)
+            self._set_enabled(False)
+            return
+
+        if self.base_var.get() not in usable:
+            self.base_var.set(usable[0])
+        self._load_base()
+
+    def _load_base(self) -> None:
+        key = self.base_var.get()
+        if not key or key == self.base_key:
+            return
+        path = voices.installed_path(key)
+        if path is None:
+            return
+        self.status.config(text=f"Reading {key}…", foreground=self.palette.muted)
+        self.update_idletasks()
+        try:
+            self.table = designer.speaker_table(path)
+            self.names = designer.speaker_names(
+                path.with_suffix(".onnx.json"), self.table.shape[0])
+            self.coords = designer.project(self.table)
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            self.base_note.config(text=f"Could not read {key}: {exc}",
+                                  foreground=self.palette.error)
+            self._set_enabled(False)
+            return
+
+        self.base_key = key
+        self.weights = {}
+        self.base_note.config(
+            text=f"{self.table.shape[0]} speakers, laid out by similarity. "
+                 "The layout is a guide; blending uses the full model.",
+            foreground=self.palette.muted)
+        self.status.config(text="")
+        self._draw_map()
+        self._set_enabled(True)
+        self._update_recipe()
+
+    def _set_enabled(self, on: bool) -> None:
+        for widget in (self.preview_btn, self.install_btn):
+            widget.state(["!disabled"] if on and not self._busy else ["disabled"])
+
+    # -- the map -------------------------------------------------------------
+
+    def _to_canvas(self, x: float, y: float) -> tuple[float, float]:
+        margin = 14
+        span = self.SIZE - 2 * margin
+        return (margin + (x + 1) / 2 * span, margin + (1 - (y + 1) / 2) * span)
+
+    def _from_canvas(self, cx: float, cy: float) -> tuple[float, float]:
+        margin = 14
+        span = self.SIZE - 2 * margin
+        return ((cx - margin) / span * 2 - 1, 1 - (cy - margin) / span * 2)
+
+    def _draw_map(self) -> None:
+        self.canvas.delete("all")
+        if self.coords is None:
+            return
+        chosen = set(self.weights)
+        for index, (x, y) in enumerate(self.coords):
+            cx, cy = self._to_canvas(float(x), float(y))
+            if index in chosen:
+                self.canvas.create_oval(cx - 5, cy - 5, cx + 5, cy + 5,
+                                        fill=self.palette.accent, outline="")
+            else:
+                self.canvas.create_oval(cx - 2, cy - 2, cx + 2, cy + 2,
+                                        fill=self.palette.muted, outline="")
+        if chosen:
+            # Where the blend actually sits, which is not any one speaker.
+            centre = np.average([self.coords[i] for i in chosen], axis=0,
+                                weights=[self.weights[i] for i in chosen])
+            cx, cy = self._to_canvas(float(centre[0]), float(centre[1]))
+            self.canvas.create_oval(cx - 7, cy - 7, cx + 7, cy + 7,
+                                    outline=self.palette.ok, width=2)
+
+    def _on_click(self, event) -> None:
+        if self.coords is None or self.table is None:
+            return
+        x, y = self._from_canvas(event.x, event.y)
+        _vector, self.weights = designer.from_map(self.table, self.coords, x, y)
+        self._draw_map()
+        self._update_recipe()
+
+    def _update_recipe(self) -> None:
+        if not self.weights:
+            self.recipe_label.config(text="Click the map to begin.")
+            return
+        total = sum(self.weights.values())
+        parts = sorted(self.weights.items(), key=lambda kv: -kv[1])
+        text = "  ".join(f"{self.names[i]} {w / total:.0%}" for i, w in parts)
+        self.recipe_label.config(text="Blend: " + text)
+
+    def _reset_macros(self) -> None:
+        for var in self.macro_vars.values():
+            var.set(0.0)
+
+    # -- building ------------------------------------------------------------
+
+    def _design(self) -> dsp.Design:
+        return dsp.Design(**{k: float(v.get())
+                             for k, v in self.macro_vars.items()}).clamped()
+
+    def _current(self) -> v2tvoice.DesignedVoice | None:
+        if not self.weights or self.table is None:
+            messagebox.showinfo("Voice Designer",
+                                "Click the map to choose a starting point first.",
+                                parent=self)
+            return None
+        total = sum(self.weights.values())
+        return v2tvoice.DesignedVoice(
+            name=self.name_var.get().strip() or "My Design",
+            base_voice=self.base_key,
+            speakers={self.names[i]: w / total for i, w in self.weights.items()},
+            design=self._design(),
+        )
+
+    def _bake_to(self, destination: Path, voice: v2tvoice.DesignedVoice,
+                 with_design: bool = True) -> Path:
+        base = voices.installed_path(self.base_key)
+        if base is None:
+            raise FileNotFoundError(f"{self.base_key} is no longer installed")
+        vector = designer.blend(self.table, self.weights)
+        path = designer.bake(base, base.with_suffix(".onnx.json"), vector,
+                             destination, name=voice.name)
+        if with_design and not voice.design.is_neutral:
+            designer.write_design(path, voice.design, voice.name)
+        return path
+
+    def _blend_key(self) -> tuple:
+        return (self.base_key, tuple(sorted(self.weights.items())))
+
+    def _preview(self) -> None:
+        """Bake, speak, shape, play -- reusing the dry audio where it can.
+
+        Baking and loading a 77 MB model costs about 1.2 seconds, which is a
+        long time in a loop whose whole purpose is click-listen-adjust. Only the
+        *blend* needs that work: the macros are post-processing, so moving a
+        slider replays cached audio through the chain in a few milliseconds.
+        """
+        voice = self._current()
+        if voice is None:
+            return
+        self._busy = True
+        self._set_enabled(False)
+        try:
+            key = self._blend_key()
+            if key != self._dry_key:
+                self.status.config(text="Building the voice…",
+                                   foreground=self.palette.muted)
+                self.update_idletasks()
+                import tempfile
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    # Baked without the effects sidecar, so what comes back is
+                    # dry and can be reshaped without synthesising again.
+                    path = self._bake_to(Path(tmp) / "preview.onnx", voice,
+                                         with_design=False)
+                    self._dry, self._dry_rate = _speak(path, self.PREVIEW_TEXT)
+                self._dry_key = key
+
+            design = self._design()
+            shaped = (dsp.apply(self._dry, self._dry_rate, design)
+                      if not design.is_neutral else self._dry)
+            self.status.config(text="Playing…", foreground=self.palette.muted)
+            self.update_idletasks()
+            _play(shaped, self._dry_rate)
+            self.status.config(text="", foreground=self.palette.text)
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            log.warning("preview failed: %s", exc)
+            self.status.config(text=f"Could not preview: {exc}",
+                               foreground=self.palette.error)
+        finally:
+            self._busy = False
+            self._set_enabled(True)
+
+    def _install(self) -> None:
+        voice = self._current()
+        if voice is None:
+            return
+        name = _slug(voice.name)
+        destination = voices.user_voices_dir() / f"{name}.onnx"
+        if destination.exists() and not messagebox.askyesno(
+                "Voice Designer",
+                f"A voice called {name} already exists. Replace it?", parent=self):
+            return
+
+        self._busy = True
+        self._set_enabled(False)
+        self.status.config(text="Building the voice…", foreground=self.palette.muted)
+        self.update_idletasks()
+        try:
+            path = self._bake_to(destination, voice)
+            # The recipe is saved beside the model, so the voice can be edited
+            # again later rather than only replaced.
+            voice.save(path.with_suffix(""))
+            self.status.config(
+                text=f"Added {path.name}. Pick it on the Voice tab.",
+                foreground=self.palette.ok)
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            log.warning("install failed: %s", exc)
+            self.status.config(text=f"Could not add the voice: {exc}",
+                               foreground=self.palette.error)
+        finally:
+            self._busy = False
+            self._set_enabled(True)
+
+    # -- recipes -------------------------------------------------------------
+
+    def _save(self) -> None:
+        voice = self._current()
+        if voice is None:
+            return
+        target = filedialog.asksaveasfilename(
+            parent=self, title="Save recipe", defaultextension=v2tvoice.SUFFIX,
+            initialfile=f"{_slug(voice.name)}{v2tvoice.SUFFIX}",
+            filetypes=[("Voice recipe", f"*{v2tvoice.SUFFIX}")])
+        if not target:
+            return
+        path = voice.save(Path(target))
+        self.status.config(
+            text=f"Saved {path.name} ({path.stat().st_size} bytes). "
+                 "It names the base voice rather than containing it, so it is "
+                 "safe to share.",
+            foreground=self.palette.ok)
+
+    def _open(self) -> None:
+        target = filedialog.askopenfilename(
+            parent=self, title="Open recipe",
+            filetypes=[("Voice recipe", f"*{v2tvoice.SUFFIX}"),
+                       ("All files", "*.*")])
+        if not target:
+            return
+        try:
+            voice = v2tvoice.load(Path(target))
+        except v2tvoice.UnreadableVoice as exc:
+            self.status.config(text=str(exc), foreground=self.palette.error)
+            return
+
+        if voice.base_voice not in (self.base_box["values"] or ()):
+            self.status.config(
+                text=f"This recipe is built on {voice.base_voice}, which is not "
+                     "installed. Download it from the Voice library first.",
+                foreground=self.palette.warn)
+            return
+
+        self.base_var.set(voice.base_voice)
+        self._load_base()
+        try:
+            self.weights = v2tvoice.resolve_speakers(voice, self.names)
+        except v2tvoice.UnreadableVoice as exc:
+            self.status.config(text=str(exc), foreground=self.palette.error)
+            return
+
+        self.name_var.set(voice.name)
+        for macro, value in voice.design.to_dict().items():
+            if macro in self.macro_vars:
+                self.macro_vars[macro].set(value)
+        self._draw_map()
+        self._update_recipe()
+        self.status.config(text=f"Opened {voice.name}.", foreground=self.palette.ok)
+
+
+def _speak(model: Path, text: str) -> tuple[np.ndarray, int]:
+    """Synthesise through the real engine, so previews include the effects."""
+    from .config import TtsConfig
+    from .tts import PiperEngine
+
+    engine = PiperEngine(TtsConfig(voice=str(model)))
+    return engine.synth(text), engine.rate
+
+
+def _play(audio: np.ndarray, rate: int) -> None:
+    import sounddevice as sd
+
+    sd.play(audio, rate)
+    sd.wait()
 
 
 def _play_wav(path: Path) -> None:

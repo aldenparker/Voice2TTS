@@ -387,6 +387,119 @@ def main() -> int:
     check("an unusable name still yields something",
           _slug("!!!") == "my-voice", _slug("!!!"))
 
+    print("\n[studio design panel]")
+    from voice2tts import designer as des
+    from voice2tts import v2tvoice as v2t
+
+    dp = win.design_panel
+    check("design panel is its own tab",
+          "Design" in [win.studio_nb.tab(t, "text") for t in win.studio_nb.tabs()])
+    check("all six macros have sliders", len(dp.macro_vars) == 6,
+          str(sorted(dp.macro_vars)))
+    check("macros start neutral",
+          all(abs(v.get()) < 1e-9 for v in dp.macro_vars.values()))
+
+    installed_multi = [k for k in voices_mod.installed_keys()
+                       if (p := voices_mod.installed_path(k))
+                       and des.is_multi_speaker(p.with_suffix(".onnx.json"))]
+    check("base list holds only multi-speaker voices",
+          list(dp.base_box["values"]) == installed_multi, str(installed_multi))
+    if not installed_multi:
+        # The bundled voices are all single-speaker, so this is the state a
+        # fresh install lands in. It has to explain itself, not just sit empty.
+        check("with no multi-speaker voice it says where to get one",
+              "Voice library" in dp.base_note.cget("text"),
+              dp.base_note.cget("text")[:70])
+        check("and the actions are disabled",
+              "disabled" in str(dp.preview_btn.state()))
+
+    # Drive the map with a synthetic speaker space, so the interaction is
+    # covered without a 77 MB download.
+    rng = np.random.default_rng(3)
+    dp.table = rng.standard_normal((12, 8)).astype(np.float32)
+    dp.coords = des.project(dp.table)
+    dp.names = [f"p{i:03d}" for i in range(12)]
+    dp.base_key = "en_GB-test-medium"
+    dp._draw_map()
+    root.update()
+    check("the map draws one dot per speaker",
+          len(dp.canvas.find_all()) == 12, str(len(dp.canvas.find_all())))
+
+    # Canvas coordinates must survive the round trip, or clicks land elsewhere
+    # than the dots they appear to hit.
+    cx, cy = dp._to_canvas(0.4, -0.3)
+    back = dp._from_canvas(cx, cy)
+    check("map coordinates round-trip",
+          abs(back[0] - 0.4) < 1e-6 and abs(back[1] + 0.3) < 1e-6, str(back))
+
+    class Click:
+        pass
+
+    spot = Click()
+    spot.x, spot.y = dp._to_canvas(float(dp.coords[4][0]), float(dp.coords[4][1]))
+    dp._on_click(spot)
+    root.update()
+    check("clicking a speaker selects it", dp.weights == {4: 1.0}, str(dp.weights))
+    check("the recipe is named in words", "p004" in dp.recipe_label.cget("text"),
+          dp.recipe_label.cget("text"))
+    check("the selection is marked on the map",
+          len(dp.canvas.find_all()) > 12, str(len(dp.canvas.find_all())))
+
+    between = (dp.coords[4] + dp.coords[7]) / 2
+    spot.x, spot.y = dp._to_canvas(float(between[0]), float(between[1]))
+    dp._on_click(spot)
+    check("clicking between speakers blends them", len(dp.weights) > 1,
+          str(dp.weights))
+    check("the blend is described as percentages",
+          "%" in dp.recipe_label.cget("text"), dp.recipe_label.cget("text"))
+
+    dp.macro_vars["warmth"].set(0.5)
+    dp.macro_vars["size"].set(-0.25)
+    dp.name_var.set("Test Design")
+    built = dp._current()
+    check("the design collects into a recipe", built is not None)
+    check("recipe carries the base voice", built.base_voice == "en_GB-test-medium")
+    check("recipe names speakers by label, not index",
+          all(k.startswith("p") for k in built.speakers), str(built.speakers))
+    check("recipe weights sum to one",
+          abs(sum(built.speakers.values()) - 1.0) < 1e-6)
+    check("recipe carries the macros",
+          abs(built.design.warmth - 0.5) < 1e-6
+          and abs(built.design.size + 0.25) < 1e-6)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        saved = built.save(Path(tmp) / "test")
+        reloaded = v2t.load(saved)
+        # Weights are rounded on the way out to keep the file readable, so the
+        # comparison is to the precision the format promises, not exact.
+        drift = max(abs(reloaded.speakers[k] - v) for k, v in built.speakers.items())
+        check("a designed voice round-trips through a recipe file",
+              reloaded.speakers.keys() == built.speakers.keys()
+              and drift < 1e-6 and abs(reloaded.design.warmth - 0.5) < 1e-4,
+              f"largest weight drift {drift:.2e}")
+        check("resolving it back gives the same speakers",
+              v2t.resolve_speakers(reloaded, dp.names).keys() == dp.weights.keys())
+
+    # Previewing costs a rebake and a 1.2 s model load, so the dry audio is
+    # cached against the blend. Moving a macro must NOT invalidate it; changing
+    # the blend must.
+    key_before = dp._blend_key()
+    dp.macro_vars["brightness"].set(0.8)
+    check("a macro change reuses the cached audio",
+          dp._blend_key() == key_before, "macros are post-processing")
+    spot.x, spot.y = dp._to_canvas(float(dp.coords[9][0]), float(dp.coords[9][1]))
+    dp._on_click(spot)
+    check("a new blend invalidates the cache", dp._blend_key() != key_before)
+    dp.base_key = "something-else"
+    check("changing the base voice invalidates it too",
+          dp._blend_key() != key_before)
+    dp.base_key = "en_GB-test-medium"
+
+    dp._reset_macros()
+    check("reset returns every macro to neutral",
+          all(abs(v.get()) < 1e-9 for v in dp.macro_vars.values()))
+    check("resetting does not clear the blend", bool(dp.weights))
+
     print("\n[updates tab]")
     import voice2tts as pkg
     from voice2tts import updater

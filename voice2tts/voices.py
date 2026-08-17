@@ -65,10 +65,21 @@ class VoiceEntry:
     quality: str        # x_low | low | medium | high
     language_label: str  # e.g. English (United States)
     size_mb: float
+    num_speakers: int = 1
 
     @property
     def installed(self) -> bool:
         return installed_path(self.key) is not None
+
+    @property
+    def multi_speaker(self) -> bool:
+        """Whether the Voice Designer can move through this voice's speakers.
+
+        25 of the 174 catalogue voices qualify. Reading it from the catalogue
+        means the designer can offer them before anything is downloaded --
+        otherwise the only way to find out is to fetch 100 MB and look.
+        """
+        return self.num_speakers > 1
 
     @property
     def bundled(self) -> bool:
@@ -146,6 +157,7 @@ def fetch_catalogue(timeout: float = 20.0, force: bool = False) -> list[VoiceEnt
                         else lang.get("name_english", lang.get("code", "?"))
                     ),
                     size_mb=round(onnx_bytes / 1e6, 1),
+                    num_speakers=int(blob.get("num_speakers") or 1),
                 )
             )
         except Exception:  # noqa: BLE001 - skip malformed entries, keep the rest

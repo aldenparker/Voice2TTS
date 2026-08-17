@@ -28,7 +28,23 @@ versioning follows [Semantic Versioning](https://semver.org/).
 - **Export** to `.onnx` + `.onnx.json` in the user voices directory, with a
   provenance sidecar recording the base checkpoint, dataset size and epochs.
 
-Not yet run end to end on real hardware — see ROADMAP.md.
+### Added — Voice Designer (0.6.0, in progress)
+
+- **Design a voice without training or recording.** A Studio → Design tab lays
+  the speakers of a multi-speaker voice out on a map by similarity; click
+  anywhere to blend the speakers around that point, listen, and adjust.
+  `en_GB-vctk-medium` has 109 speakers, `en_US-libritts-high` has 904.
+- **Six shape controls** — Size, Warmth, Brightness, Breathiness, Dynamics and
+  Space — over a fixed effects chain. Size shifts pitch and formants together
+  and puts the timing back, so a larger voice is deeper without being slower.
+- **Designed voices are ordinary voices.** The blend is baked into the model, so
+  the result appears in the voice picker and works with profiles, previews and
+  everything else with no special handling.
+- **`.v2tvoice` recipes** — a few hundred bytes of TOML naming the base voice and
+  the blend. Shareable and diffable, and it distributes a pointer rather than
+  anybody's weights.
+
+Neither tier has been run end to end on real hardware — see ROADMAP.md.
 
 ## [0.5.2] - 2026-08-16
 

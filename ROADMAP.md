@@ -20,7 +20,7 @@ publishes.
 |---|---|
 | Pipeline | mic → Silero VAD → Whisper → Piper → N outputs |
 | Latency | ~300 ms utterance to first audio (RTX 5080, `small.en`) |
-| Tests | 360 self-test + 113 GUI, ruff clean, CI on every push |
+| Tests | 463 self-test + 147 GUI, ruff clean, CI and the release gate run both |
 | Release gate | `release.yml` verifies (tag/version, lint, self-test) before it builds; asserted by a test |
 | Licence | GPL-3.0-or-later (Piper links eSpeak NG) |
 | Distribution | Inno Setup, per-user, unsigned; winget manifests staged |
@@ -151,7 +151,7 @@ trained end to end. Specifically unverified: the studio pack's torch install,
 `torch.cuda.is_available()` inside it, whether Lightning's progress bar parses
 as expected in practice, and whether an exported voice loads in the library.
 
-### Phase 3 — Voice Designer (~1–2 weeks, gated on Phase 0)
+### Phase 3 — Voice Designer ✅ (code complete; untested on real hardware)
 
 Build a voice without training, by moving through the speaker space of a
 multi-speaker model and shaping the result.
@@ -174,15 +174,27 @@ sample-domain difference measures the misalignment, not the timbre — which is
 how the first run of the spike managed to call a correct blend "beyond both
 parents". Comparison uses a long-term average spectrum.
 
-- [ ] **Similarity map** — project speaker embeddings to 2D (UMAP or PCA),
-      scatter plot, click to blend nearest neighbours by inverse distance,
-      audition on hover. Projection precomputed and shipped as a small array.
-- [ ] **Recipe mixer** — name 2–5 speakers with weights, for control and
-      reproducibility once the map has found a region
-- [ ] **Macro controls** — Warmth, Brightness, Breathiness, Size — each driving
-      several parameters, with an Advanced disclosure over a fixed chain
-      (pitch → formant → EQ → dynamics → space)
-- [ ] `.v2tvoice` save/load, and appearance in the normal voice picker
+- [x] **Similarity map** — PCA to 2D, scatter plot, click to blend the nearest
+      speakers by inverse distance. PCA rather than UMAP: UMAP means numba and
+      llvmlite in the installer to lay out a few hundred points, while PCA is
+      one SVD (7 ms for 109 speakers), needs only numpy, and is deterministic,
+      so a position means the same thing between sessions and machines.
+      Computed on load rather than shipped — it is faster than reading the file
+      would be.
+- [x] **Recipe mixer** — the click produces named weights, shown as percentages
+      and saved as speaker labels rather than indices
+- [x] **Macro controls** — Size, Warmth, Brightness, Breathiness, Dynamics,
+      Space over a fixed chain. Every one is verified by measurement against
+      real speech, which is how `size` was caught shipping inverted (it made
+      "larger" brighter and shorter) and how breathiness was caught at 100×
+      its usable level.
+- [x] `.v2tvoice` save/load, and appearance in the normal voice picker
+
+**Previewing is cached against the blend.** Baking and loading a 77 MB model
+costs about 1.2 s, which is a long time in a loop whose entire purpose is
+click-listen-adjust. The macros are post-processing, so only a change of
+speakers pays that; moving a slider reshapes cached dry audio in a few
+milliseconds.
 
 **Speaker IDs are opaque** (`p3922`, `p239`, `TXHC`) with no gender, age or accent
 metadata in the catalogue. That is what rules out a browsable list and makes the
@@ -223,9 +235,10 @@ sidecar alongside.
       an hour. Importing carries a one-line confirmation that the speaker consented
       — cheap, and proportionate for a feature that clones a voice into a live
       call. Say the word if even that is unwanted.
-- [ ] **Ship both tiers in 0.6.0, or trainer only?** Recommendation: trainer only.
-      It is a release on its own and the 2.5 GB optional pack deserves its own
-      shakeout.
+- [x] **Ship both tiers in 0.6.0 — decided: both.** Trainer and designer go out
+      together. Noting for the record that the recommendation was trainer only,
+      on the grounds that the multi-GB optional pack deserves its own shakeout;
+      that risk has not gone away, it has been accepted.
 - [x] **Base-voice licensing — decided: fetch, show, and require agreement; do
       not refuse.** The `MODEL_CARD` beside each checkpoint is fetched and its
       licence shown in the confirmation dialog before an 850 MB download starts,
@@ -293,6 +306,13 @@ Things verified in code but not yet proven with sound.
 - [ ] **Studio pack install.** Downloading the embeddable Python, un-isolating
       it, bootstrapping pip and installing torch has never been run to
       completion. Confirm `torch.cuda.is_available()` reports true afterwards.
+- [ ] **A designed voice, by ear.** The macros are tuned by measurement —
+      spectral centroid, crest factor, autocorrelation pitch — because that is
+      what can be automated. Nobody has listened to one yet. Breathiness in
+      particular is a judgement call: it sits at 1/100th of the first attempt,
+      chosen to keep the centroid rise modest, and may still be wrong in either
+      direction. Check also that a designed voice loads in the frozen build,
+      where `onnx` is a new dependency.
 - [ ] **A voice, end to end.** Record → train → audition → export → select it on
       the Voice tab and hear it in Discord. Until this is done, Phase 2 is code
       that should work rather than a feature that does. Watch in particular for:
