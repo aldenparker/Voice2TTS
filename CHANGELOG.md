@@ -3,6 +3,33 @@
 All notable changes to Voice2TTS. Format follows [Keep a Changelog](https://keepachangelog.com/),
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added — Voice Studio (0.6.0, in progress)
+
+- **Record your own voice.** A Studio → Record tab shows one sentence at a time
+  from the CMU ARCTIC prompt list, records it, checks it and keeps a running
+  total against a target. Prompts are shuffled, so stopping early still leaves
+  broad phonetic coverage; the remaining estimate is based on how fast you
+  actually read rather than a fixed sentence count.
+- **Clip quality checks at recording time.** Too quiet, clipping, too short,
+  noisy, mostly silence, and "shorter than the prompt — was it cut off?". Noise
+  is judged as signal-to-noise ratio rather than an absolute level, so a quiet
+  clean take passes and a loud hissy one does not.
+- **Importing existing recordings**, through the same checks, behind a
+  confirmation that the speaker consented.
+- **Training** — `piper.train` in the studio pack's own interpreter, with live
+  progress, a stop button, and resume from `last.ckpt` after a crash or reboot.
+- **Base checkpoints** downloaded from `rhasspy/piper-checkpoints` (~850 MB,
+  resumable). The model card's licence is shown and agreed to first, since a
+  trained voice inherits it.
+- **Auditioning mid-run**, so a run that is going nowhere can be heard rather
+  than waited out.
+- **Export** to `.onnx` + `.onnx.json` in the user voices directory, with a
+  provenance sidecar recording the base checkpoint, dataset size and epochs.
+
+Not yet run end to end on real hardware — see ROADMAP.md.
+
 ## [0.5.2] - 2026-08-16
 
 ### Fixed
