@@ -1449,7 +1449,14 @@ def test_studio_gate() -> None:
 
     check("probe runs on this machine", isinstance(studiopack.probe(), Hardware))
     live = studiopack.probe()
-    check("probe finds this GPU", live.has_gpu, f"{live.gpu_name} {live.vram_gb} GB")
+    # NOT "this machine has a GPU" -- that asserts the developer's hardware and
+    # fails on any runner, which is exactly how this test broke CI. What is
+    # actually worth checking is that the probe agrees with itself: a named GPU
+    # comes with memory, and no GPU comes with none.
+    consistent = (live.has_gpu and live.gpu_name and live.vram_gb > 0) or (
+        not live.has_gpu and live.vram_gb == 0)
+    check("probe reports the GPU consistently", bool(consistent),
+          f"{live.gpu_name or 'no NVIDIA GPU'}, {live.vram_gb} GB")
     check("probe reads free disk", live.free_disk_gb > 0,
           f"{live.free_disk_gb} GB")
 
