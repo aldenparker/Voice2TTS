@@ -3,6 +3,25 @@
 All notable changes to Voice2TTS. Format follows [Keep a Changelog](https://keepachangelog.com/),
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] - 2026-08-16
+
+### Fixed
+
+- **No dropdown in the application would open in 0.5.1.** Resetting the combobox
+  list colours used `option_add(..., "")`, which stores an empty string rather than
+  unsetting the option; Tk then could not parse it as a colour and the list never
+  appeared. Every picker was affected — microphone, outputs, voice, profile, theme,
+  recognition model, cable channel. Native mode now writes the real Windows system
+  colours (`SystemWindow` and friends), so the list also follows a high-contrast or
+  custom system theme.
+
+  Only 0.5.1 was affected: earlier releases defaulted to a repainted theme, which
+  always wrote real colours.
+
+  Nothing caught this because constructing a combobox never builds its dropdown —
+  the list is created when the arrow is clicked. The suite now opens one for real
+  in every theme mode.
+
 ## [0.5.1] - 2026-08-16
 
 ### Fixed — release gating

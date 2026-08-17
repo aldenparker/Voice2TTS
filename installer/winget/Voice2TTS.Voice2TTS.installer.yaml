@@ -1,5 +1,5 @@
 PackageIdentifier: Voice2TTS.Voice2TTS
-PackageVersion: 0.5.1
+PackageVersion: 0.5.2
 InstallerType: inno
 # Per-user, matching the Inno script: no elevation for the app itself.
 Scope: user
@@ -11,7 +11,7 @@ UpgradeBehavior: install
 ReleaseDate: 2026-08-16
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/aldenparker/Voice2TTS/releases/download/v0.5.1/Voice2TTS-Setup-0.5.1.exe
+    InstallerUrl: https://github.com/aldenparker/Voice2TTS/releases/download/v0.5.2/Voice2TTS-Setup-0.5.2.exe
     InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
 ManifestType: installer
 ManifestVersion: 1.6.0

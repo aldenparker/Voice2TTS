@@ -3,7 +3,7 @@
 # Single source of truth for the version. build.ps1 reads this and passes it to
 # PyInstaller and Inno Setup, and updater.py compares against it. Do not hardcode
 # a version anywhere else.
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 # Where this build looks for updates. Baked in so a normal install updates itself
 # without the user having to find and type a repository name. Forks should change

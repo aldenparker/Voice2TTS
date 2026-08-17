@@ -11,9 +11,10 @@ reason something changed is usually worth more than the plan itself.
 
 ## Status
 
-**Current release: 0.5.1** — 0.5.0 published with installer and checksum attached;
-0.5.1 reverts the interface to Windows' native appearance. Release automation is
-verified: tagging `v*` builds and publishes on its own.
+**Current release: 0.5.2** — 0.5.1 reverted the interface to Windows' native
+appearance and shipped with every dropdown broken; 0.5.2 fixes that. Release
+automation is verified: tagging `v*` runs lint and the self-test, then builds and
+publishes.
 
 | | |
 |---|---|

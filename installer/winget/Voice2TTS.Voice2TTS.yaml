@@ -6,7 +6,7 @@
 # Note: winget requires the installer to be reachable at a stable URL, which the
 # GitHub release provides.
 PackageIdentifier: Voice2TTS.Voice2TTS
-PackageVersion: 0.5.1
+PackageVersion: 0.5.2
 DefaultLocale: en-US
 ManifestType: version
 ManifestVersion: 1.6.0
