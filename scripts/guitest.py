@@ -169,6 +169,40 @@ def main() -> int:
           win.subs_preview.cget("text"))
     win.subs_enabled_var.set(True)
 
+    print("\n[studio tab]")
+    from voice2tts import studiopack
+
+    check("hardware line populated", "Graphics" in win.studio_hw.cget("text"),
+          win.studio_hw.cget("text"))
+    check("verdict shown", bool(win.studio_verdict.cget("text")),
+          win.studio_verdict.cget("text")[:60])
+    check("pack state shown", bool(win.studio_pack.cget("text")),
+          win.studio_pack.cget("text")[:60])
+
+    # On capable hardware there is nothing to override, so the checkbox must not
+    # invite a pointless choice.
+    capable = studiopack.gate().ok and not studiopack.gate().blockers
+    if capable:
+        check("override disabled when nothing is blocking",
+              "disabled" in str(win.studio_override.state()),
+              str(win.studio_override.state()))
+    else:
+        check("override offered when something is blocking",
+              "disabled" not in str(win.studio_override.state()),
+              str(win.studio_override.state()))
+
+    win.studio_override_var.set(True)
+    win._toggle_studio_override()
+    check("override writes through to config", cfg.studio.ignore_hardware_check)
+    win.studio_override_var.set(False)
+    win._toggle_studio_override()
+    check("override clears again", not cfg.studio.ignore_hardware_check)
+
+    label = win.studio_btn.cget("text")
+    check("button matches install state",
+          label == ("Remove" if studiopack.status().installed else "Download"),
+          label)
+
     print("\n[updates tab]")
     import voice2tts as pkg
     from voice2tts import updater

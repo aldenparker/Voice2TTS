@@ -69,7 +69,7 @@ Two things learned that change Phase 3:
   `emb_g.weight` from the patched model because nothing references it, so the
   designer cannot read speaker vectors back out of a live session.
 
-### Phase 1 — Studio pack and hardware gate (in progress)
+### Phase 1 — Studio pack and hardware gate ✅ DONE (bar one live run)
 
 - [x] `studiopack.py` — probe, gate, install, status, uninstall
 - [x] Hardware probe: NVIDIA GPU, VRAM, free disk, CUDA pack present
@@ -77,8 +77,9 @@ Two things learned that change Phase 3:
 - [x] **IKWIAD override** — `studio.ignore_hardware_check`, reported in
       diagnostics so a training bug report shows the machine was under-spec
 - [x] Interpreter bootstrap verified (embeddable Python → pip → install → import)
-- [ ] Run a full `install()` including torch, and confirm `torch.cuda.is_available()`
-- [ ] Settings UI for the pack: install, size, remove, override checkbox
+- [x] Settings → Studio: hardware report, verdict, override, install/remove
+- [ ] **Run a full `install()` including torch and confirm
+      `torch.cuda.is_available()`** — to be done from the GUI during testing
 
 **The training environment is a separate interpreter, not an import.** Rather than
 following the `gpupack.py` pattern of making DLLs importable in-process, the studio

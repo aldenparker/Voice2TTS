@@ -20,6 +20,7 @@ from . import (
     gpupack,
     loopback,
     profiles,
+    studiopack,
     substitutions,
     theme,
     updater,
@@ -99,6 +100,7 @@ class SettingsWindow(tk.Toplevel):
         self._build_voice_library(nb)
         self._build_words(nb)
         self._build_history(nb)
+        self._build_studio(nb)
         self._build_recognition(nb)
         self._build_updates(nb)
         self._build_status(nb)
@@ -1192,6 +1194,177 @@ class SettingsWindow(tk.Toplevel):
         self._refresh_history()
         self.hist_status.config(text="Cleared")
 
+    # -- studio tab -----------------------------------------------------------
+
+    def _build_studio(self, nb: ttk.Notebook) -> None:
+        tab = ttk.Frame(nb, padding=10)
+        nb.add(tab, text="Studio")
+
+        ttk.Label(tab, text="Make your own voice", font=("", 10, "bold")).grid(
+            row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(
+            tab,
+            text="Record yourself reading for a while, then train a voice from it.\n"
+                 "The result installs like any other voice and works everywhere.",
+            foreground=self.palette.muted, justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 10))
+
+        ttk.Label(tab, text="This machine", font=("", 9, "bold")).grid(
+            row=2, column=0, columnspan=3, sticky="w")
+        self.studio_hw = ttk.Label(tab, text="Checking...", justify="left",
+                                   wraplength=560)
+        self.studio_hw.grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 4))
+
+        self.studio_verdict = ttk.Label(tab, text="", justify="left", wraplength=560)
+        self.studio_verdict.grid(row=4, column=0, columnspan=3, sticky="w")
+
+        self.studio_override_var = tk.BooleanVar()
+        self.studio_override = ttk.Checkbutton(
+            tab,
+            text="I know what I am doing — train anyway",
+            variable=self.studio_override_var,
+            command=self._toggle_studio_override,
+        )
+        self.studio_override.grid(row=5, column=0, columnspan=3, sticky="w",
+                                  pady=(4, 0))
+        ttk.Label(
+            tab,
+            text="Under-spec hardware runs out of memory rather than breaking "
+                 "anything;\nthe cost is the time since the last checkpoint.",
+            foreground=self.palette.muted, justify="left",
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 10))
+
+        ttk.Separator(tab, orient="horizontal").grid(
+            row=7, column=0, columnspan=3, sticky="ew", pady=4)
+
+        ttk.Label(tab, text="Training environment", font=("", 9, "bold")).grid(
+            row=8, column=0, columnspan=3, sticky="w", pady=(6, 2))
+        self.studio_pack = ttk.Label(tab, text="", justify="left", wraplength=560)
+        self.studio_pack.grid(row=9, column=0, columnspan=3, sticky="w")
+
+        row = ttk.Frame(tab)
+        row.grid(row=10, column=0, columnspan=3, sticky="w", pady=6)
+        self.studio_btn = ttk.Button(row, text="Download",
+                                     command=self._toggle_studio_pack)
+        self.studio_btn.pack(side="left")
+        ttk.Button(row, text="Re-check", command=self._refresh_studio).pack(
+            side="left", padx=6)
+        self.studio_progress = ttk.Progressbar(row, mode="indeterminate", length=180)
+
+        self.studio_log = ttk.Label(tab, text="", foreground=self.palette.muted,
+                                    wraplength=580, justify="left")
+        self.studio_log.grid(row=11, column=0, columnspan=3, sticky="w")
+
+        tab.columnconfigure(2, weight=1)
+        self._refresh_studio()
+
+    def _refresh_studio(self) -> None:
+        hw = studiopack.probe()
+        gpu = f"{hw.gpu_name} ({hw.vram_gb:.0f} GB)" if hw.has_gpu else "no NVIDIA GPU"
+        self.studio_hw.config(
+            text=f"Graphics: {gpu}          Free disk: {hw.free_disk_gb:.0f} GB")
+
+        result = studiopack.gate(
+            override=self.cfg.studio.ignore_hardware_check, hardware=hw)
+        if result.blockers:
+            self.studio_verdict.config(
+                text="\n".join(result.blockers),
+                foreground=self.palette.warn if result.ok else self.palette.error)
+            self.studio_override.state(["!disabled"])
+        else:
+            self.studio_verdict.config(
+                text="This machine can train a voice."
+                     + ("\n" + "\n".join(result.warnings) if result.warnings else ""),
+                foreground=self.palette.ok)
+            # Nothing to override, so the checkbox would only invite confusion.
+            self.studio_override.state(["disabled"])
+
+        state = studiopack.status()
+        if not state.installed:
+            self.studio_pack.config(
+                text=f"Not installed. About {studiopack.APPROX_DOWNLOAD_GB:.0f} GB, "
+                     "downloaded only when you ask for it.",
+                foreground=self.palette.muted)
+            self.studio_btn.config(text="Download")
+        else:
+            detail = f"Installed — {state.size_gb:.1f} GB"
+            if not state.usable:
+                detail += "  (incomplete; remove and download again)"
+            self.studio_pack.config(text=detail, foreground=self.palette.ok
+                                    if state.usable else self.palette.error)
+            self.studio_btn.config(text="Remove")
+
+        # Training is possible only when the gate allows it and the pack is there.
+        allowed = result.ok
+        self.studio_btn.state(["!disabled"] if allowed or state.installed
+                              else ["disabled"])
+
+    def _toggle_studio_override(self) -> None:
+        self.cfg.studio.ignore_hardware_check = self.studio_override_var.get()
+        self._refresh_studio()
+
+    def _toggle_studio_pack(self) -> None:
+        if studiopack.status().installed:
+            if not messagebox.askyesno(
+                "Remove training environment",
+                "Delete the training environment? Voices you have already trained "
+                "are kept.",
+                parent=self,
+            ):
+                return
+            studiopack.uninstall()
+            self.studio_log.config(text="Removed.")
+            self._refresh_studio()
+            return
+
+        gb = studiopack.APPROX_DOWNLOAD_GB
+        if not messagebox.askokcancel(
+            "Download training environment",
+            f"This downloads about {gb:.0f} GB (PyTorch and the Piper trainer) into\n"
+            f"{studiopack.studio_dir()}\n\n"
+            "It runs separately from Voice2TTS and can be removed at any time.\n\n"
+            "Continue?",
+            parent=self,
+        ):
+            return
+
+        self.studio_btn.state(["disabled"])
+        self.studio_progress.pack(side="left", padx=8)
+        self.studio_progress.start(12)
+
+        def report(msg: str) -> None:
+            self.after(0, lambda: self.studio_log.config(text=msg))
+
+        def work() -> None:
+            try:
+                studiopack.install(progress=report)
+            except Exception as exc:  # noqa: BLE001
+                failure = str(exc)
+                self.after(0, lambda: self._studio_done(failure))
+                return
+            self.after(0, lambda: self._studio_done(None))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _studio_done(self, error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        self.studio_progress.stop()
+        self.studio_progress.pack_forget()
+        self.studio_btn.state(["!disabled"])
+        if error:
+            self.studio_log.config(text="", foreground=self.palette.muted)
+            messagebox.showerror("Download failed", error, parent=self)
+            self._refresh_studio()
+            return
+        state = studiopack.status(deep=True)
+        cuda = ("CUDA available" if state.cuda_available
+                else "CUDA NOT available — training will be very slow")
+        self.studio_log.config(
+            text=f"Ready. torch {state.torch_version}, {cuda}.",
+            foreground=self.palette.ok if state.cuda_available else self.palette.warn)
+        self._refresh_studio()
+
     # -- recognition tab ------------------------------------------------------
 
     def _build_recognition(self, nb: ttk.Notebook) -> None:
@@ -1627,6 +1800,9 @@ class SettingsWindow(tk.Toplevel):
             for r in c.text.substitutions
         ]
         self._render_subs()
+
+        self.studio_override_var.set(c.studio.ignore_hardware_check)
+        self._refresh_studio()
 
         self._refresh_profiles()
         self.theme_var.set(c.theme)
