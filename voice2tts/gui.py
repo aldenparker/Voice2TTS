@@ -13,7 +13,7 @@ import tkinter as tk
 import webbrowser
 from tkinter import messagebox, ttk
 
-from . import cable, devices, gpupack, updater, voices
+from . import DEFAULT_UPDATE_REPO, cable, devices, gpupack, updater, voices
 from .config import MODES, WHISPER_MODELS, Config, OutputTarget
 from .diagnostics import diagnostics
 from .hotkey import describe
@@ -717,53 +717,64 @@ class SettingsWindow(tk.Toplevel):
         ttk.Entry(tab, textvariable=self.repo_var, width=34).grid(
             row=2, column=1, sticky="w", padx=6, pady=(12, 2)
         )
-        ttk.Label(tab, text="owner/name", foreground="#666").grid(
+        ttk.Button(tab, text="Use default", command=self._reset_repo).grid(
             row=2, column=2, sticky="w"
         )
+        ttk.Label(
+            tab,
+            text=f"Prefilled with {DEFAULT_UPDATE_REPO}. Clear it to stop checking.",
+            foreground="#666",
+        ).grid(row=3, column=0, columnspan=3, sticky="w", padx=6)
 
         self.check_start_var = tk.BooleanVar()
         ttk.Checkbutton(tab, text="Check for updates when Voice2TTS starts",
                         variable=self.check_start_var).grid(
-            row=3, column=0, columnspan=3, sticky="w", pady=(8, 0)
+            row=4, column=0, columnspan=3, sticky="w", pady=(8, 0)
         )
 
-        ttk.Label(tab, text="Check at most every").grid(row=4, column=0, sticky="w",
+        ttk.Label(tab, text="Check at most every").grid(row=5, column=0, sticky="w",
                                                         pady=2)
         self.interval_var = tk.IntVar()
         ttk.Spinbox(tab, from_=0, to=720, textvariable=self.interval_var,
-                    width=6).grid(row=4, column=1, sticky="w", padx=6)
+                    width=6).grid(row=5, column=1, sticky="w", padx=6)
         ttk.Label(tab, text="hours (0 = never)", foreground="#666").grid(
-            row=4, column=2, sticky="w"
+            row=5, column=2, sticky="w"
         )
 
         ttk.Label(
             tab,
             text="Checking contacts api.github.com. Nothing else is sent.",
             foreground="#666",
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         ttk.Separator(tab, orient="horizontal").grid(
-            row=6, column=0, columnspan=3, sticky="ew", pady=12
+            row=7, column=0, columnspan=3, sticky="ew", pady=12
         )
 
         row = ttk.Frame(tab)
-        row.grid(row=7, column=0, columnspan=3, sticky="w")
+        row.grid(row=8, column=0, columnspan=3, sticky="w")
         self.update_btn = ttk.Button(row, text="Check now", command=self._check_updates)
         self.update_btn.pack(side="left")
         self.update_status = ttk.Label(row, text="", foreground="#666")
         self.update_status.pack(side="left", padx=10)
 
         self.update_notes = tk.Text(tab, height=8, wrap="word")
-        self.update_notes.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
+        self.update_notes.grid(row=9, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
         self.update_notes.configure(state="disabled")
 
         tab.columnconfigure(1, weight=1)
-        tab.rowconfigure(8, weight=1)
+        tab.rowconfigure(9, weight=1)
+
+    def _reset_repo(self) -> None:
+        self.repo_var.set(DEFAULT_UPDATE_REPO)
+        self.update_status.config(text="")
 
     def _check_updates(self) -> None:
         repo = self.repo_var.get().strip()
         if not repo:
-            self.update_status.config(text="Set a repository first.")
+            self.update_status.config(
+                text="Update checking is off. Press 'Use default' to turn it back on."
+            )
             return
         self.cfg.updates.repo = repo
         self.cfg.validate()

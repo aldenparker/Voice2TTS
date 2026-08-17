@@ -104,9 +104,13 @@ can't be deleted; downloaded ones can.
 
 ## Updates
 
-Settings → **Updates** takes a GitHub repository as `owner/name`. Once set, the app
-checks on startup (at most once every 24 hours, adjustable, and switchable off),
-and offers a one-click update when a newer release exists.
+Updates work out of the box — the repository is baked into the build, so there is
+nothing to configure. The app checks on startup (at most once every 24 hours,
+adjustable) and offers a one-click update when a newer release exists.
+
+Settings → **Updates** shows the repository if you want to point a fork somewhere
+else, and clearing that field disables update checking entirely. **Use default**
+puts it back.
 
 Installing an update downloads the installer, verifies its size and SHA-256 against
 the published `.sha256` asset, runs it silently, and relaunches. No UAC prompt — the

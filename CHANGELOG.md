@@ -60,6 +60,12 @@ versioning follows [Semantic Versioning](https://semver.org/).
 - The self-test synthesizes its own speech sample instead of relying on a leftover
   from `spike/02_tts.py`, which is gitignored and so absent on a clean checkout —
   the VAD and STT checks failed on the first CI run for exactly that reason.
+- The update repository is now prefilled with this build's own repository, so a
+  normal install updates itself without anyone having to find and type a repo name.
+  Clearing the field still disables checking, and forks override it by changing
+  `DEFAULT_UPDATE_REPO` in `voice2tts/__init__.py`. Config schema bumped to 2: a
+  schema-1 file with a blank repository adopts the default, while one the user
+  chose — or deliberately cleared at schema 2 — is left alone.
 - `pyproject.toml`, ruff configuration, `.editorconfig`, `CONTRIBUTING.md`,
   `SECURITY.md`.
 

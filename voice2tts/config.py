@@ -11,11 +11,17 @@ from typing import Any
 
 import tomli_w
 
+from . import DEFAULT_UPDATE_REPO
 from .paths import config_path
 
 log = logging.getLogger(__name__)
 
 MODES = ("ptt", "vad", "both")
+
+# Raise when a change needs a migration in Config.migrate(). Adding a field does
+# not: the loader fills unknown-but-missing fields from the dataclass defaults.
+#   1 -> 2  update repository became prefilled rather than blank
+CURRENT_SCHEMA = 2
 WHISPER_MODELS = ("tiny.en", "base.en", "small.en", "medium.en", "distil-small.en", "large-v3")
 
 
@@ -94,8 +100,9 @@ class TtsConfig:
 
 @dataclass
 class UpdateConfig:
-    # "owner/name" on GitHub. Empty disables update checking entirely.
-    repo: str = ""
+    # "owner/name" on GitHub, prefilled with this build's own repository so updates
+    # work out of the box. Clearing it disables update checking entirely.
+    repo: str = DEFAULT_UPDATE_REPO
     check_on_start: bool = True
     interval_hours: int = 24        # 0 also disables automatic checks
     last_check: float = 0.0         # epoch seconds; 0 means never
@@ -110,10 +117,9 @@ class Config:
     stt: SttConfig = field(default_factory=SttConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
     updates: UpdateConfig = field(default_factory=UpdateConfig)
-    # Bumped only when a change cannot be handled by the tolerant loader below --
-    # a renamed or re-meaning'd field, not a new one. Gives future versions a hook
-    # to migrate rather than silently misreading an old file.
-    schema_version: int = 1
+    # New configs are written at the current schema; files predating the field are
+    # read as 1 in from_dict() so migrate() can bring them forward.
+    schema_version: int = CURRENT_SCHEMA
     start_minimized: bool = True
     run_at_login: bool = False
     log_level: str = "INFO"
@@ -165,6 +171,23 @@ class Config:
         )
         cfg.validate()
         return cfg
+
+    def migrate(self) -> list[str]:
+        """Bring an older config forward. Returns a description of what changed.
+
+        Only for changes the tolerant loader cannot handle on its own. Adding a
+        field needs nothing here; changing what an existing value *means* does.
+        """
+        notes: list[str] = []
+        # Before schema 2 the repository was blank by default, so an empty value
+        # there meant "never set" rather than "deliberately disabled". Adopt the
+        # built-in default; from schema 2 on, empty means the user cleared it and
+        # we leave it alone.
+        if self.schema_version < 2 and not self.updates.repo:
+            self.updates.repo = DEFAULT_UPDATE_REPO
+            notes.append(f"update repository set to {DEFAULT_UPDATE_REPO}")
+        self.schema_version = CURRENT_SCHEMA
+        return notes
 
     def ensure_usable_output(self) -> bool:
         """Guarantee at least one enabled output; returns True if it had to repair.
@@ -223,6 +246,13 @@ def load_config(path: Path | None = None) -> Config:
     except Exception as exc:  # noqa: BLE001 - never let a bad file block startup
         log.error("could not read %s (%s); using defaults", path, exc)
         return default_config()
+
+    if cfg.schema_version < CURRENT_SCHEMA:
+        previous = cfg.schema_version
+        for note in cfg.migrate():
+            log.info("config migrated: %s", note)
+        log.info("config schema %d -> %d", previous, cfg.schema_version)
+        cfg.save(path)
 
     if cfg.ensure_usable_output():
         log.warning(

@@ -382,6 +382,39 @@ def test_updates() -> None:
     except Exception as exc:  # noqa: BLE001
         check("refuses to self-install from source", False, str(exc))
 
+    # The repository must be prefilled, or every user has to find and type it.
+    import voice2tts as pkg
+    from voice2tts.config import CURRENT_SCHEMA
+
+    fresh = Config()
+    check("new config prefills the update repo",
+          fresh.updates.repo == pkg.DEFAULT_UPDATE_REPO, fresh.updates.repo)
+    check("default repo passes the same validation as user input",
+          bool(updater._REPO_RE.match(pkg.DEFAULT_UPDATE_REPO)),
+          pkg.DEFAULT_UPDATE_REPO)
+    check("new config is written at the current schema",
+          fresh.schema_version == CURRENT_SCHEMA, str(fresh.schema_version))
+
+    # A schema-1 file predates the prefill, so a blank repo there means "never set"
+    # and should adopt the default.
+    old = Config.from_dict({"schema_version": 1, "updates": {"repo": ""}})
+    notes = old.migrate()
+    check("schema 1 with a blank repo adopts the default",
+          old.updates.repo == pkg.DEFAULT_UPDATE_REPO, str(notes))
+    check("migration advances the schema", old.schema_version == CURRENT_SCHEMA)
+
+    # ...but a repo the user chose must survive untouched.
+    kept = Config.from_dict({"schema_version": 1, "updates": {"repo": "someone/fork"}})
+    kept.migrate()
+    check("migration keeps a user-chosen repo", kept.updates.repo == "someone/fork",
+          kept.updates.repo)
+
+    # From schema 2 on, blank means the user deliberately turned checking off.
+    off = Config.from_dict({"schema_version": CURRENT_SCHEMA, "updates": {"repo": ""}})
+    off.migrate()
+    check("clearing the repo stays cleared at current schema", off.updates.repo == "",
+          repr(off.updates.repo))
+
     # Config normalisation: a pasted URL should become owner/name.
     cfg = Config()
     cfg.updates.repo = "https://github.com/someone/Voice2TTS/"

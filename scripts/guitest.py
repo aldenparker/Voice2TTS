@@ -112,7 +112,21 @@ def main() -> int:
     check("can select an installed voice", win.voice_var.get() == rows[0], rows[0])
 
     print("\n[updates tab]")
+    import voice2tts as pkg
     from voice2tts import updater
+
+    check("repo field prefilled from the default",
+          win.repo_var.get() == pkg.DEFAULT_UPDATE_REPO, win.repo_var.get())
+    win.repo_var.set("")
+    win._reset_repo()
+    check("'Use default' restores the repo",
+          win.repo_var.get() == pkg.DEFAULT_UPDATE_REPO, win.repo_var.get())
+    win.repo_var.set("")
+    win._check_updates()
+    check("cleared repo reads as off, not unconfigured",
+          "turned back on" in win.update_status.cget("text")
+          or "off" in win.update_status.cget("text").lower(),
+          win.update_status.cget("text"))
 
     win.repo_var.set("https://github.com/someone/Voice2TTS/")
     win.interval_var.set(12)

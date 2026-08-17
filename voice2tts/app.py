@@ -227,10 +227,12 @@ class TrayApp:
         from . import updater
 
         if not self.cfg.updates.repo:
+            # Only reachable if the user deliberately cleared it; the default is
+            # baked in, so this is "you turned it off", not "you forgot to set it".
             messagebox.showinfo(
                 "Voice2TTS",
-                "No update source configured.\n\n"
-                "Set the GitHub repository in Settings -> Updates.",
+                "Update checking is turned off.\n\n"
+                "Settings -> Updates -> 'Use default' turns it back on.",
             )
             return
 
