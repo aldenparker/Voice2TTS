@@ -13,7 +13,7 @@ import threading
 import time
 import tkinter as tk
 from collections import deque
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import messagebox, ttk
 
 import pystray
 
@@ -22,6 +22,7 @@ from .gui import SettingsWindow
 from .icon import make_icon
 from .pipeline import Pipeline, State
 from .platform_win import apply_tk_scaling, listen_for_activation
+from .speakbox import SpeakBox
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ class TrayApp:
         self.events: deque[tuple[str, str]] = deque(maxlen=300)
         self.settings: SettingsWindow | None = None
         self.wizard = None
+        self.speakbox = None
         self.pending_update = None
         self._quitting = False
 
@@ -90,7 +92,8 @@ class TrayApp:
                     mode_item("Both", "both"),
                 ),
             ),
-            pystray.MenuItem("Speak text...", lambda _i, _it: self._post(self._speak_prompt)),
+            pystray.MenuItem("Type to speak...",
+                             lambda _i, _it: self._post(self._speak_prompt)),
             pystray.MenuItem("Speak clipboard",
                              lambda _i, _it: self._post(self._speak_clipboard)),
             pystray.MenuItem(
@@ -162,12 +165,17 @@ class TrayApp:
         self.icon.update_menu()
 
     def _speak_prompt(self) -> None:
-        if not self.pipeline.running:
-            messagebox.showinfo("Voice2TTS", "Start the pipeline first.")
+        """Open the type-to-speak box, or bring it forward if already open."""
+        if self.speakbox is not None and self.speakbox.winfo_exists():
+            self.speakbox.deiconify()
+            self.speakbox.lift()
+            self.speakbox.focus_force()
             return
-        text = simpledialog.askstring("Speak text", "Text to speak:", parent=self.root)
-        if text:
-            self.pipeline.say_text(text)
+        self.speakbox = SpeakBox(self.root, self.pipeline,
+                                 on_close=self._speakbox_closed)
+
+    def _speakbox_closed(self) -> None:
+        self.speakbox = None
 
     # -- review before speaking ----------------------------------------------
 

@@ -134,6 +134,22 @@ class TextConfig:
 
 
 @dataclass
+class ProfileEntry:
+    name: str = ""
+    values: dict[str, Any] = field(default_factory=dict)
+    match_apps: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ProfilesConfig:
+    entries: list[ProfileEntry] = field(default_factory=list)
+    active: str = ""
+    # Switch profile when the foreground application changes. Off by default: a
+    # setting that changes itself is surprising unless asked for.
+    auto_switch: bool = False
+
+
+@dataclass
 class UpdateConfig:
     # "owner/name" on GitHub, prefilled with this build's own repository so updates
     # work out of the box. Clearing it disables update checking entirely.
@@ -152,6 +168,7 @@ class Config:
     stt: SttConfig = field(default_factory=SttConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
     text: TextConfig = field(default_factory=TextConfig)
+    profiles: ProfilesConfig = field(default_factory=ProfilesConfig)
     updates: UpdateConfig = field(default_factory=UpdateConfig)
     # New configs are written at the current schema; files predating the field are
     # read as 1 in from_dict() so migrate() can bring them forward.
@@ -207,6 +224,18 @@ class Config:
             if isinstance(r, dict)
         ]
 
+        profiles_cfg = section(ProfilesConfig, data.get("profiles"))
+        raw_profiles = (data.get("profiles") or {}).get("entries") or []
+        profiles_cfg.entries = [
+            ProfileEntry(
+                name=str(p.get("name", "")),
+                values=dict(p.get("values") or {}),
+                match_apps=[str(a).lower() for a in (p.get("match_apps") or [])],
+            )
+            for p in raw_profiles
+            if isinstance(p, dict) and p.get("name")
+        ]
+
         cfg = cls(
             audio=audio,
             trigger=section(TriggerConfig, data.get("trigger")),
@@ -214,6 +243,7 @@ class Config:
             stt=section(SttConfig, data.get("stt")),
             tts=section(TtsConfig, data.get("tts")),
             text=text_cfg,
+            profiles=profiles_cfg,
             updates=section(UpdateConfig, data.get("updates")),
             schema_version=int(data.get("schema_version", 1)),
             start_minimized=bool(data.get("start_minimized", True)),

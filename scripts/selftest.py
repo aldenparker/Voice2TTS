@@ -311,6 +311,61 @@ def test_device_recovery() -> None:
     p.capture.stop()
 
 
+def test_profiles() -> None:
+    print("\n[profiles]")
+    from voice2tts import profiles
+    from voice2tts.config import Config
+
+    cfg = Config()
+    cfg.trigger.mode = "vad"
+    cfg.tts.voice = "en_US-amy-medium"
+    cfg.tts.length_scale = 1.4
+    cfg.audio.input_match = "some microphone"
+
+    snapshot = profiles.capture(cfg, "meeting")
+    check("profile captures the profiled fields",
+          snapshot.values["trigger.mode"] == "vad"
+          and snapshot.values["tts.voice"] == "en_US-amy-medium")
+    # Device and model choices describe the machine, not the situation; a profile
+    # that silently changed your microphone would be a nasty surprise.
+    check("device selection is not captured",
+          "audio.input_match" not in snapshot.values)
+    check("whisper model is not captured", "stt.model" not in snapshot.values)
+
+    cfg.trigger.mode = "ptt"
+    cfg.tts.voice = "en_US-ryan-high"
+    cfg.audio.input_match = "another microphone"
+    changed = profiles.apply(cfg, snapshot)
+    check("applying restores captured fields",
+          cfg.trigger.mode == "vad" and cfg.tts.voice == "en_US-amy-medium")
+    check("changed fields reported", set(changed) >= {"trigger.mode", "tts.voice"},
+          str(changed))
+    check("unprofiled fields left alone",
+          cfg.audio.input_match == "another microphone")
+    check("re-applying reports no change", not profiles.apply(cfg, snapshot))
+
+    round_tripped = profiles.from_dict(profiles.to_dict(snapshot))
+    check("profile survives a round-trip",
+          round_tripped.values == snapshot.values
+          and round_tripped.name == "meeting")
+
+    # A config written by a newer version may name fields we do not know.
+    hostile = profiles.from_dict(
+        {"name": "x", "values": {"trigger.mode": "vad", "evil.field": 1}})
+    check("unknown fields dropped on load", "evil.field" not in hostile.values)
+
+    tagged = profiles.Profile("gaming", {}, match_apps=["discord.exe"])
+    check("app matching finds a profile",
+          profiles.find_for_app([tagged], "C:\\x\\Discord.exe") is tagged)
+    check("app matching ignores others",
+          profiles.find_for_app([tagged], "notepad.exe") is None)
+    check("blank executable matches nothing",
+          profiles.find_for_app([tagged], "") is None)
+
+    check("foreground lookup returns a string",
+          isinstance(profiles.foreground_executable(), str))
+
+
 def test_history_and_review() -> None:
     print("\n[history + review]")
     from voice2tts.config import Config
@@ -1012,6 +1067,7 @@ def main() -> int:
     test_substitutions()
     if not no_audio:
         test_device_recovery()
+    test_profiles()
     test_history_and_review()
     test_vad()
     test_stt()

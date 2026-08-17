@@ -202,6 +202,67 @@ def download_voice(key: str, progress=None) -> Path:
     return onnx
 
 
+SAMPLE_URL = (
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/"
+    "{lang_family}/{lang_code}/{name}/{quality}/samples/speaker_0.mp3?download=true"
+)
+
+
+def sample_url(entry: VoiceEntry) -> str:
+    """Where to hear a voice before committing to a 60 MB download."""
+    family = entry.language.split("_")[0] if entry.language else ""
+    return SAMPLE_URL.format(
+        lang_family=family, lang_code=entry.language,
+        name=entry.name, quality=entry.quality,
+    )
+
+
+def download_sample(entry: VoiceEntry, timeout: float = 20.0) -> Path:
+    """Fetch a voice's preview clip into the cache. Returns the file path."""
+    from .paths import cache_dir
+
+    dest_dir = cache_dir() / "samples"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{entry.key}.mp3"
+    if dest.exists() and dest.stat().st_size > 1000:
+        return dest
+
+    req = urllib.request.Request(sample_url(entry), headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = resp.read(5_000_000)
+    if len(data) < 1000:
+        raise RuntimeError("sample is empty or unavailable for this voice")
+    dest.write_bytes(data)
+    return dest
+
+
+def play_sample(entry: VoiceEntry, device_index: int | None = None) -> float:
+    """Download and play a preview. Returns its length in seconds.
+
+    Decoded with PyAV, which faster-whisper already pulls in, so previewing costs
+    no extra dependency.
+    """
+    import av
+    import numpy as np
+    import sounddevice as sd
+
+    path = download_sample(entry)
+    with av.open(str(path)) as container:
+        stream = container.streams.audio[0]
+        rate = stream.codec_context.sample_rate or 22050
+        resampler = av.AudioResampler(format="flt", layout="mono", rate=rate)
+        chunks = []
+        for frame in container.decode(stream):
+            for resampled in resampler.resample(frame):
+                chunks.append(resampled.to_ndarray().reshape(-1))
+    if not chunks:
+        raise RuntimeError("could not decode the sample")
+
+    audio = np.concatenate(chunks).astype(np.float32)
+    sd.play(audio, samplerate=rate, device=device_index)
+    return len(audio) / rate
+
+
 def remove_voice(key: str) -> bool:
     """Delete a user-downloaded voice. Bundled voices are never removed."""
     if not is_removable(key):

@@ -11,7 +11,7 @@ import logging
 import threading
 import tkinter as tk
 import webbrowser
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 from . import (
     DEFAULT_UPDATE_REPO,
@@ -19,11 +19,19 @@ from . import (
     devices,
     gpupack,
     loopback,
+    profiles,
     substitutions,
     updater,
     voices,
 )
-from .config import MODES, WHISPER_MODELS, Config, OutputTarget, SubstitutionRule
+from .config import (
+    MODES,
+    WHISPER_MODELS,
+    Config,
+    OutputTarget,
+    ProfileEntry,
+    SubstitutionRule,
+)
 from .diagnostics import diagnostics
 from .hotkey import describe
 from .paths import config_path, is_frozen, list_voices, log_path
@@ -91,6 +99,18 @@ class SettingsWindow(tk.Toplevel):
         bar.pack(fill="x", padx=8, pady=8)
         self.state_label = ttk.Label(bar, text="stopped")
         self.state_label.pack(side="left")
+
+        # Profiles live on the button bar rather than in a tab: switching is a thing
+        # you do while working, not a thing you configure once.
+        ttk.Label(bar, text="  Profile").pack(side="left")
+        self.profile_var = tk.StringVar()
+        self.profile_combo = ttk.Combobox(bar, textvariable=self.profile_var, width=16,
+                                          state="readonly")
+        self.profile_combo.pack(side="left", padx=4)
+        self.profile_combo.bind("<<ComboboxSelected>>",
+                                lambda _e: self._switch_profile())
+        ttk.Button(bar, text="Save as...", width=9,
+                   command=self._save_profile).pack(side="left")
         ttk.Button(bar, text="Close", command=self.close).pack(side="right")
         ttk.Button(bar, text="Save", command=self._save).pack(side="right", padx=4)
         ttk.Button(bar, text="Apply", command=self._apply).pack(side="right")
@@ -676,7 +696,9 @@ class SettingsWindow(tk.Toplevel):
 
         actions = ttk.Frame(tab)
         actions.grid(row=2, column=0, columnspan=4, sticky="ew", pady=6)
-        ttk.Button(actions, text="Download", command=self._download_voice).pack(side="left")
+        ttk.Button(actions, text="Preview", command=self._preview_voice).pack(side="left")
+        ttk.Button(actions, text="Download", command=self._download_voice).pack(
+            side="left", padx=6)
         ttk.Button(actions, text="Remove", command=self._remove_voice).pack(side="left", padx=6)
         ttk.Button(actions, text="Use selected", command=self._use_voice).pack(side="left")
         self.lib_status = ttk.Label(actions, text="", foreground="#666")
@@ -751,6 +773,31 @@ class SettingsWindow(tk.Toplevel):
             self.lib_status.config(text="Select a voice first.")
             return None
         return sel[0]
+
+    def _preview_voice(self) -> None:
+        """Hear a voice before spending 60 MB on it."""
+        key = self._selected_voice()
+        if key is None:
+            return
+        entry = next((e for e in self._catalogue if e.key == key), None)
+        if entry is None:
+            self.lib_status.config(
+                text="Load the catalogue first — previews come from there.")
+            return
+        self.lib_status.config(text=f"Fetching a sample of {key}...")
+
+        def work() -> None:
+            try:
+                seconds = voices.play_sample(entry)
+            except Exception as exc:  # noqa: BLE001
+                failure = str(exc)
+                self.after(0, lambda: self.lib_status.config(
+                    text=f"No preview available: {failure}"))
+                return
+            self.after(0, lambda: self.lib_status.config(
+                text=f"Playing {key} ({seconds:.1f}s)"))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _download_voice(self) -> None:
         key = self._selected_voice()
@@ -992,6 +1039,55 @@ class SettingsWindow(tk.Toplevel):
             text=f"Spoken as:  {result}" if changed else "(no rule matches)",
             foreground="#2a7" if changed else "#666",
         )
+
+    # -- profiles -------------------------------------------------------------
+
+    def _refresh_profiles(self) -> None:
+        names = [p.name for p in self.cfg.profiles.entries]
+        self.profile_combo["values"] = ["(none)", *names]
+        active = self.cfg.profiles.active
+        self.profile_var.set(active if active in names else "(none)")
+
+    def _switch_profile(self) -> None:
+        name = self.profile_var.get()
+        if name == "(none)":
+            self.cfg.profiles.active = ""
+            return
+        entry = next((p for p in self.cfg.profiles.entries if p.name == name), None)
+        if entry is None:
+            return
+        changed = profiles.apply(
+            self.cfg, profiles.Profile(entry.name, entry.values, entry.match_apps))
+        self.cfg.profiles.active = name
+        # Reload every widget: a profile can touch several tabs at once.
+        self._load_from_config()
+        self.profile_var.set(name)
+        self._apply(collect=False)
+        self.state_label.config(text=f"Profile: {name} ({len(changed)} changed)")
+
+    def _save_profile(self) -> None:
+        if not self._collect():
+            return
+        name = simpledialog.askstring(
+            "Save profile", "Name for this profile:", parent=self,
+            initialvalue=self.profile_var.get() if self.profile_var.get() != "(none)"
+            else "",
+        )
+        if not name:
+            return
+        name = name.strip()
+        snapshot = profiles.capture(self.cfg, name)
+        existing = next((p for p in self.cfg.profiles.entries if p.name == name), None)
+        if existing is not None:
+            existing.values = snapshot.values
+        else:
+            self.cfg.profiles.entries.append(
+                ProfileEntry(name=name, values=snapshot.values))
+        self.cfg.profiles.active = name
+        self._refresh_profiles()
+        self.profile_var.set(name)
+        self.cfg.save()
+        self.state_label.config(text=f"Saved profile: {name}")
 
     # -- history tab ----------------------------------------------------------
 
@@ -1466,6 +1562,7 @@ class SettingsWindow(tk.Toplevel):
         ]
         self._render_subs()
 
+        self._refresh_profiles()
         self.repo_var.set(c.updates.repo)
         self.check_start_var.set(c.updates.check_on_start)
         self.interval_var.set(c.updates.interval_hours)
@@ -1521,8 +1618,10 @@ class SettingsWindow(tk.Toplevel):
         self.repo_var.set(c.updates.repo)  # reflect any normalisation back to the UI
         return True
 
-    def _apply(self) -> None:
-        if not self._collect():
+    def _apply(self, collect: bool = True) -> None:
+        # collect=False when a profile has just written the config directly; the
+        # widgets have been reloaded from it and re-collecting would be a no-op.
+        if collect and not self._collect():
             return
         self.pipeline.apply_audio_changes()
         self.pipeline.apply_tts_changes()
