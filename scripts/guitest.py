@@ -203,6 +203,85 @@ def main() -> int:
           label == ("Remove" if studiopack.status().installed else "Download"),
           label)
 
+    print("\n[studio recording panel]")
+    import tempfile
+
+    import numpy as np
+
+    # Same speech-shaped fixture the dataset tests use; a plain tone would be
+    # rejected by the quality checks and prove nothing about the panel.
+    from selftest import speech_like
+
+    panel = win.record_panel
+    check("record panel is its own tab",
+          "Record" in [win.studio_nb.tab(t, "text") for t in win.studio_nb.tabs()],
+          str([win.studio_nb.tab(t, "text") for t in win.studio_nb.tabs()]))
+    check("prompt corpus loaded", len(panel.corpus) > 100, f"{len(panel.corpus)}")
+    check("microphone list populated or machine has none",
+          isinstance(panel.device_box["values"], (tuple, list)))
+    check("no session until asked", panel.session is None)
+    check("recording disabled before a session",
+          "disabled" in str(panel.record_btn.state()), str(panel.record_btn.state()))
+
+    # Drive a session against a scratch directory rather than the real cache.
+    with tempfile.TemporaryDirectory() as tmp:
+        from voice2tts import dataset as ds
+
+        panel.session = ds.RecordingSession("GuiTest", root=Path(tmp) / "v",
+                                            target_minutes=1.0)
+        panel._rebuild_queue()
+        panel._advance()
+        panel._update_state()
+        check("a prompt is shown", bool(panel.prompt_label.cget("text")),
+              panel.prompt_label.cget("text")[:50])
+        check("the prompt comes from the corpus",
+              panel.current is not None
+              and panel.current.key in {p.key for p in panel.corpus})
+        check("start button offers to finish", panel.start_btn.cget("text") == "Finish")
+        check("recording enabled once there is a prompt and a session",
+              "disabled" not in str(panel.record_btn.state()))
+        check("progress starts empty", panel.progress["value"] == 0)
+        check("remaining estimate shown",
+              "more sentences" in panel.remaining_label.cget("text"),
+              panel.remaining_label.cget("text"))
+
+        # Bank a clip without touching a microphone, then confirm the panel moved on.
+        first = panel.current
+        rate = ds.TARGET_RATE
+        panel.session.add(first.key, first.text, speech_like(3.0, rate), rate)
+        panel._advance()
+        panel._update_state()
+        root.update()
+        check("progress advances after a clip", panel.progress["value"] > 0,
+              f"{panel.progress['value']:.1f}%")
+        check("a recorded prompt is not shown again",
+              panel.current is not None and panel.current.key != first.key)
+        check("summary reflects the clip", "1 clips" in panel.progress_label.cget("text"),
+              panel.progress_label.cget("text"))
+
+        # A rejected take must keep the same prompt in front of the reader.
+        held = panel.current
+        panel.session.add(held.key, held.text,
+                          np.zeros(rate, dtype=np.float32), rate)
+        panel._update_state()
+        check("an unusable clip does not count toward the target",
+              len(panel.session.usable) == 1, panel.session.summary())
+
+        panel._last_key = first.key
+        panel._update_state()
+        check("redo is offered after a take",
+              "disabled" not in str(panel.redo_btn.state()))
+        panel._redo()
+        check("redo removes the clip",
+              all(c.key != first.key for c in panel.session.clips))
+        check("redo puts the sentence back in front",
+              panel.prompt_label.cget("text") == first.text)
+
+        panel._close_session()
+        check("finishing clears the session", panel.session is None)
+        check("controls disabled again",
+              "disabled" in str(panel.record_btn.state()))
+
     print("\n[updates tab]")
     import voice2tts as pkg
     from voice2tts import updater

@@ -1197,8 +1197,15 @@ class SettingsWindow(tk.Toplevel):
     # -- studio tab -----------------------------------------------------------
 
     def _build_studio(self, nb: ttk.Notebook) -> None:
-        tab = ttk.Frame(nb, padding=10)
-        nb.add(tab, text="Studio")
+        # A sub-notebook: checking hardware and reading 1132 sentences are
+        # different sittings, and stacking both into one pane made it unusable.
+        outer = ttk.Frame(nb)
+        nb.add(outer, text="Studio")
+        self.studio_nb = ttk.Notebook(outer)
+        self.studio_nb.pack(fill="both", expand=True)
+
+        tab = ttk.Frame(self.studio_nb, padding=10)
+        self.studio_nb.add(tab, text="Setup")
 
         ttk.Label(tab, text="Make your own voice", font=("", 10, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w")
@@ -1257,6 +1264,13 @@ class SettingsWindow(tk.Toplevel):
 
         tab.columnconfigure(2, weight=1)
         self._refresh_studio()
+
+        from .studioui import RecordingPanel
+
+        self.record_panel = RecordingPanel(
+            self.studio_nb, self.palette,
+            all_apis=not self.cfg.audio.prefer_wasapi)
+        self.studio_nb.add(self.record_panel, text="Record")
 
     def _refresh_studio(self) -> None:
         hw = studiopack.probe()

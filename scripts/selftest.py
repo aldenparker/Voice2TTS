@@ -623,6 +623,65 @@ def test_dataset() -> None:
               f"{issues} {stats}")
 
 
+def test_recorder() -> None:
+    """The clip recorder's buffering, without opening a real microphone.
+
+    _callback is driven directly, which is the whole audio path minus PortAudio.
+    """
+    print("\n[recorder]")
+    from voice2tts import recorder
+    from voice2tts.devices import Device
+
+    mic = Device(index=1, name="Test Mic", hostapi="WASAPI", rate=48000,
+                 max_in=2, max_out=0)
+    rec = recorder.ClipRecorder(mic)
+    check("captures at the device rate", rec.rate == 48000, f"{rec.rate}")
+
+    # The reason this class exists: recording through the recognition path would
+    # resample to 16 kHz in the callback and silently cap the trained voice.
+    from voice2tts import capture
+    check("recognition path is 16 kHz, recording is not",
+          capture.SAMPLE_RATE == 16000 and rec.rate != capture.SAMPLE_RATE,
+          f"{capture.SAMPLE_RATE} vs {rec.rate}")
+
+    stereo = np.zeros((4800, 2), dtype=np.float32)
+    stereo[:, 0] = 0.5
+    stereo[:, 1] = 0.1
+    rec._callback(stereo, 4800, None, None)
+    check("stereo is downmixed to mono", rec.seconds == 0.1, f"{rec.seconds}")
+    audio, rate = rec.stop()
+    check("returned at the device rate, unresampled", rate == 48000, f"{rate}")
+    check("channels averaged", abs(float(audio[0]) - 0.3) < 1e-6, str(audio[0]))
+    check("length preserved", len(audio) == 4800, str(len(audio)))
+
+    rec2 = recorder.ClipRecorder(mic)
+    check("a fresh recorder has nothing", rec2.stop()[0].size == 0)
+
+    loud = np.full((480, 1), 1.0, dtype=np.float32)
+    rec2._callback(loud, 480, None, None)
+    check("clipping is flagged live", rec2.clipped)
+    quiet = np.full((480, 1), 0.2, dtype=np.float32)
+    rec2._callback(quiet, 480, None, None)
+    check("clipping stays flagged once it happened", rec2.clipped)
+    check("peak follows the latest block", abs(rec2.peak - 0.2) < 1e-6, str(rec2.peak))
+
+    # An unattended recorder must not grow without bound.
+    capped = recorder.ClipRecorder(mic, max_seconds=0.5)
+    block = np.zeros((4800, 1), dtype=np.float32)
+    for _ in range(20):
+        capped._callback(block, 4800, None, None)
+    check("recording stops itself at the cap", capped.overran)
+    check("and keeps only up to the cap", capped.seconds <= 0.6,
+          f"{capped.seconds:.2f}s")
+
+    # A second take must not inherit the first one's audio.
+    reused = recorder.ClipRecorder(mic)
+    reused._callback(np.full((4800, 1), 0.4, dtype=np.float32), 4800, None, None)
+    reused.stop()
+    reused._callback(np.full((480, 1), 0.4, dtype=np.float32), 480, None, None)
+    check("takes do not accumulate", reused.stop()[0].size == 480)
+
+
 def test_training() -> None:
     """The training command line, progress parsing, and export guards.
 
@@ -1678,6 +1737,7 @@ def main() -> int:
     test_theme()
     test_prompts()
     test_dataset()
+    test_recorder()
     test_training()
     test_studio_gate()
     test_release_is_gated()
