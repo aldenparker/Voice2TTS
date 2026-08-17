@@ -461,9 +461,12 @@ class TrainingPanel(ttk.Frame):
         self.train_btn = ttk.Button(row, text="Start training",
                                     command=self._toggle_training)
         self.train_btn.pack(side="left")
+        self.audition_btn = ttk.Button(row, text="Listen",
+                                       command=self._audition)
+        self.audition_btn.pack(side="left", padx=6)
         self.export_btn = ttk.Button(row, text="Export voice",
                                      command=self._export)
-        self.export_btn.pack(side="left", padx=6)
+        self.export_btn.pack(side="left")
 
         self.train_progress = ttk.Progressbar(self, mode="determinate", maximum=100)
         self.train_progress.grid(row=9, column=0, columnspan=4, sticky="ew",
@@ -687,6 +690,38 @@ class TrainingPanel(ttk.Frame):
                 foreground=self.palette.text)
         self._update_state()
 
+    # -- auditioning ---------------------------------------------------------
+
+    def _audition(self) -> None:
+        """Listen to the latest checkpoint, mid-run if need be.
+
+        Allowed while training is going: it loads the checkpoint file, which is
+        already written, and runs on CPU, so it does not disturb the run.
+        """
+        work = self._work_dir()
+        if work is None:
+            return
+        best = training.best_checkpoint(work)
+        if best is None:
+            messagebox.showinfo("Voice Studio", "Nothing has been trained yet.",
+                                parent=self)
+            return
+        self.train_log.config(text=f"Synthesising from {best.name} on the CPU — "
+                                   "this takes a few seconds…")
+        self.update_idletasks()
+        try:
+            wav = training.audition(best, work / "config.json", work / "audition")
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            self.train_log.config(text=f"Could not synthesise: {exc}")
+            return
+        try:
+            _play_wav(wav)
+        except Exception as exc:  # noqa: BLE001 - the file is still on disk
+            self.train_log.config(text=f"Rendered {wav.name} but could not "
+                                       f"play it: {exc}")
+            return
+        self.train_log.config(text=f"Played {best.name}.")
+
     # -- export --------------------------------------------------------------
 
     def _export(self) -> None:
@@ -733,10 +768,22 @@ class TrainingPanel(ttk.Frame):
         for widget, enabled in (
             (self.train_btn, has_data),
             (self.export_btn, trained and not busy),
+            # Auditioning reads a written checkpoint on the CPU, so it stays
+            # available mid-run -- that is when it is most worth doing.
+            (self.audition_btn, trained),
             (self.base_btn, not busy),
             (self.dataset_box, not busy),
         ):
             widget.state(["!disabled"] if enabled else ["disabled"])
+
+
+def _play_wav(path: Path) -> None:
+    """Play a wav on the default output. Blocks, which is fine for one sentence."""
+    import sounddevice as sd
+
+    audio, rate = dataset.read_wav(path)
+    sd.play(audio, rate)
+    sd.wait()
 
 
 def _slug(name: str) -> str:

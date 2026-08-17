@@ -862,6 +862,18 @@ def test_training() -> None:
             check("a missing voice config is refused",
                   "written by training" in str(exc), str(exc))
 
+        # Auditioning has the same guards, since it reads the same two files.
+        try:
+            training.audition(Path(tmp) / "missing.ckpt", Path(tmp) / "config.json",
+                              Path(tmp) / "audio")
+            check("audition refuses a missing checkpoint", False, "no error")
+        except FileNotFoundError:
+            check("audition refuses a missing checkpoint", True)
+
+    check("the audition line exercises more than one sound",
+          len(set(training.AUDITION_TEXT.lower()) & set("aeiou")) >= 5
+          and len(training.AUDITION_TEXT.split()) > 8, training.AUDITION_TEXT)
+
     prov = training.Provenance(voice_name="mine", dataset_clips=120,
                                dataset_seconds=1800.0, epochs=400,
                                base_checkpoint="lessac.ckpt")

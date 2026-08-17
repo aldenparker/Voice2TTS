@@ -84,3 +84,15 @@ NVIDIA CUDA runtime libraries (cuBLAS, cuDNN)
 Additional Piper voices
   Downloaded on request from https://huggingface.co/rhasspy/piper-voices under the
   licence stated on each voice's model card.
+
+Piper training checkpoints
+  Downloaded on request from
+  https://huggingface.co/datasets/rhasspy/piper-checkpoints when you choose a
+  voice to fine-tune from. About 850 MB each. A voice trained from one inherits
+  the terms of the dataset it was built on, so the Voice Studio fetches that
+  checkpoint's MODEL_CARD and shows the licence before downloading anything.
+
+PyTorch, torchaudio, librosa and the Piper trainer
+  Installed on request into a separate environment if you use the Voice Studio.
+  Several GB, NOT included in this installer, and removable from the Studio tab.
+  PyTorch is BSD-3-Clause; librosa is ISC.

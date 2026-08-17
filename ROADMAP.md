@@ -20,7 +20,7 @@ publishes.
 |---|---|
 | Pipeline | mic → Silero VAD → Whisper → Piper → N outputs |
 | Latency | ~300 ms utterance to first audio (RTX 5080, `small.en`) |
-| Tests | 214 self-test + 70 GUI, ruff clean, CI on every push |
+| Tests | 360 self-test + 113 GUI, ruff clean, CI on every push |
 | Release gate | `release.yml` verifies (tag/version, lint, self-test) before it builds; asserted by a test |
 | Licence | GPL-3.0-or-later (Piper links eSpeak NG) |
 | Distribution | Inno Setup, per-user, unsigned; winget manifests staged |
@@ -102,11 +102,11 @@ of memory, not by breaking anything, and a 6 GB card can plausibly train at a
 reduced batch size. The real mitigation is checkpoint-and-resume (Phase 2), which
 turns a crash into minutes lost rather than a night.
 
-### Phase 2 — Voice Trainer (~3–4 weeks)
+### Phase 2 — Voice Trainer ✅ (code complete; untested on real hardware)
 
 Record your own voice, fine-tune from an existing checkpoint, export.
 
-- [ ] **Two ways in, one of them obviously easier.**
+- [x] **Two ways in, one of them obviously easier.**
       - *Record here* — the encouraged path. Shows a prompt, records, reviews,
         re-records, and tracks how much usable audio is banked against the target.
         Feeding people the script is the whole point: "read for 30 minutes" is a
@@ -115,25 +115,41 @@ Record your own voice, fine-tune from an existing checkpoint, export.
       - *Import files* — accepted, with a one-line confirmation that the speaker
         consented. Same dataset preparation afterwards, so quality checks apply
         equally.
-- [ ] **Prompt corpus.** Phonetically balanced, and freely licensed enough to ship
-      inside a GPL application. CMU ARCTIC's prompt list is the leading candidate:
-      it is drawn from Project Gutenberg texts and was built for exactly this job.
-      Harvard/IEEE sentences are the fallback. Estimate remaining time from words
-      read so far rather than a fixed sentence count, since people read at very
-      different speeds.
-- [ ] **Dataset preparation** — trim silence, normalise, resample to 22050 Hz,
-      write Piper's expected layout, flag clips that are too noisy or too short
-- [ ] **Training orchestration** — run `piper.train` as a subprocess, parse
-      progress, show step count and loss, allow pause/stop
-- [ ] **Checkpoint and resume** — survive a crash, a reboot, or a closed laptop
-- [ ] **Export** via `piper.train.export_onnx` into `%APPDATA%\Voice2TTS\voices`
-- [ ] **Provenance sidecar** — base checkpoint, dataset duration, step count,
-      licence, so a voice can answer "where did you come from?" later
-- [ ] Audition at checkpoints, so quality is visible before hours are spent
-- [ ] Tests: dataset prep and export are pure functions; training itself gets a
-      short smoke run behind a flag, not in CI
+- [x] **Prompt corpus.** CMU ARCTIC's 1132 sentences, committed to the repo
+      rather than downloaded: festvox.org refuses HTTPS entirely, and a
+      75 KB text file is not worth an unauthenticated download inside an
+      installer. Remaining time is estimated from words actually read, so a slow
+      reader is not told to read as many sentences as a fast one.
+- [x] **Dataset preparation** — resample to 22050 Hz at VHQ, write Piper's
+      `wav|text` layout, flag clips that are too noisy, too quiet or too short.
+      Silence trimming is left to the trainer, which already does it
+      (`VitsDataModule(trim_silence=True)`); doing it twice would clip onsets.
+- [x] **Training orchestration** — `piper.train fit` as a subprocess, progress
+      parsed from Lightning's bar, stop button
+- [x] **Checkpoint and resume** — `last.ckpt` every epoch, so a crash costs one
+      epoch. Resuming uses `--ckpt_path`; starting from a base voice uses
+      `--model.warmstart_ckpt`, which is *not* interchangeable — see
+      `training.py`'s module docstring.
+- [x] **Base checkpoints** — not originally planned, and load-bearing: the
+      voices we ship are inference-only `.onnx` and cannot be trained from.
+      Fetched from `rhasspy/piper-checkpoints`, ~850 MB, resumable.
+- [x] **Export** via `piper.train.export_onnx` into the user voices directory,
+      with the config the trainer wrote, as `.onnx` + `.onnx.json`
+- [x] **Provenance sidecar** — base checkpoint, dataset duration, epochs, app
+      version, written as `.onnx.provenance.json`
+- [x] **Audition at checkpoints** via `piper.train.infer_torch`, available
+      mid-run, so hours are not spent on a run that is going nowhere
+- [x] Tests: 360 self-test + 113 GUI. Everything that decides whether GPU hours
+      are wasted — argument construction, checkpoint selection, export guards —
+      is covered offline. Training itself is not run in CI.
 
 Expect 2–6 hours on a 5080 for a usable fine-tune.
+
+**Not yet proven on hardware.** Everything above is verified against
+piper-tts 1.7.0's real signatures and runs headless, but no voice has been
+trained end to end. Specifically unverified: the studio pack's torch install,
+`torch.cuda.is_available()` inside it, whether Lightning's progress bar parses
+as expected in practice, and whether an exported voice loads in the library.
 
 ### Phase 3 — Voice Designer (~1–2 weeks, gated on Phase 0)
 
@@ -195,10 +211,18 @@ sidecar alongside.
 - [ ] **Ship both tiers in 0.6.0, or trainer only?** Recommendation: trainer only.
       It is a release on its own and the 2.5 GB optional pack deserves its own
       shakeout.
-- [ ] **Base-voice licensing.** A fine-tune inherits its base checkpoint's terms.
-      `voices.json` carries **no licence field** — it is in each voice's
-      `MODEL_CARD` in the HuggingFace repo. Decide whether to fetch and display it,
-      and whether to refuse bases that forbid derivatives.
+- [x] **Base-voice licensing — decided: fetch, show, and require agreement; do
+      not refuse.** The `MODEL_CARD` beside each checkpoint is fetched and its
+      licence shown in the confirmation dialog before an 850 MB download starts,
+      so the terms arrive before the commitment rather than after it. A card with
+      no licence line reads as "not stated on the model card" rather than being
+      assumed permissive.
+
+      Refusing bases that forbid derivatives was rejected: the cards link to
+      external licence pages (Blizzard, CSTR, LibriVox and others) rather than
+      naming an SPDX identifier, so any automatic verdict would be a guess
+      dressed as authority. Showing the actual link and asking is honest;
+      pretending to have parsed it is not.
 
 ### Risks
 
@@ -251,3 +275,12 @@ Things verified in code but not yet proven with sound.
       has only run for real once.
 - [ ] **Hotkeys inside a fullscreen game.** Some anti-cheat blocks low-level
       keyboard hooks and there is no workaround from this side.
+- [ ] **Studio pack install.** Downloading the embeddable Python, un-isolating
+      it, bootstrapping pip and installing torch has never been run to
+      completion. Confirm `torch.cuda.is_available()` reports true afterwards.
+- [ ] **A voice, end to end.** Record → train → audition → export → select it on
+      the Voice tab and hear it in Discord. Until this is done, Phase 2 is code
+      that should work rather than a feature that does. Watch in particular for:
+      Lightning's progress bar parsing (falls back to no percentage, harmless),
+      batch size versus actual VRAM, and whether the exported `.onnx.json` is
+      accepted by the voice loader unchanged.

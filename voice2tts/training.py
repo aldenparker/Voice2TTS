@@ -327,6 +327,53 @@ class TrainingRun:
         return self.returncode
 
 
+# -- auditioning ------------------------------------------------------------
+
+# Mixed vowels, plosives and sibilants, so the usual early-training faults are
+# audible in one sentence rather than needing a paragraph.
+AUDITION_TEXT = (
+    "The quick brown fox jumps over the lazy dog, and she sells sea shells "
+    "by the shore."
+)
+
+
+def audition(checkpoint: Path, config_json: Path, out_dir: Path,
+             text: str = AUDITION_TEXT, timeout: float = 900.0) -> Path:
+    """Speak one sentence from a checkpoint, without exporting it first.
+
+    Training runs for hours, and the only honest way to know whether it is
+    working is to listen. piper.train.infer_torch loads the checkpoint directly,
+    so a mid-run checkpoint can be heard without spending an export on it.
+
+    Runs on CPU, so expect several seconds for one sentence.
+    """
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"No checkpoint at {checkpoint}")
+    if not config_json.is_file():
+        raise FileNotFoundError(f"No voice config at {config_json}")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for stale in out_dir.glob("*.wav"):
+        stale.unlink(missing_ok=True)
+
+    argv = [str(studiopack.python_exe()), "-m", "piper.train.infer_torch",
+            "--checkpoint", str(checkpoint), "--config", str(config_json),
+            "--output-dir", str(out_dir)]
+    # One JSON record per line on stdin; output lands as <line number>.wav.
+    result = subprocess.run(
+        argv, input=json.dumps({"text": text}) + "\n",
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=studiopack.environment_for_training(), timeout=timeout,
+        creationflags=CREATE_NO_WINDOW,
+    )
+    produced = sorted(out_dir.glob("*.wav"))
+    if result.returncode != 0 or not produced:
+        tail = (result.stderr or result.stdout or "").strip().splitlines()[-15:]
+        raise RuntimeError("Could not synthesise from the checkpoint:\n"
+                           + "\n".join(tail))
+    return produced[0]
+
+
 # -- export -----------------------------------------------------------------
 
 

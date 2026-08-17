@@ -331,6 +331,10 @@ def main() -> int:
         tp._update_state()
         check("export offered once a checkpoint exists",
               "disabled" not in str(tp.export_btn.state()))
+        # Hearing a mid-run checkpoint is the whole point of auditioning, so it
+        # must not be gated on training having finished.
+        check("audition offered once a checkpoint exists",
+              "disabled" not in str(tp.audition_btn.state()))
 
     check("voice name becomes a safe slug",
           _slug("My Voice!") == "my-voice", _slug("My Voice!"))
