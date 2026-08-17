@@ -1,0 +1,123 @@
+name: Release
+
+# Publishing is driven entirely by the tag. scripts/release.ps1 can still do it
+# locally, but this way a release never depends on one particular machine.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish (e.g. v0.4.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $declared = python -c "import re,pathlib; print(re.search('__version__ = \"([^\"]+)\"', pathlib.Path('voice2tts/__init__.py').read_text()).group(1))"
+          # The updater compares the tag against __version__. If they disagree, the
+          # published build would not recognise itself as the release, so stop here
+          # rather than ship something that can never be updated from.
+          if ($version -ne $declared) {
+            throw "Tag $tag says $version but voice2tts/__init__.py says $declared. Bump the version and re-tag."
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Releasing $tag (version $version)"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Cache models
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: models-${{ hashFiles('scripts/fetch_models.py') }}
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: .\build.ps1 -Python "$env:pythonLocation\python.exe" -Version "${{ steps.version.outputs.version }}"
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      - name: Verify artifacts
+        shell: pwsh
+        run: |
+          $setup = "dist\installer\Voice2TTS-Setup-${{ steps.version.outputs.version }}.exe"
+          if (-not (Test-Path $setup))        { throw "Missing $setup" }
+          if (-not (Test-Path "$setup.sha256")) { throw "Missing $setup.sha256" }
+          # Re-verify the checksum here: the updater refuses a mismatch, so a wrong
+          # .sha256 asset would make the release un-installable for everyone.
+          $actual = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
+          $recorded = (Get-Content "$setup.sha256" -Raw).Split()[0].ToLower()
+          if ($actual -ne $recorded) { throw "Checksum mismatch: $actual vs $recorded" }
+          "{0:N0} MB, sha256 {1}" -f ((Get-Item $setup).Length / 1MB), $actual
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $tag = "${{ steps.version.outputs.tag }}"
+          $setup = "dist\installer\Voice2TTS-Setup-$version.exe"
+
+          $notesFile = "release-notes.md"
+          # Prefer the hand-written changelog section for this version; fall back to
+          # generated notes only if there isn't one.
+          $changelog = Get-Content CHANGELOG.md -Raw
+          $match = [regex]::Match($changelog, "(?ms)^## \[$([regex]::Escape($version))\].*?$(?=^## \[|\z)")
+          if ($match.Success) {
+            $match.Value.Trim() | Out-File $notesFile -Encoding utf8
+            $notesArg = @("--notes-file", $notesFile)
+            Write-Host "Using CHANGELOG section for $version"
+          } else {
+            $notesArg = @("--generate-notes")
+            Write-Host "No CHANGELOG section for $version; generating notes"
+          }
+
+          $existing = gh release view $tag --json tagName 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag exists; replacing assets"
+            gh release upload $tag $setup "$setup.sha256" --clobber
+          } else {
+            gh release create $tag $setup "$setup.sha256" --title "Voice2TTS $version" @notesArg
+          }
+          if ($LASTEXITCODE -ne 0) { throw "gh release failed" }
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: |
+            build/**/warn-*.txt
+            dist/installer/*
+          if-no-files-found: ignore

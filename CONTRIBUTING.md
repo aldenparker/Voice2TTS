@@ -64,9 +64,22 @@ approach — several of those look wrong until you know why they are that way.
 
 ## Releasing
 
+Releases are built by CI from a tag, so they do not depend on one machine:
+
 ```powershell
-.\scripts\release.ps1 -Bump 0.5.0 -Notes "What changed."
+git tag -a v0.5.0 -m "Voice2TTS 0.5.0"
+git push origin v0.5.0
 ```
 
-`voice2tts/__init__.py` is the single source of truth for the version. Update
-`CHANGELOG.md` in the same commit.
+`.github/workflows/release.yml` then builds the installer, verifies its checksum,
+and publishes a GitHub release with the installer and `.sha256` attached. Release
+notes come from the matching `## [0.5.0]` section of `CHANGELOG.md` when there is
+one, so write that first.
+
+The job **fails deliberately** if the tag and `voice2tts/__init__.py` disagree — the
+updater compares downloaded releases against `__version__`, so a mismatched tag
+would produce a build that cannot recognise its own release. Bump the version and
+re-tag rather than working around it.
+
+`scripts/release.ps1` still does the whole thing locally (bump, build, tag, push,
+publish) if you would rather not wait for CI.

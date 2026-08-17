@@ -25,7 +25,60 @@ from voice2tts.logging_setup import setup_logging  # noqa: E402
 
 SAMPLE = ROOT / "spike" / "out" / "tts_sample.wav"
 
+# Kept in sync with what test_stt asserts on; "pipeline" must survive recognition.
+SAMPLE_TEXT = (
+    "This is a test of the voice to text to speech pipeline. "
+    "It should split into a few sentences. "
+    "Each one gets synthesized separately so playback can start early."
+)
+
 passed = failed = 0
+
+
+def ensure_sample() -> Path | None:
+    """Return a speech sample, synthesizing one if it is not already there.
+
+    The sample used to be a leftover from spike/02_tts.py, which meant CI failed on
+    a clean checkout -- spike/out is gitignored. Generating it with Piper keeps the
+    suite self-contained and costs about a second.
+    """
+    if SAMPLE.exists():
+        return SAMPLE
+    try:
+        from voice2tts.config import TtsConfig
+        from voice2tts.tts import PiperEngine
+
+        engine = PiperEngine(TtsConfig())
+        audio = engine.synth(SAMPLE_TEXT)
+        if not len(audio):
+            return None
+        SAMPLE.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(SAMPLE), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(engine.rate)
+            w.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
+        print(f"  (generated {SAMPLE.name}: {len(audio) / engine.rate:.2f}s)")
+        return SAMPLE
+    except Exception as exc:  # noqa: BLE001 - reported by the caller's check()
+        print(f"  (could not generate sample: {exc})")
+        return None
+
+
+def load_sample_16k() -> np.ndarray | None:
+    """The speech sample as 16 kHz mono float32, or None if unavailable."""
+    path = ensure_sample()
+    if path is None:
+        return None
+    with wave.open(str(path), "rb") as w:
+        rate = w.getframerate()
+        pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+    audio = pcm.astype(np.float32) / 32768.0
+    if rate != 16000:
+        import soxr
+
+        audio = soxr.resample(audio, rate, 16000)
+    return audio
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -108,18 +161,10 @@ def test_vad() -> None:
     silence = np.zeros(WINDOW, dtype=np.float32)
     check("silence scores low", vad(silence) < 0.3, f"p={vad(silence):.3f}")
 
-    if not SAMPLE.exists():
-        check("speech sample present", False, f"missing {SAMPLE}")
+    audio = load_sample_16k()
+    if audio is None:
+        check("speech sample available", False, "could not load or generate")
         return
-
-    with wave.open(str(SAMPLE), "rb") as w:
-        rate = w.getframerate()
-        pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
-    audio = pcm.astype(np.float32) / 32768.0
-    if rate != 16000:
-        import soxr
-
-        audio = soxr.resample(audio, rate, 16000)
 
     seg = VadSegmenter(VadConfig(), preroll_ms=300, max_utterance_s=30)
     utterances = []
@@ -140,8 +185,9 @@ def test_vad() -> None:
 
 def test_stt() -> None:
     print("\n[stt]")
-    if not SAMPLE.exists():
-        check("speech sample present", False, f"missing {SAMPLE}")
+    audio = load_sample_16k()
+    if audio is None:
+        check("speech sample available", False, "could not load or generate")
         return
     from voice2tts.config import SttConfig
     from voice2tts.stt import WhisperEngine
@@ -150,15 +196,6 @@ def test_stt() -> None:
     warm = engine.warmup()
     check("engine loaded", True, f"{engine.device}/{engine.compute_type}")
     check("warmup completed", warm > 0, f"{warm:.2f}s")
-
-    with wave.open(str(SAMPLE), "rb") as w:
-        rate = w.getframerate()
-        pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
-    audio = pcm.astype(np.float32) / 32768.0
-    if rate != 16000:
-        import soxr
-
-        audio = soxr.resample(audio, rate, 16000)
 
     t0 = time.perf_counter()
     text = engine.transcribe(audio)
@@ -400,8 +437,9 @@ def test_pipeline_end_to_end() -> None:
     push-to-talk mode leaves VAD idle and we inject the utterance directly.
     """
     print("\n[pipeline end-to-end]")
-    if not SAMPLE.exists():
-        check("speech sample present", False, f"missing {SAMPLE}")
+    audio = load_sample_16k()
+    if audio is None:
+        check("speech sample available", False, "could not load or generate")
         return
 
     import threading
@@ -425,15 +463,6 @@ def test_pipeline_end_to_end() -> None:
         pipeline.start()
         check("pipeline started", pipeline.running)
         check("state is idle", pipeline.state is State.IDLE, pipeline.state.value)
-
-        with wave.open(str(SAMPLE), "rb") as w:
-            rate = w.getframerate()
-            pcm = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
-        audio = pcm.astype(np.float32) / 32768.0
-        if rate != 16000:
-            import soxr
-
-            audio = soxr.resample(audio, rate, 16000)
 
         pipeline._submit(audio)
 

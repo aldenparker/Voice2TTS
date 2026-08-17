@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: ["**"]
+    # Tags are handled by release.yml, which runs the same checks before building.
     tags-ignore: ["**"]
   pull_request:
   workflow_dispatch:
@@ -11,9 +12,13 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  PYTHONPATH: ${{ github.workspace }}
+
 jobs:
   lint:
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,13 +26,11 @@ jobs:
           python-version: "3.12"
       - run: pip install ruff
       - name: Lint
-        run: ruff check .
-      - name: Format check
-        run: ruff format --check .
-        continue-on-error: true
+        run: ruff check --output-format github .
 
   test:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -52,15 +55,12 @@ jobs:
       - name: Fetch models
         if: steps.models.outputs.cache-hit != 'true'
         run: python scripts/fetch_models.py --bundle
-        env:
-          PYTHONPATH: ${{ github.workspace }}
 
-      # GitHub runners have no audio hardware, so device-dependent checks are
-      # skipped; everything else (config, VAD, STT, updater, packaging) still runs.
+      # Runners have no audio hardware, so device-dependent checks are skipped.
+      # The speech sample is synthesized on demand rather than read from spike/out,
+      # which is gitignored and therefore absent on a clean checkout.
       - name: Self-test
         run: python scripts/selftest.py --no-audio
-        env:
-          PYTHONPATH: ${{ github.workspace }}
 
       - name: Upload logs on failure
         if: failure()
@@ -70,9 +70,12 @@ jobs:
           path: ~/AppData/Roaming/Voice2TTS/*.log
           if-no-files-found: ignore
 
-  build:
+  # Packaging breaks in ways nothing else catches -- a frozen build that will not
+  # start looks perfectly healthy from a source checkout.
+  package:
     needs: [lint, test]
     runs-on: windows-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -91,11 +94,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
-      - name: Build (frozen app only)
+      - name: Fetch models
+        run: python scripts/fetch_models.py --bundle
+
+      # -SkipInstaller: Inno Setup is not needed to prove the spec is intact and the
+      # frozen build starts and resolves its bundled models, which is where
+      # packaging actually goes wrong. The installer itself is built by release.yml.
+      - name: Build frozen app
         shell: pwsh
-        # Inno Setup is not installed on the runner; -SkipInstaller still proves the
-        # spec is intact and the frozen build starts and finds its bundled models,
-        # which is where packaging actually breaks.
         run: .\build.ps1 -SkipInstaller -Python "$env:pythonLocation\python.exe"
-        env:
-          PYTHONPATH: ${{ github.workspace }}
+
+      - name: Upload PyInstaller warnings on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyinstaller-warnings
+          path: build/**/warn-*.txt
+          if-no-files-found: ignore

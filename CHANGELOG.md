@@ -53,7 +53,13 @@ versioning follows [Semantic Versioning](https://semver.org/).
 - Warning when a non-English voice is paired with an English-only Whisper model —
   previously this silently produced confident nonsense.
 - `schema_version` in the config, giving future versions a migration hook.
-- GitHub Actions CI running lint, the self-test suite and a packaging build.
+- GitHub Actions CI running lint, the self-test suite and a packaging build on
+  every push, plus a release workflow that builds and publishes the installer when
+  a `v*` tag is pushed. The release job refuses to run if the tag and
+  `voice2tts/__init__.py` disagree, since the updater compares against the latter.
+- The self-test synthesizes its own speech sample instead of relying on a leftover
+  from `spike/02_tts.py`, which is gitignored and so absent on a clean checkout —
+  the VAD and STT checks failed on the first CI run for exactly that reason.
 - `pyproject.toml`, ruff configuration, `.editorconfig`, `CONTRIBUTING.md`,
   `SECURITY.md`.
 
