@@ -422,6 +422,72 @@ def test_theme() -> None:
           not switched, switched)
 
 
+def test_studio_gate() -> None:
+    """The hardware gate, and that the override is a real escape hatch."""
+    print("\n[studio gate]")
+    from voice2tts import studiopack
+    from voice2tts.studiopack import Hardware
+
+    good = Hardware(gpu_name="RTX 5080", vram_gb=16.0, free_disk_gb=200.0,
+                    cuda_pack_installed=True)
+    check("capable machine passes", studiopack.gate(hardware=good).ok)
+    check("a passing machine has no blockers",
+          not studiopack.gate(hardware=good).blockers)
+
+    no_gpu = Hardware(gpu_name="", vram_gb=0.0, free_disk_gb=200.0)
+    result = studiopack.gate(hardware=no_gpu)
+    check("no GPU is blocked", not result.ok)
+    check("and says why", "NVIDIA" in " ".join(result.blockers), str(result.blockers))
+
+    small = Hardware(gpu_name="GTX 1660", vram_gb=6.0, free_disk_gb=200.0)
+    result = studiopack.gate(hardware=small)
+    check("under-spec VRAM is blocked", not result.ok)
+    check("but the message says it may still work",
+          "smaller batch" in " ".join(result.blockers), str(result.blockers))
+
+    full = Hardware(gpu_name="RTX 5080", vram_gb=16.0, free_disk_gb=5.0)
+    result = studiopack.gate(hardware=full)
+    check("insufficient disk is blocked", not result.ok)
+    check("disk message names the shortfall",
+          "free" in " ".join(result.blockers).lower(), str(result.blockers))
+
+    # The override is the point of the design: an OOM costs time, not damage.
+    overridden = studiopack.gate(hardware=small, override=True)
+    check("override lets a weak machine proceed", overridden.ok)
+    check("override is recorded, not hidden", overridden.overridden)
+    check("blockers are still reported when overridden",
+          bool(overridden.blockers))
+    check("override does not fabricate a pass on capable hardware",
+          not studiopack.gate(hardware=good, override=True).overridden)
+
+    # A missing GPU pack is advice, not an obstacle: training brings its own CUDA.
+    no_cuda = Hardware(gpu_name="RTX 5080", vram_gb=16.0, free_disk_gb=200.0,
+                       cuda_pack_installed=False)
+    result = studiopack.gate(hardware=no_cuda)
+    check("missing GPU pack warns but does not block",
+          result.ok and result.warnings, str(result.warnings))
+
+    check("probe runs on this machine", isinstance(studiopack.probe(), Hardware))
+    live = studiopack.probe()
+    check("probe finds this GPU", live.has_gpu, f"{live.gpu_name} {live.vram_gb} GB")
+    check("probe reads free disk", live.free_disk_gb > 0,
+          f"{live.free_disk_gb} GB")
+
+    state = studiopack.status()
+    check("pack status readable", isinstance(state.installed, bool),
+          f"installed={state.installed} {state.size_gb:.1f} GB")
+    check("studio interpreter path is isolated from ours",
+          "studio" in str(studiopack.python_exe()).lower(),
+          str(studiopack.python_exe()))
+
+    env = studiopack.environment_for_training()
+    check("training env drops PYTHONPATH",
+          "PYTHONPATH" not in env and "PYTHONHOME" not in env)
+
+    check("torch pin targets a Blackwell-capable CUDA build",
+          "cu128" in studiopack.TORCH_SPEC, studiopack.TORCH_SPEC)
+
+
 def test_release_is_gated() -> None:
     """A tag must not be able to publish without the checks having run.
 
@@ -1291,6 +1357,7 @@ def main() -> int:
     if not no_audio:
         test_device_recovery()
     test_theme()
+    test_studio_gate()
     test_release_is_gated()
     test_winget_manifests()
     test_profiles()

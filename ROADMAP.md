@@ -69,18 +69,32 @@ Two things learned that change Phase 3:
   `emb_g.weight` from the patched model because nothing references it, so the
   designer cannot read speaker vectors back out of a live session.
 
-### Phase 1 — Studio pack and hardware gate (~3 days)
+### Phase 1 — Studio pack and hardware gate (in progress)
 
-The trainer needs torch, lightning, torchaudio and librosa — roughly 2.5 GB that
-most users will never want. Reuse the `gpupack.py` pattern exactly: download on
-demand into `%LOCALAPPDATA%`, extract, make importable, never bundle.
+- [x] `studiopack.py` — probe, gate, install, status, uninstall
+- [x] Hardware probe: NVIDIA GPU, VRAM, free disk, CUDA pack present
+- [x] Gate thresholds: **≥ 8 GB VRAM**, **≥ 25 GB free disk**, advisory
+- [x] **IKWIAD override** — `studio.ignore_hardware_check`, reported in
+      diagnostics so a training bug report shows the machine was under-spec
+- [x] Interpreter bootstrap verified (embeddable Python → pip → install → import)
+- [ ] Run a full `install()` including torch, and confirm `torch.cuda.is_available()`
+- [ ] Settings UI for the pack: install, size, remove, override checkbox
 
-- [ ] `studiopack.py` — download, verify, install, uninstall, report size
-- [ ] Extend `cuda.py` search paths if the pack ships CUDA-linked wheels
-- [ ] Hardware probe: NVIDIA GPU, VRAM, free disk, CUDA pack present
-- [ ] Gate thresholds: **≥ 8 GB VRAM**, **≥ 25 GB free disk**
-- [ ] **IKWIAD override** — a config flag plus an explicit confirmation, recorded
-      in diagnostics so a bug report shows the gate was bypassed
+**The training environment is a separate interpreter, not an import.** Rather than
+following the `gpupack.py` pattern of making DLLs importable in-process, the studio
+unpacks the embeddable Python into `%LOCALAPPDATA%\Voice2TTS\studio` and training
+runs as a subprocess against it. Three reasons:
+
+- a frozen PyInstaller build cannot pip-install into itself;
+- torch ships its own cuBLAS and cuDNN, and `cuda.py` already preloads those by
+  absolute path — a second resident copy is exactly the ambiguity that took two
+  attempts to get right the first time;
+- `piper.train` is a command-line trainer, so a subprocess is its natural shape,
+  and uninstalling becomes deleting one directory.
+
+Pinned to `torch==2.9.1+cu128`; cu128 is the first CUDA line with Blackwell
+(sm_120) kernels, which 50-series cards need. Floating the version would let a
+silent major bump break runs that worked yesterday.
 
 The gate is **advisory, not a refusal**. Under-spec hardware fails by running out
 of memory, not by breaking anything, and a 6 GB card can plausibly train at a
@@ -91,9 +105,21 @@ turns a crash into minutes lost rather than a night.
 
 Record your own voice, fine-tune from an existing checkpoint, export.
 
-- [ ] **Recording UI** — prompt sentences, record, review, re-record, level meter
-      and clipping warning. Target 20–40 minutes of clean speech.
-- [ ] Prompt set chosen for phonetic coverage rather than arbitrary text
+- [ ] **Two ways in, one of them obviously easier.**
+      - *Record here* — the encouraged path. Shows a prompt, records, reviews,
+        re-records, and tracks how much usable audio is banked against the target.
+        Feeding people the script is the whole point: "read for 30 minutes" is a
+        chore, "read this next sentence" is not, and it yields better phonetic
+        coverage than whatever someone would improvise.
+      - *Import files* — accepted, with a one-line confirmation that the speaker
+        consented. Same dataset preparation afterwards, so quality checks apply
+        equally.
+- [ ] **Prompt corpus.** Phonetically balanced, and freely licensed enough to ship
+      inside a GPL application. CMU ARCTIC's prompt list is the leading candidate:
+      it is drawn from Project Gutenberg texts and was built for exactly this job.
+      Harvard/IEEE sentences are the fallback. Estimate remaining time from words
+      read so far rather than a fixed sentence count, since people read at very
+      different speeds.
 - [ ] **Dataset preparation** — trim silence, normalise, resample to 22050 Hz,
       write Piper's expected layout, flag clips that are too noisy or too short
 - [ ] **Training orchestration** — run `piper.train` as a subprocess, parse
@@ -158,11 +184,13 @@ sidecar alongside.
 
 ### Decisions needed
 
-- [ ] **Consent policy.** Should the trainer accept arbitrary audio files, or only
-      recordings made inside it? This app pipes into Discord, so impersonation is
-      the obvious misuse rather than a hypothetical. Recording in-app with a stated
-      attestation is the conservative option. *Your call — but make it deliberately
-      rather than by default.*
+- [x] **Consent policy — decided: accept both, steer towards recording in-app.**
+      The trainer takes existing audio files *and* records inside the app. The
+      in-app path is made the easier one by supplying the script: prompts sized to
+      the duration still needed, so nobody has to find something to read for half
+      an hour. Importing carries a one-line confirmation that the speaker consented
+      — cheap, and proportionate for a feature that clones a voice into a live
+      call. Say the word if even that is unwanted.
 - [ ] **Ship both tiers in 0.6.0, or trainer only?** Recommendation: trainer only.
       It is a release on its own and the 2.5 GB optional pack deserves its own
       shakeout.

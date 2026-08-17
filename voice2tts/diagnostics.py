@@ -55,6 +55,20 @@ def diagnostics(cfg=None, pipeline=None) -> str:
     out.append(f"NVIDIA GPU present : {gpupack.gpu_present()}")
     out.append(f"CUDA usable        : {cuda_available()}")
     out.append(f"GPU pack           : {pack.dll_count} libs, {pack.size_mb:.0f} MB")
+
+    from . import studiopack
+
+    studio = studiopack.status()
+    if studio.installed:
+        out.append(f"Studio pack        : {studio.size_gb:.1f} GB, "
+                   f"python={'ok' if studio.python_ready else 'missing'}, "
+                   f"torch={'ok' if studio.torch_ready else 'missing'}")
+    else:
+        out.append("Studio pack        : not installed")
+    if cfg is not None and cfg.studio.ignore_hardware_check:
+        # Surfaced deliberately: a training bug report reads very differently if
+        # the machine was below the recommended specification.
+        out.append("Studio hardware    : CHECK OVERRIDDEN by the user")
     found = cable.detect()
     out.append(f"Virtual cable      : {found.product if found else 'none'}")
     if found:

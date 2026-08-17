@@ -135,6 +135,21 @@ class TextConfig:
 
 
 @dataclass
+class StudioConfig:
+    # "I know what I am doing": proceed with training even though the hardware
+    # check objected. Under-spec hardware fails by running out of memory, which
+    # costs the time since the last checkpoint and nothing else -- so this is a
+    # legitimate choice rather than a footgun, and refusing outright would be
+    # wrong. Recorded in diagnostics so a bug report shows it was used.
+    ignore_hardware_check: bool = False
+    # Minutes of clean speech to aim for before training is offered.
+    target_minutes: float = 30.0
+    # Speaker consented to their voice being used. Recorded when audio is imported
+    # rather than recorded in the app.
+    import_attested: bool = False
+
+
+@dataclass
 class ProfileEntry:
     name: str = ""
     values: dict[str, Any] = field(default_factory=dict)
@@ -170,6 +185,7 @@ class Config:
     tts: TtsConfig = field(default_factory=TtsConfig)
     text: TextConfig = field(default_factory=TextConfig)
     profiles: ProfilesConfig = field(default_factory=ProfilesConfig)
+    studio: StudioConfig = field(default_factory=StudioConfig)
     updates: UpdateConfig = field(default_factory=UpdateConfig)
     # New configs are written at the current schema; files predating the field are
     # read as 1 in from_dict() so migrate() can bring them forward.
@@ -249,6 +265,7 @@ class Config:
             tts=section(TtsConfig, data.get("tts")),
             text=text_cfg,
             profiles=profiles_cfg,
+            studio=section(StudioConfig, data.get("studio")),
             updates=section(UpdateConfig, data.get("updates")),
             schema_version=int(data.get("schema_version", 1)),
             start_minimized=bool(data.get("start_minimized", True)),
