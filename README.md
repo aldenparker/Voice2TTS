@@ -27,10 +27,28 @@ A wizard offers two optional extras:
 
 **A virtual microphone.** Discord can only hear Voice2TTS through a virtual audio
 device, and Windows only lets a signed kernel driver create one. The wizard finds
-any device you already have (VB-CABLE, VoiceMeeter, Virtual Audio Cable, Hi-Fi
-Cable, Synchronous Audio Router) and skips this step if so. Otherwise it downloads
-VB-CABLE from VB-Audio and runs their installer — Windows will ask for administrator
-permission, and a restart is needed afterwards.
+any device you already have and skips this step if so:
+
+| Product | Devices |
+|---|---|
+| VB-CABLE | `CABLE Input` ↔ `CABLE Output` |
+| VB-CABLE A+B / C+D | `CABLE-A` … `CABLE-D` |
+| VB-Audio Matrix | `VBMatrix In 1–8` ↔ `VBMatrix Out 1–8` |
+| VoiceMeeter / Banana / Potato | VAIO, AUX VAIO, VAIO3 |
+| VB-Audio Hi-Fi Cable | `Hi-Fi Cable Input` ↔ `Output` |
+| Virtual Audio Cable (VAC) | `Line 1` … |
+| Synchronous Audio Router | — |
+
+Multi-channel products are all offered, so with Matrix you pick which of the eight
+channels to use. Detection pairs the two halves using the driver name Windows shows
+in parentheses, which is identical on both sides — so `VBMatrix In 3` correctly maps
+to `VBMatrix Out 3`, and it keeps working when a vendor renames the friendly parts
+(VoiceMeeter's 2024 driver renamed the capture side from `VoiceMeeter Output` to
+`VoiceMeeter Out B1`).
+
+If nothing is installed, the wizard downloads VB-CABLE from VB-Audio and runs their
+installer — Windows will ask for administrator permission, and a restart is needed
+afterwards.
 
 VB-CABLE is [donationware by VB-Audio](https://vb-audio.com/Services/licensing.htm).
 It is not bundled here; it's fetched from their servers at your request. If you find

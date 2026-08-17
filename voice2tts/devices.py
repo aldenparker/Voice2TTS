@@ -14,7 +14,6 @@ import sounddevice as sd
 
 log = logging.getLogger(__name__)
 
-CABLE_HINTS = ("cable input", "vb-audio", "voicemeeter input", "virtual cable")
 WASAPI = "Windows WASAPI"
 
 
@@ -109,13 +108,22 @@ def _first_match(devs: list[Device], match: str) -> Device | None:
 
 
 def find_cable_output() -> Device | None:
-    """Locate a VB-CABLE / VoiceMeeter style virtual input device, if installed."""
-    for dev in list_outputs():
-        low = dev.name.lower()
-        if any(h in low for h in CABLE_HINTS):
-            return dev
-    return None
+    """Deprecated: use cable.detect(), which also reports the Discord-side device.
+
+    Kept as a thin delegate so there is exactly one detection implementation. Two
+    rival ones disagreed -- this returned a VB-Audio Matrix channel by substring
+    while cable.detect() reported nothing at all, so the wizard said "not
+    installed" while the config silently wired up channel 8.
+    """
+    from . import cable
+
+    info = cable.detect()
+    if info is None:
+        return None
+    return _first_match(list_outputs(), info.output_name)
 
 
 def cable_installed() -> bool:
-    return find_cable_output() is not None
+    from . import cable
+
+    return cable.installed()

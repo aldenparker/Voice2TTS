@@ -165,14 +165,27 @@ class Wizard(tk.Toplevel):
         for child in self.cable_actions.winfo_children():
             child.destroy()
 
-        found = cable.detect()
-        if found is not None:
-            self.cable_status.config(text=f"Found: {found.product}", foreground="#2a7")
-            self.cable_detail.config(
-                text=f"Voice2TTS will play into  {found.output_name}\n"
-                     f"In Discord, choose        {found.input_name}  as your input device."
-            )
-            self._apply_cable_output(found.output_name)
+        candidates = cable.list_devices()
+        if candidates:
+            self._cable_choices = candidates
+            chosen = self._cable_choice(candidates)
+            self.cable_status.config(text=f"Found: {chosen.product}", foreground="#2a7")
+            self._describe_cable(chosen)
+            self._apply_cable_output(chosen.output_name)
+
+            # Matrix exposes eight channels and VoiceMeeter several VAIOs; without a
+            # picker the user is stuck with whichever we guessed.
+            if len(candidates) > 1:
+                ttk.Label(self.cable_actions, text="Channel").pack(side="left",
+                                                                  padx=(0, 4))
+                self.cable_var = tk.StringVar(value=chosen.output_name)
+                combo = ttk.Combobox(
+                    self.cable_actions, textvariable=self.cable_var, width=38,
+                    state="readonly",
+                    values=[c.output_name for c in candidates],
+                )
+                combo.pack(side="left", padx=(0, 6))
+                combo.bind("<<ComboboxSelected>>", lambda _e: self._on_cable_selected())
             ttk.Button(self.cable_actions, text="Re-check",
                        command=self._refresh_cable).pack(side="left")
             return
@@ -233,10 +246,41 @@ class Wizard(tk.Toplevel):
 
         self._run_async(lambda: cable.install_flow(progress=progress), done)
 
+    def _cable_choice(self, candidates: list) -> object:
+        """Keep the user's pick across a re-render; otherwise take the best match."""
+        wanted = getattr(self, "cable_var", None)
+        if wanted is not None:
+            match = next((c for c in candidates if c.output_name == wanted.get()), None)
+            if match is not None:
+                return match
+        return candidates[0]
+
+    def _describe_cable(self, chosen) -> None:
+        detail = (
+            f"Voice2TTS will play into  {chosen.output_name}\n"
+            f"In Discord, choose        {chosen.discord_input}  as your input device."
+        )
+        if not chosen.certain:
+            detail += (
+                "\n\nThe matching recording device was inferred -- check it in "
+                "Windows Sound settings."
+            )
+        self.cable_detail.config(text=detail)
+
+    def _on_cable_selected(self) -> None:
+        chosen = self._cable_choice(self._cable_choices)
+        self._describe_cable(chosen)
+        self._apply_cable_output(chosen.output_name)
+
     def _apply_cable_output(self, name: str) -> None:
-        """Point the first output at the cable, adding a row if there isn't one."""
+        """Point the cable row at `name`, adding a row only if there isn't one.
+
+        Matched with cable.is_virtual_device rather than a "cable" substring: a
+        VB-Audio Matrix channel is called "VBMatrix In 1", so a substring test would
+        miss it and append a fresh row every time the channel was changed.
+        """
         for target in self.cfg.audio.outputs:
-            if "cable" in target.match.lower() or target.match == name:
+            if target.match == name or cable.is_virtual_device(target.match):
                 target.match, target.enabled = name, True
                 return
         self.cfg.audio.outputs.insert(0, OutputTarget(match=name, gain=1.0, enabled=True))

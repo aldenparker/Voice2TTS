@@ -265,10 +265,98 @@ def test_packaging_bits() -> None:
 
     # --- cable detection
     found = cable.detect()
-    check("cable detection runs", True, found.product if found else "none installed")
+    check("cable detection runs", True, found.label if found else "none installed")
     check("installed() agrees with detect()", cable.installed() == (found is not None))
-    check("known cable list is non-trivial", len(cable.KNOWN_CABLES) >= 8,
-          f"{len(cable.KNOWN_CABLES)} products")
+    check("product table is non-trivial", len(cable._PRODUCTS) >= 10,
+          f"{len(cable._PRODUCTS)} patterns")
+
+    # The single source of truth: devices.find_cable_output() used to disagree with
+    # cable.detect() -- one found a Matrix channel by substring while the other
+    # reported nothing, so the wizard said "not installed" while the config wired
+    # up a device anyway.
+    from voice2tts import devices as devices_mod
+
+    legacy = devices_mod.find_cable_output()
+    check("device helper agrees with cable.detect()",
+          (legacy is None) == (found is None)
+          and (found is None or legacy.name == found.output_name),
+          f"{getattr(legacy, 'name', None)} vs {found.output_name if found else None}")
+
+    check("driver tag extracted",
+          cable._driver_tag("VBMatrix In 8 (VB-Audio Matrix VAIO)")
+          == "vb-audio matrix vaio")
+    check("channel extracted", cable._channel("VBMatrix In 8 (VB-Audio Matrix VAIO)") == 8)
+    check("no channel when unnumbered",
+          cable._channel("CABLE Input (VB-Audio Virtual Cable)") is None)
+
+    products = {
+        "VBMatrix In 1 (VB-Audio Matrix VAIO)": "VB-Audio Matrix",
+        "CABLE Input (VB-Audio Virtual Cable)": "VB-CABLE",
+        "VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)": "VoiceMeeter",
+        "VoiceMeeter Aux Input (VB-Audio VoiceMeeter AUX VAIO)": "VoiceMeeter Banana",
+        "VoiceMeeter VAIO3 Input (VB-Audio VoiceMeeter VAIO3)": "VoiceMeeter Potato",
+        "Hi-Fi Cable Input (VB-Audio Hi-Fi Cable)": "VB-Audio Hi-Fi Cable",
+    }
+    misnamed = {n: cable._identify(n) for n, want in products.items()
+                if (cable._identify(n) or ("", 0))[0] != want}
+    check("products identified from the driver tag", not misnamed, str(misnamed))
+    check("real hardware is not mistaken for a cable",
+          cable._identify("Headphones (MOMENTUM 3)") is None
+          and cable._identify("Microphone (fifine Microphone)") is None)
+    check("NVIDIA virtual audio is not treated as a cable",
+          cable._identify("NVIDIA Virtual Audio Device (Wave Extensible) (WDM)") is None,
+          str(cable._identify("NVIDIA Virtual Audio Device (Wave Extensible) (WDM)")))
+
+    # Pairing, against a synthetic multi-channel device set. This is the case that
+    # broke on real hardware: "In 8" must pair with "Out 8", not whichever endpoint
+    # happened to be enumerated first.
+    Dev = devices_mod.Device
+    fake_inputs = [
+        Dev(index=i, name=f"VBMatrix Out {i} (VB-Audio Matrix VAIO)",
+            hostapi=devices_mod.WASAPI, rate=48000, max_in=2, max_out=0)
+        for i in range(1, 9)
+    ]
+    mismatches = []
+    for n in range(1, 9):
+        out = Dev(index=100 + n, name=f"VBMatrix In {n} (VB-Audio Matrix VAIO)",
+                  hostapi=devices_mod.WASAPI, rate=48000, max_in=0, max_out=2)
+        partner, certain = cable._pair_input(out, fake_inputs)
+        if partner != f"VBMatrix Out {n} (VB-Audio Matrix VAIO)" or not certain:
+            mismatches.append((n, partner, certain))
+    check("multi-channel pairing matches by number", not mismatches, str(mismatches))
+
+    # Single-cable pairing has no numbers to match on; the driver tag alone must do.
+    cable_out = Dev(index=1, name="CABLE Input (VB-Audio Virtual Cable)",
+                    hostapi=devices_mod.WASAPI, rate=48000, max_in=0, max_out=2)
+    cable_in = [Dev(index=2, name="CABLE Output (VB-Audio Virtual Cable)",
+                    hostapi=devices_mod.WASAPI, rate=48000, max_in=2, max_out=0)]
+    check("single cable pairs by driver tag",
+          cable._pair_input(cable_out, cable_in) ==
+          ("CABLE Output (VB-Audio Virtual Cable)", True))
+
+    # VoiceMeeter's 2024 driver renamed the capture side to "Out B1", so the old
+    # Input->Output rename no longer works; the driver tag still does.
+    vm_out = Dev(index=3, name="VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)",
+                 hostapi=devices_mod.WASAPI, rate=48000, max_in=0, max_out=2)
+    vm_in = [Dev(index=4, name="VoiceMeeter Out B1 (VB-Audio VoiceMeeter VAIO)",
+                 hostapi=devices_mod.WASAPI, rate=48000, max_in=2, max_out=0)]
+    check("VoiceMeeter 2024 naming pairs correctly",
+          cable._pair_input(vm_out, vm_in) ==
+          ("VoiceMeeter Out B1 (VB-Audio VoiceMeeter VAIO)", True))
+
+    # A render-only virtual device must be rejected: without a capture side it
+    # swallows speech Discord can never hear.
+    render_only = Dev(index=90, name="Some Renderer (VB-Audio Thing)",
+                      hostapi=devices_mod.WASAPI, rate=48000, max_in=0, max_out=2)
+    check("render-only virtual device finds no partner",
+          cable._pair_input(render_only, [])[0] == "")
+
+    check("config fragments recognised as virtual",
+          all(cable.is_virtual_device(x) for x in
+              ("CABLE Input", "VBMatrix In 3", "VoiceMeeter Aux Input")))
+    check("real devices not recognised as virtual",
+          not any(cable.is_virtual_device(x) for x in
+                  ("Headphones (MOMENTUM 3)", "Speakers (Realtek)", "")))
 
     # The scraper regex is the fragile part; pin its behaviour on sample markup.
     sample = ('<a href="https://download.vb-audio.com/Download_CABLE/'

@@ -102,14 +102,21 @@ def main() -> int:
     check("library lists installed voices", len(rows) >= 3, f"{len(rows)} rows")
     check("bundled voices marked as such",
           all(win.lib_tree.set(r, "state") in ("bundled", "installed") for r in rows))
-    win.lib_tree.selection_set(rows[0])
-    win._remove_voice()
-    check("refuses to delete a bundled voice",
-          "cannot be removed" in win.lib_status.cget("text")
-          or "in use" in win.lib_status.cget("text"),
-          win.lib_status.cget("text"))
-    win._use_voice()
-    check("can select an installed voice", win.voice_var.get() == rows[0], rows[0])
+
+    # Pick a BUNDLED row explicitly rather than assuming row 0 is one -- a
+    # user-downloaded voice can sort ahead of the bundled ones, and selecting a
+    # removable voice here would pop a confirmation dialog and hang the test.
+    bundled = next((r for r in rows if win.lib_tree.set(r, "state") == "bundled"), None)
+    check("a bundled voice is present to test with", bundled is not None, str(rows))
+    if bundled:
+        win.lib_tree.selection_set(bundled)
+        win._remove_voice()
+        check("refuses to delete a bundled voice",
+              "cannot be removed" in win.lib_status.cget("text")
+              or "in use" in win.lib_status.cget("text"),
+              win.lib_status.cget("text"))
+        win._use_voice()
+        check("can select an installed voice", win.voice_var.get() == bundled, bundled)
 
     print("\n[updates tab]")
     import voice2tts as pkg

@@ -238,9 +238,19 @@ class SettingsWindow(tk.Toplevel):
     def _update_cable_hint(self) -> None:
         found = cable.detect()
         if found is not None:
-            self.cable_label.config(text=f"Virtual cable: {found.product}",
-                                    foreground="#2a7")
-            self.cable_btn.state(["!disabled"])
+            extra = ""
+            others = len(cable.list_devices()) - 1
+            if others > 0:
+                extra = f" (+{others} more channel{'s' if others > 1 else ''})"
+            self.cable_label.config(
+                text=f"Virtual cable: {found.label}{extra} — "
+                     f"Discord input: {found.discord_input}",
+                foreground="#2a7",
+            )
+            # Only VB-CABLE has an uninstaller we know how to drive.
+            self.cable_btn.state(
+                ["!disabled"] if "vb-cable" in found.product.lower() else ["disabled"]
+            )
         else:
             self.cable_label.config(
                 text="No virtual audio cable detected — click here to install "

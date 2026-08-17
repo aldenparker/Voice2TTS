@@ -49,22 +49,48 @@ _ZIP_LINK = re.compile(
 
 USER_AGENT = "Voice2TTS/0.2 (+https://vb-audio.com/Cable/)"
 
-# Devices that can act as a loopback sink. Checked as case-insensitive substrings of
-# the OUTPUT device name; the matching input side is what Discord then selects.
-KNOWN_CABLES: tuple[tuple[str, str], ...] = (
-    ("cable input", "VB-CABLE"),
-    ("cable-a input", "VB-CABLE A+B"),
-    ("cable-b input", "VB-CABLE A+B"),
-    ("cable-c input", "VB-CABLE C+D"),
-    ("cable-d input", "VB-CABLE C+D"),
-    ("voicemeeter input", "VoiceMeeter"),
-    ("voicemeeter aux input", "VoiceMeeter Banana"),
-    ("voicemeeter vaio3 input", "VoiceMeeter Potato"),
-    ("hi-fi cable input", "VB-Audio Hi-Fi Cable"),
-    ("virtual audio cable", "Virtual Audio Cable (VAC)"),
-    ("line 1 (virtual audio cable)", "Virtual Audio Cable (VAC)"),
-    ("synchronous audio router", "Synchronous Audio Router"),
+# Windows names virtual audio endpoints "<FriendlyName> (<DriverName>)", and the
+# driver name is IDENTICAL on the playback and recording side of the same virtual
+# cable. That parenthetical is therefore the reliable way to pair the device we play
+# into with the device the user selects in Discord -- far better than guessing at
+# friendly names, which differ per product and change between driver versions.
+#
+#   VBMatrix In 8 (VB-Audio Matrix VAIO)  <-> VBMatrix Out 8 (VB-Audio Matrix VAIO)
+#   CABLE Input (VB-Audio Virtual Cable)  <-> CABLE Output (VB-Audio Virtual Cable)
+#   VoiceMeeter Input (VB-Audio VoiceMeeter VAIO) <-> VoiceMeeter Out B1 (same tag)
+#
+# Matched against the driver tag, longest pattern first so "voicemeeter aux vaio"
+# beats "voicemeeter vaio". rank orders which product we pick when several exist.
+_PRODUCTS: tuple[tuple[str, str, int], ...] = (
+    ("vb-audio virtual cable", "VB-CABLE", 0),
+    ("vb-audio cable a", "VB-CABLE A+B", 1),
+    ("vb-audio cable b", "VB-CABLE A+B", 1),
+    ("vb-audio cable c", "VB-CABLE C+D", 1),
+    ("vb-audio cable d", "VB-CABLE C+D", 1),
+    ("vb-audio hi-fi cable", "VB-Audio Hi-Fi Cable", 2),
+    ("vb-audio matrix vaio", "VB-Audio Matrix", 3),
+    ("vb-audio voicemeeter vaio3", "VoiceMeeter Potato", 4),
+    ("vb-audio voicemeeter aux vaio", "VoiceMeeter Banana", 4),
+    ("vb-audio voicemeeter vaio", "VoiceMeeter", 4),
+    ("virtual audio cable", "Virtual Audio Cable (VAC)", 5),
+    ("synchronous audio router", "Synchronous Audio Router", 6),
 )
+
+# Anything from these families counts as a virtual cable even when the exact product
+# is unrecognised -- VB-Audio ship new ones, and a device we cannot name is still
+# perfectly usable. Better to detect it generically than to report nothing.
+# Deliberately specific. A bare "virtual audio" would match NVIDIA's "NVIDIA Virtual
+# Audio Device", which renders audio but has no capture side, so it can never carry
+# speech to Discord.
+_FAMILY_HINTS = (
+    "vb-audio", "voicemeeter", "vaio", "vbmatrix",
+    "virtual cable", "virtual audio cable",
+)
+
+_GENERIC_RANK = 9
+
+_DRIVER_TAG = re.compile(r"\(([^()]+)\)\s*$")
+_TRAILING_NUMBER = re.compile(r"(\d+)\s*$")
 
 MIN_ZIP_BYTES = 200_000       # a valid driver pack is ~1-3 MB
 MAX_ZIP_BYTES = 60_000_000    # sanity ceiling on what we will download
@@ -73,43 +99,171 @@ MAX_ZIP_BYTES = 60_000_000    # sanity ceiling on what we will download
 @dataclass(frozen=True)
 class CableInfo:
     product: str
-    output_name: str    # what we play into
-    input_name: str     # what Discord listens to
+    output_name: str      # what we play into
+    input_name: str       # what Discord listens to
+    channel: int | None = None   # e.g. 8 for "VBMatrix In 8"
+    certain: bool = True  # False when the Discord-side pairing had to be guessed
+
+    @property
+    def label(self) -> str:
+        return f"{self.product} {self.channel}" if self.channel else self.product
+
+    @property
+    def discord_input(self) -> str:
+        return self.input_name or "(check Windows Sound settings)"
 
     @property
     def summary(self) -> str:
-        return f"{self.product}: play to {self.output_name!r}, Discord selects {self.input_name!r}"
+        tail = "" if self.certain else "  [pairing inferred - verify in Sound settings]"
+        return (f"{self.label}: play to {self.output_name!r}, "
+                f"Discord selects {self.discord_input!r}{tail}")
 
 
-def detect() -> CableInfo | None:
-    """Find any already-installed virtual cable, not just VB-CABLE."""
-    outputs = devices.list_outputs()
-    inputs = devices.list_inputs()
-    for needle, product in KNOWN_CABLES:
-        out = next((d for d in outputs if needle in d.name.lower()), None)
-        if out is None:
-            continue
-        # The matching capture endpoint is usually the same name with Input->Output.
-        partner = _partner_input(out.name, inputs)
-        return CableInfo(product=product, output_name=out.name,
-                         input_name=partner or "(check Sound settings)")
+def _driver_tag(name: str) -> str:
+    """The trailing '(...)' driver name, which both sides of a cable share."""
+    match = _DRIVER_TAG.search(name)
+    return match.group(1).strip().lower() if match else ""
+
+
+def _friendly(name: str) -> str:
+    """The part before the driver tag, e.g. 'VBMatrix In 8'."""
+    return _DRIVER_TAG.sub("", name).strip()
+
+
+def _channel(name: str) -> int | None:
+    match = _TRAILING_NUMBER.search(_friendly(name))
+    return int(match.group(1)) if match else None
+
+
+def _identify(name: str) -> tuple[str, int] | None:
+    """Map a device to (product, rank), or None if it is not a virtual cable."""
+    tag = _driver_tag(name)
+    haystack = f"{tag} {name}".lower()
+    for pattern, product, rank in _PRODUCTS:
+        if pattern in haystack:
+            return product, rank
+    if any(hint in haystack for hint in _FAMILY_HINTS):
+        # Unrecognised but clearly from a virtual-audio family; name it after its
+        # own driver so the user can still tell which device this is.
+        return (tag.title() if tag else "Virtual audio device"), _GENERIC_RANK
     return None
 
 
-def _partner_input(output_name: str, inputs: list[devices.Device]) -> str | None:
-    low = output_name.lower()
-    guess = low.replace("input", "output")
-    exact = next((d for d in inputs if d.name.lower() == guess), None)
-    if exact:
-        return exact.name
-    # Fall back to sharing the leading token, e.g. "CABLE Output (VB-Audio ...)".
-    head = low.split("(")[0].strip().split()[0]
-    partial = next((d for d in inputs if d.name.lower().startswith(head)), None)
-    return partial.name if partial else None
+def _pair_input(out: devices.Device, inputs: list[devices.Device]) -> tuple[str, bool]:
+    """Find the recording endpoint matching a playback endpoint.
+
+    Returns (name, certain). Certainty matters: telling someone to select the wrong
+    device in Discord wastes more time than admitting we are unsure.
+    """
+    tag = _driver_tag(out.name)
+    same_driver = [d for d in inputs if tag and _driver_tag(d.name) == tag]
+
+    if same_driver:
+        # Multi-channel devices (Matrix has 8) must match on the channel number:
+        # "VBMatrix In 8" pairs with "VBMatrix Out 8", not whichever comes first.
+        channel = _channel(out.name)
+        if channel is not None:
+            numbered = [d for d in same_driver if _channel(d.name) == channel]
+            if len(numbered) == 1:
+                return numbered[0].name, True
+            if numbered:
+                return numbered[0].name, False
+        if len(same_driver) == 1:
+            return same_driver[0].name, True
+        # Same driver, several candidates, no usable numbering: pick the first but
+        # say it is a guess.
+        return same_driver[0].name, False
+
+    # No driver tag to match on (some products omit it). Fall back to the historical
+    # Input->Output rename, then to a shared leading word.
+    low = out.name.lower()
+    for guess in (low.replace("input", "output"), low.replace(" in ", " out ")):
+        exact = next((d for d in inputs if d.name.lower() == guess), None)
+        if exact:
+            return exact.name, True
+    head = _friendly(out.name).lower().split()
+    if head:
+        partial = next((d for d in inputs if d.name.lower().startswith(head[0])), None)
+        if partial:
+            return partial.name, False
+    return "", False
+
+
+def list_devices() -> list[CableInfo]:
+    """Every usable virtual cable, best first.
+
+    Ordered by product rank then channel number, so a machine with eight Matrix
+    channels defaults to channel 1 rather than whichever Windows enumerated first.
+    """
+    # WASAPI only, on BOTH sides. The same endpoint is also exposed through MME,
+    # DirectSound and WDM-KS, so an unfiltered input list contains four copies of
+    # every device -- enough to defeat the "exactly one match" pairing test and make
+    # every correct pairing look uncertain. MME also truncates names to 31
+    # characters, which destroys the driver tag we pair on.
+    inputs = [d for d in devices.list_inputs() if d.hostapi == devices.WASAPI]
+    found: list[tuple[int, int, CableInfo]] = []
+    for out in devices.list_outputs():
+        if out.hostapi != devices.WASAPI:
+            continue
+        identified = _identify(out.name)
+        if identified is None:
+            continue
+        product, rank = identified
+
+        if rank == _GENERIC_RANK:
+            # Only a recognised product is taken on trust. Anything matched by a
+            # family hint alone must prove it is a cable by having a recording
+            # endpoint on the same driver -- a loopback device has both halves,
+            # while a render-only device (NVIDIA's virtual audio, game streaming
+            # sinks) would silently swallow speech Discord could never hear.
+            tag = _driver_tag(out.name)
+            if not tag or not any(_driver_tag(d.name) == tag for d in inputs):
+                log.debug("ignoring render-only virtual device: %s", out.name)
+                continue
+
+        partner, certain = _pair_input(out, inputs)
+        channel = _channel(out.name)
+        found.append((
+            rank,
+            channel if channel is not None else 0,
+            CableInfo(product=product, output_name=out.name, input_name=partner,
+                      channel=channel, certain=certain),
+        ))
+    found.sort(key=lambda t: (t[0], t[1], t[2].output_name))
+    return [info for _, _, info in found]
+
+
+def detect() -> CableInfo | None:
+    """The virtual cable to use by default, or None if none is installed."""
+    candidates = list_devices()
+    return candidates[0] if candidates else None
 
 
 def installed() -> bool:
     return detect() is not None
+
+
+# Recognises a virtual device from a *fragment* too, since config stores substrings
+# like "CABLE Input" rather than full device names, and the placeholder written when
+# no cable is present has no driver tag to identify.
+_MATCH_HINTS = (
+    "vb-audio", "voicemeeter", "vaio", "vbmatrix", "hi-fi cable",
+    "cable input", "cable output", "cable-a", "cable-b", "cable-c", "cable-d",
+    "virtual cable", "virtual audio", "synchronous audio router",
+)
+
+
+def is_virtual_device(name: str) -> bool:
+    """True if this device name -- or config match fragment -- is a virtual cable.
+
+    Used to find the row in the output list that represents the cable, so changing
+    which one is selected updates that row instead of appending another.
+    """
+    if not name:
+        return False
+    if _identify(name) is not None:
+        return True
+    return any(hint in name.lower() for hint in _MATCH_HINTS)
 
 
 # -- download ---------------------------------------------------------------

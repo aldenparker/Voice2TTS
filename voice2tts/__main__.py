@@ -28,11 +28,23 @@ def _cmd_devices() -> int:
         print(f"{d.index:>4}  {d.max_in:>3} {d.max_out:>3}  {d.rate:>6}  "
               f"{d.hostapi:<20} {d.name}")
 
+    from . import cable as cable_mod
+
     din, dout = devices.default_input(), devices.default_output()
     print(f"\ndefault input : {din.name if din else '-'}")
     print(f"default output: {dout.name if dout else '-'}")
-    cable = devices.find_cable_output()
-    print(f"virtual cable : {cable.name if cable else 'NOT INSTALLED'}")
+
+    found = cable_mod.list_devices()
+    if not found:
+        print("virtual cables: NOT INSTALLED")
+        return 0
+    print(f"\nvirtual cables: {len(found)} found (* = used by default)")
+    for i, c in enumerate(found):
+        mark = "*" if i == 0 else " "
+        flag = "" if c.certain else "   [pairing inferred]"
+        print(f" {mark} {c.label}")
+        print(f"     play to  {c.output_name}")
+        print(f"     Discord  {c.discord_input}{flag}")
     return 0
 
 

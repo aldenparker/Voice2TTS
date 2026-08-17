@@ -266,13 +266,15 @@ def load_config(path: Path | None = None) -> Config:
 
 def default_config() -> Config:
     """Defaults with a best-effort guess at the virtual cable and a local monitor."""
-    from .devices import find_cable_output
+    from . import cable as cable_mod
 
     cfg = Config()
-    cable = find_cable_output()
-    have_cable = cable is not None
+    found = cable_mod.detect()
+    have_cable = found is not None
     if have_cable:
-        cfg.audio.outputs.append(OutputTarget(match=cable.name, gain=1.0, enabled=True))
+        cfg.audio.outputs.append(
+            OutputTarget(match=found.output_name, gain=1.0, enabled=True)
+        )
     else:
         # Placeholder so the settings UI has a row to edit once VB-CABLE is installed.
         cfg.audio.outputs.append(OutputTarget(match="CABLE Input", gain=1.0, enabled=False))

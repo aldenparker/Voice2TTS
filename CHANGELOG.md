@@ -3,6 +3,40 @@
 All notable changes to Voice2TTS. Format follows [Keep a Changelog](https://keepachangelog.com/),
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-08-16
+
+### Fixed — virtual device detection
+
+- **VB-Audio Matrix was not detected at all**, while a second, inconsistent detector
+  matched it by substring. The wizard reported "no virtual microphone found" at the
+  same moment the default config wired up `VBMatrix In 8`. There is now one
+  implementation; `devices.find_cable_output()` delegates to it.
+- **The Discord-side device was reported wrongly for multi-channel products.**
+  Pairing assumed an `Input` → `Output` rename, so `VBMatrix In 8` resolved to
+  `VBMatrix Out 2` — whichever endpoint enumerated first. Pairing is now done on the
+  driver name Windows shows in parentheses, which is identical on both halves of a
+  cable, plus the channel number. Verified against all eight Matrix channels.
+  This also fixes VoiceMeeter's 2024 driver, where the capture side was renamed from
+  `VoiceMeeter Output` to `VoiceMeeter Out B1` and the old rename no longer worked.
+- Every device was matched across all four host APIs, so the "exactly one match"
+  pairing test never passed and correct pairings were all flagged uncertain.
+  Detection is now WASAPI-only on both sides — MME also truncates names to 31
+  characters, destroying the driver tag.
+- Changing the selected channel appended a duplicate output row instead of updating
+  the existing one, because the cable row was found by looking for "cable" in the
+  name and a Matrix channel is called `VBMatrix In 1`.
+
+### Added
+
+- Support for the full VB-Audio range: Matrix (8 channels), CABLE A+B and C+D,
+  Hi-Fi Cable, VoiceMeeter/Banana/Potato, plus a generic fallback so an unrecognised
+  VB-Audio product is still usable.
+- A channel picker in the setup wizard when more than one virtual device exists.
+- `--devices` and Settings now name the exact recording device to select in Discord,
+  and say so explicitly when the pairing had to be inferred rather than confirmed.
+- Render-only virtual devices (NVIDIA's virtual audio, game-streaming sinks) are
+  rejected: without a capture endpoint they would silently swallow speech.
+
 ## [0.4.0] - 2026-08-16
 
 ### Changed — licence
