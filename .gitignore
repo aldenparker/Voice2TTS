@@ -1,0 +1,40 @@
+# Build output
+build/
+dist/
+
+# Downloaded model weights: ~384 MB, and regenerated on demand by
+#   python scripts/fetch_models.py --bundle
+# Keeping them out of git avoids bloating the repo with binaries that already
+# live on HuggingFace.
+models/
+
+# Generated from voice2tts/icon.py by scripts/make_icon.py
+installer/voice2tts.ico
+
+# Spike scratch output
+spike/out/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.idea/
+.vscode/
+
+# Runtime
+*.log
+*.toml.tmp
+
+# Windows
+Thumbs.db
+desktop.ini
+*.lnk

@@ -1,0 +1,80 @@
+Voice2TTS
+Copyright (C) 2026
+
+This program is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with this
+program. If not, see <https://www.gnu.org/licenses/>.
+
+The full licence text is in the file COPYING distributed alongside this one.
+
+
+WHY GPL
+=======
+
+Voice2TTS bundles Piper (piper-tts), which is licensed GPL-3.0-or-later because it
+links eSpeak NG for phonemization. Distributing Piper inside this application makes
+the combined work subject to the GPL, so Voice2TTS is licensed GPL-3.0-or-later to
+match. Earlier builds incorrectly declared MIT; that was a mistake, corrected in
+0.4.0.
+
+
+SOURCE CODE
+===========
+
+The GPL requires that you can obtain the source for the version you are running.
+The complete corresponding source is available at the project's repository, and the
+installed application reports its exact version under Settings -> Updates.
+
+
+THIRD-PARTY COMPONENTS
+======================
+
+Bundled in the installer
+------------------------
+
+Piper / piper-tts (GPL-3.0-or-later) - https://github.com/OHF-Voice/piper1-gpl
+  Includes eSpeak NG (GPL-3.0-or-later) as its phonemizer, and g2pW
+  (Apache-2.0). This is the component that determines Voice2TTS's own licence.
+  Piper voice models carry their own licences, stated on each model card:
+  https://huggingface.co/rhasspy/piper-voices
+  Bundled voices: en_US-lessac-medium, en_US-amy-medium, en_US-ryan-high.
+
+faster-whisper (MIT) - https://github.com/SYSTRAN/faster-whisper
+CTranslate2 (MIT) - https://github.com/OpenNMT/CTranslate2
+ONNX Runtime (MIT) - https://github.com/microsoft/onnxruntime
+Silero VAD (MIT) - https://github.com/snakers4/silero-vad
+Whisper models by OpenAI (MIT), CTranslate2 conversions by Systran
+sounddevice (MIT) and PortAudio (MIT)
+PyAV (BSD-3-Clause) and FFmpeg (LGPL-2.1-or-later)
+NumPy (BSD-3-Clause), Pillow (MIT-CMU), huggingface-hub (Apache-2.0),
+tokenizers (Apache-2.0), tomli-w (MIT)
+
+python-soxr (LGPL-2.1-or-later) - https://github.com/dofuuz/python-soxr
+pystray (LGPL-3.0) - https://github.com/moses-palmer/pystray
+pynput (LGPL-3.0) - https://github.com/moses-palmer/pynput
+  These are LGPL. They are used as unmodified libraries; their own source is
+  available at the addresses above.
+
+Downloaded at runtime, not redistributed
+----------------------------------------
+
+VB-CABLE by VB-Audio Software - https://vb-audio.com/Cable/
+  Donationware. NOT included in this installer. The setup wizard downloads it from
+  VB-Audio's own servers at your request and runs their installer. If you find it
+  useful, please pay for a licence: https://vb-audio.com/Services/licensing.htm
+
+NVIDIA CUDA runtime libraries (cuBLAS, cuDNN)
+  Subject to the NVIDIA Software License Agreement and cuDNN Supplement. NOT
+  included in this installer; downloaded from NVIDIA's official packages on PyPI
+  only if you opt in to GPU acceleration. https://docs.nvidia.com/cuda/eula/
+
+Additional Piper voices
+  Downloaded on request from https://huggingface.co/rhasspy/piper-voices under the
+  licence stated on each voice's model card.

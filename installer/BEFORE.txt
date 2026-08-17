@@ -1,0 +1,48 @@
+Voice2TTS
+=========
+
+Voice2TTS listens to your microphone, transcribes what you say, and speaks it back
+in a synthetic voice through a virtual microphone that Discord, Zoom, OBS and other
+apps can use as an input device.
+
+Everything runs locally on your machine. No audio is sent anywhere.
+
+
+What gets installed now
+-----------------------
+
+  * The application
+  * Three voices (lessac, amy, ryan)
+  * A speech recognition model that runs on your CPU
+
+The app works immediately after install, with no further downloads.
+
+
+What happens on first run
+-------------------------
+
+A short setup wizard offers two optional extras:
+
+  1. A VIRTUAL MICROPHONE. Discord can only hear Voice2TTS through a virtual audio
+     device. Windows requires a signed driver for this, so the wizard downloads
+     VB-CABLE from VB-Audio and runs their installer. Windows will ask for
+     administrator permission, and a restart is needed afterwards.
+
+     VB-CABLE is donationware by VB-Audio. It is not included in this installer and
+     is downloaded directly from vb-audio.com. If you already have VB-CABLE,
+     VoiceMeeter, Virtual Audio Cable or a similar device, the wizard will find it
+     and skip this step.
+
+  2. GPU ACCELERATION. If you have an NVIDIA graphics card, roughly 1.3 GB of NVIDIA
+     CUDA libraries can be downloaded to make transcription about twenty times
+     faster. This is entirely optional; the app works well on a CPU.
+
+Both can be skipped now and done later from Settings.
+
+
+A note on the SmartScreen warning
+---------------------------------
+
+This installer is not code-signed, so Windows may show "Windows protected your PC".
+Choose "More info", then "Run anyway". Signing certificates require a registered
+business identity, which this project does not have.

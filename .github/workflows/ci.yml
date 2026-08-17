@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - name: Lint
+        run: ruff check .
+      - name: Format check
+        run: ruff format --check .
+        continue-on-error: true
+
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Models are gitignored (~380 MB) and slow to fetch, so cache them across runs.
+      - name: Cache models
+        id: models
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: models-${{ hashFiles('scripts/fetch_models.py') }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Fetch models
+        if: steps.models.outputs.cache-hit != 'true'
+        run: python scripts/fetch_models.py --bundle
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      # GitHub runners have no audio hardware, so device-dependent checks are
+      # skipped; everything else (config, VAD, STT, updater, packaging) still runs.
+      - name: Self-test
+        run: python scripts/selftest.py --no-audio
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: ~/AppData/Roaming/Voice2TTS/*.log
+          if-no-files-found: ignore
+
+  build:
+    needs: [lint, test]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Cache models
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: models-${{ hashFiles('scripts/fetch_models.py') }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build (frozen app only)
+        shell: pwsh
+        # Inno Setup is not installed on the runner; -SkipInstaller still proves the
+        # spec is intact and the frozen build starts and finds its bundled models,
+        # which is where packaging actually breaks.
+        run: .\build.ps1 -SkipInstaller -Python "$env:pythonLocation\python.exe"
+        env:
+          PYTHONPATH: ${{ github.workspace }}
