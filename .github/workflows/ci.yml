@@ -3,7 +3,9 @@ name: CI
 on:
   push:
     branches: ["**"]
-    # Tags are handled by release.yml, which runs the same checks before building.
+    # Tags are skipped here because release.yml runs its own verify job with the
+    # same lint and self-test before it builds anything. That was previously only
+    # a comment and not true, which let a tag publish over a failing test.
     tags-ignore: ["**"]
   pull_request:
   workflow_dispatch:
@@ -61,6 +63,13 @@ jobs:
       # which is gitignored and therefore absent on a clean checkout.
       - name: Self-test
         run: python scripts/selftest.py --no-audio
+
+      # Not yet part of the release gate: Tk on a headless runner is unproven, and
+      # a flaky check must not be able to block a release. Promote it into
+      # release.yml's verify job once it has been reliably green here.
+      - name: GUI smoke test
+        run: python scripts/guitest.py
+        continue-on-error: true
 
       - name: Upload logs on failure
         if: failure()

@@ -5,6 +5,22 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [0.5.1] - 2026-08-16
 
+### Fixed — release gating
+
+- **A tag could publish a release over failing tests, and did.** v0.5.0 shipped
+  from a commit whose CI run had failed: `ci.yml` skips tags, and `release.yml`
+  ran no checks of its own, so nothing stood between a tag push and a published
+  installer. A comment in `ci.yml` claimed release handled it; that was never
+  true. `release.yml` now has a `verify` job — tag/version check, lint, self-test —
+  that the publishing job depends on, and a test asserts the dependency so it
+  cannot quietly disappear again.
+- **CI had been failing on every push since the first commit.** `test_device_lists`
+  asserted the trimmed device list was shorter than the raw one, which is false on
+  a machine with no audio hardware — as every CI runner is. It now checks that
+  enumeration returns empty cleanly instead.
+- The GUI smoke test now runs in CI, having previously not run there at all. It is
+  non-blocking until Tk on a headless runner is proven reliable.
+
 ### Changed
 
 - **The interface uses Windows' native widget appearance again.** 0.5.0 repainted

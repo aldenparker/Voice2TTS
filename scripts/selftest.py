@@ -374,6 +374,56 @@ def test_theme() -> None:
         root.destroy()
 
 
+def test_release_is_gated() -> None:
+    """A tag must not be able to publish without the checks having run.
+
+    v0.5.0 shipped from a commit whose CI run had failed: ci.yml ignores tags, and
+    release.yml ran no tests, so nothing stood between a tag push and a published
+    installer. A comment claimed otherwise, which is why this is now asserted.
+    """
+    print("\n[release gating]")
+    import yaml
+
+    wf = ROOT / ".github" / "workflows"
+    release = yaml.safe_load((wf / "release.yml").read_text(encoding="utf-8"))
+    ci = yaml.safe_load((wf / "ci.yml").read_text(encoding="utf-8"))
+
+    jobs = release.get("jobs", {})
+    check("release.yml has a verify job", "verify" in jobs, str(list(jobs)))
+
+    publisher = jobs.get("release", {})
+    needs = publisher.get("needs") or []
+    if isinstance(needs, str):
+        needs = [needs]
+    check("the publishing job depends on verify", "verify" in needs, str(needs))
+
+    def step_names(job):
+        return [str(s.get("name", "")) for s in job.get("steps", [])]
+
+    verify_steps = " ".join(step_names(jobs.get("verify", {}))).lower()
+    check("verify runs the self-test", "self-test" in verify_steps, verify_steps)
+    check("verify runs the linter", "lint" in verify_steps, verify_steps)
+    check("verify checks the tag against __version__",
+          "resolve version" in verify_steps, verify_steps)
+
+    # The publishing job must not run any of that itself -- if it did, a failure
+    # there would happen after the build rather than before it.
+    publish_steps = " ".join(step_names(publisher)).lower()
+    check("publishing happens only after verify",
+          "self-test" not in publish_steps, publish_steps)
+
+    # ci.yml skipping tags is only safe because release.yml verifies them.
+    triggers = ci.get(True) or ci.get("on") or {}
+    push = triggers.get("push", {}) if isinstance(triggers, dict) else {}
+    if "tags-ignore" in push:
+        check("tags skipped in CI are covered by release verify",
+              "verify" in jobs and "self-test" in verify_steps,
+              "ci.yml ignores tags")
+    else:
+        check("tags skipped in CI are covered by release verify", True,
+              "ci.yml also runs on tags")
+
+
 def test_winget_manifests() -> None:
     print("\n[winget]")
     import yaml
@@ -992,9 +1042,22 @@ def test_device_lists() -> None:
     all_in = devices.list_inputs(all_apis=True)
     all_out = devices.list_outputs(all_apis=True)
 
-    check("trimmed list is smaller than the raw one",
-          len(trimmed_in) < len(all_in) and len(trimmed_out) < len(all_out),
-          f"{len(trimmed_in)}/{len(all_in)} in, {len(trimmed_out)}/{len(all_out)} out")
+    # A CI runner has no audio hardware at all, so there is nothing to trim and
+    # "fewer than before" is not a meaningful claim. Assert what still holds --
+    # enumeration works and returns nothing -- rather than failing the build.
+    if not all_in and not all_out:
+        check("no-hardware enumeration is empty, not broken",
+              trimmed_in == [] and trimmed_out == []
+              and devices.default_input() is None
+              and devices.resolve_input("") is None,
+              "no audio devices present")
+    else:
+        check("trimmed list is smaller than the raw one",
+              len(trimmed_in) < len(all_in) and len(trimmed_out) < len(all_out),
+              f"{len(trimmed_in)}/{len(all_in)} in, "
+              f"{len(trimmed_out)}/{len(all_out)} out")
+    check("trimmed never exceeds the raw list",
+          len(trimmed_in) <= len(all_in) and len(trimmed_out) <= len(all_out))
     check("trimmed lists are WASAPI only",
           all(d.hostapi == devices.WASAPI for d in trimmed_in + trimmed_out))
     # Devices CAN legitimately share a name -- two identical monitors on one GPU.
@@ -1180,6 +1243,7 @@ def main() -> int:
     if not no_audio:
         test_device_recovery()
     test_theme()
+    test_release_is_gated()
     test_winget_manifests()
     test_profiles()
     test_history_and_review()

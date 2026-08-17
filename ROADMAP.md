@@ -19,7 +19,8 @@ verified: tagging `v*` builds and publishes on its own.
 |---|---|
 | Pipeline | mic → Silero VAD → Whisper → Piper → N outputs |
 | Latency | ~300 ms utterance to first audio (RTX 5080, `small.en`) |
-| Tests | 210 self-test + 70 GUI, ruff clean, CI on every push |
+| Tests | 214 self-test + 70 GUI, ruff clean, CI on every push |
+| Release gate | `release.yml` verifies (tag/version, lint, self-test) before it builds; asserted by a test |
 | Licence | GPL-3.0-or-later (Piper links eSpeak NG) |
 | Distribution | Inno Setup, per-user, unsigned; winget manifests staged |
 
