@@ -52,6 +52,10 @@ GPL-incompatible licence) cannot go in. Record new dependencies in `LICENSE.txt`
 choices. Read it before changing the VAD, the CUDA loading, or the virtual cable
 approach — several of those look wrong until you know why they are that way.
 
+[ROADMAP.md](ROADMAP.md) holds the plan for what is next, the decisions still
+outstanding, and the things verified in code but not yet proven with real sound.
+Update it in the same commit as the work it describes.
+
 ## Conventions
 
 - Exceptions in audio callbacks and worker threads are caught and logged rather than

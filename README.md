@@ -344,5 +344,5 @@ because it links eSpeak NG, so the combined work must be GPL too. Releases befor
 Full text in [COPYING](COPYING); the third-party component list, including the
 things downloaded rather than bundled, is in [LICENSE.txt](LICENSE.txt).
 
-See also [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and
-[CHANGELOG.md](CHANGELOG.md).
+See also [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md),
+[CHANGELOG.md](CHANGELOG.md) and [ROADMAP.md](ROADMAP.md).
