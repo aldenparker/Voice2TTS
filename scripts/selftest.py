@@ -2391,9 +2391,9 @@ def test_device_lists() -> None:
     all_in = devices.list_inputs(all_apis=True)
     all_out = devices.list_outputs(all_apis=True)
 
-    # A CI runner has no audio hardware at all, so there is nothing to trim and
-    # "fewer than before" is not a meaningful claim. Assert what still holds --
-    # enumeration works and returns nothing -- rather than failing the build.
+    # "Fewer than before" is only meaningful for a kind of device that exists.
+    # Requiring it of BOTH kinds fails on a machine with speakers and no
+    # microphone -- an ordinary desktop, and every CI runner.
     if not all_in and not all_out:
         check("no-hardware enumeration is empty, not broken",
               trimmed_in == [] and trimmed_out == []
@@ -2401,10 +2401,14 @@ def test_device_lists() -> None:
               and devices.resolve_input("") is None,
               "no audio devices present")
     else:
-        check("trimmed list is smaller than the raw one",
-              len(trimmed_in) < len(all_in) and len(trimmed_out) < len(all_out),
-              f"{len(trimmed_in)}/{len(all_in)} in, "
-              f"{len(trimmed_out)}/{len(all_out)} out")
+        for kind, trimmed, raw in (("input", trimmed_in, all_in),
+                                   ("output", trimmed_out, all_out)):
+            if not raw:
+                check(f"no {kind}s to trim, and none invented",
+                      trimmed == [], f"0 {kind}s on this machine")
+            else:
+                check(f"the {kind} list is trimmed",
+                      len(trimmed) < len(raw), f"{len(trimmed)}/{len(raw)}")
     check("trimmed never exceeds the raw list",
           len(trimmed_in) <= len(all_in) and len(trimmed_out) <= len(all_out))
     check("trimmed lists are WASAPI only",

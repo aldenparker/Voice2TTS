@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from voice2tts import devices as devices_mod  # noqa: E402
 from voice2tts.config import OutputTarget, load_config  # noqa: E402
 from voice2tts.gui import SettingsWindow  # noqa: E402
 from voice2tts.icon import make_icon  # noqa: E402
@@ -67,7 +68,14 @@ def main() -> int:
     root.update()
     check("window constructed", win.winfo_exists() == 1)
     check("output rows built", len(win._output_rows) == 2, f"{len(win._output_rows)}")
-    check("input combo populated", len(win.input_combo["values"]) > 1)
+    # NOT "the list has entries" -- that asserts this machine has a microphone
+    # and fails on any runner. The property worth checking is that the picker
+    # mirrors what was detected, plus the blank "system default" row.
+    detected_inputs = devices_mod.list_inputs(not cfg.audio.prefer_wasapi)
+    check("input combo offers every input, plus a default",
+          len(list(win.input_combo["values"])) == len(detected_inputs) + 1,
+          f"{len(list(win.input_combo['values']))} rows for "
+          f"{len(detected_inputs)} devices")
     check("voice combo populated", len(win.voice_combo["values"]) >= 1,
           str(win.voice_combo["values"]))
 
@@ -254,8 +262,15 @@ def main() -> int:
           "Record" in [win.studio_nb.tab(t, "text") for t in win.studio_nb.tabs()],
           str([win.studio_nb.tab(t, "text") for t in win.studio_nb.tabs()]))
     check("prompt corpus loaded", len(panel.corpus) > 100, f"{len(panel.corpus)}")
-    check("microphone list populated or machine has none",
-          isinstance(panel.device_box["values"], (tuple, list)))
+    # list() rather than a type check: Tk hands back the empty STRING, not an
+    # empty tuple, when a combobox has no values, so `isinstance(..., tuple)`
+    # is false exactly on the machines that have no microphone.
+    check("microphone list matches what was detected",
+          list(panel.device_box["values"]) == [d.display for d in panel._inputs],
+          f"{len(list(panel.device_box['values']))} listed")
+    check("a microphone is preselected when there is one",
+          bool(panel.device_var.get()) == bool(panel._inputs),
+          panel.device_var.get() or "(no inputs on this machine)")
     check("no session until asked", panel.session is None)
     check("recording disabled before a session",
           "disabled" in str(panel.record_btn.state()), str(panel.record_btn.state()))

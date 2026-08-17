@@ -403,6 +403,18 @@ streams, the packaging modules, and a full pipeline run. It opens real output de
 but writes silence, so it's safe with headphones on. `--no-network` skips the live
 catalogue checks; `--no-e2e` skips the pipeline run.
 
+```powershell
+& "$env:USERPROFILE\.venvs\voice2tts\Scripts\python.exe" scripts\bare_machine.py
+```
+
+Runs both suites against a machine with no GPU and no audio devices, which is
+what CI has. Three separate CI failures have come from tests that quietly
+assert the *developer's* hardware — a microphone, an NVIDIA card, more devices
+than WASAPI exposes. They all pass locally and fail on every runner, and none
+of them shows up until a push. Run this before touching anything that reads
+hardware. `--keep-outputs` simulates the other awkward case, a desktop with
+speakers and no microphone.
+
 ## Project layout
 
     voice2tts/
