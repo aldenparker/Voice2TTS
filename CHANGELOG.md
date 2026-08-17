@@ -3,6 +3,17 @@
 All notable changes to Voice2TTS. Format follows [Keep a Changelog](https://keepachangelog.com/),
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] - 2026-08-16
+
+### Changed
+
+- **The interface uses Windows' native widget appearance again.** 0.5.0 repainted
+  it, which suited a functional utility less well than the platform's own look.
+  Light and dark remain available in Settings → Status for anyone who wants a dark
+  window, but `native` is the default and nothing is restyled in that mode.
+  Existing configs on the old default migrate across; an explicit light or dark
+  choice is left alone.
+
 ## [0.5.0] - 2026-08-16
 
 ### Added — quality of life
@@ -30,8 +41,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
 - **Profiles**: named snapshots of situational settings, with optional per-app
   switching. Devices and models stay global.
 - **Voice preview** before downloading, **a persistent type-to-speak window** with
-  recent-entry recall, **light/dark theming**, an **in-app log viewer**, and
-  **winget manifests**.
+  recent-entry recall, optional **light/dark theming** (reverted to native by
+  default in 0.5.1), an **in-app log viewer**, and **winget manifests**.
 
 ### Fixed — virtual device detection
 

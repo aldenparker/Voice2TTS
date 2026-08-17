@@ -173,6 +173,8 @@ mishears, expands abbreviations, and corrects words the voice says badly. Whole-
 matching by default, with a live preview.
 
 **History** lists recent utterances so you can say one again when someone missed it.
+Settings → Status also has a theme picker: `native` (the default, Windows' own
+appearance) plus `light` and `dark` if you want a dark window at night.
 
 **Review before speaking** (History tab) shows each transcript for approval first.
 Slower, but nothing unreviewed reaches a call. It discards on timeout rather than

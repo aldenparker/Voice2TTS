@@ -1,12 +1,17 @@
-"""Light and dark theming for the Tk interface.
+"""Semantic colours, and optional light/dark theming.
 
-Default ttk on Windows looks like 2005, and there is no dark mode at all -- an app
-that sits open beside a game or a call at night is the wrong place for a white
-window. This restyles the built-in "clam" theme rather than pulling in a widget
-toolkit, so it costs no dependency and no packaging weight.
+The DEFAULT is "native": Windows' own ttk theme, untouched. This is a functional
+utility, and native widgets are what a functional utility should look like -- they
+match the rest of the system, respect accessibility settings, and never look
+subtly wrong in the way a hand-rolled theme eventually does.
 
-Colours are also used directly by the code that draws status text, so semantic
-names live here rather than as hex literals scattered through gui.py.
+Light and dark remain available for anyone who wants a dark window beside a game
+at night. Those repaint the built-in "clam" theme, which is the only bundled theme
+that honours colour options; vista and xpnative draw from native bitmaps and
+ignore most styling.
+
+Either way, semantic colour names live here rather than as hex literals scattered
+through gui.py, so status text stays legible in whichever mode is active.
 """
 
 from __future__ import annotations
@@ -18,7 +23,8 @@ from tkinter import ttk
 
 log = logging.getLogger(__name__)
 
-MODES = ("system", "light", "dark")
+# native first: it is the default, and the order is what the picker shows.
+MODES = ("native", "light", "dark")
 
 
 @dataclass(frozen=True)
@@ -34,11 +40,23 @@ class Palette:
     warn: str
     error: str
     selection: str
+    # When set, widgets keep their platform appearance and only the semantic
+    # colours below are used. Nothing is restyled.
+    native: bool = False
 
     @property
     def is_dark(self) -> bool:
-        return self.bg < "#808080"
+        return not self.native and self.bg < "#808080"
 
+
+# The status colours the app used before theming existed. Keeping the exact values
+# means "native" looks identical to how it always did.
+NATIVE = Palette(
+    bg="#f0f0f0", surface="#f0f0f0", field="#ffffff", text="#000000",
+    muted="#666666", border="#a0a0a0", accent="#0078d7",
+    ok="#2a7745", warn="#cc8800", error="#aa3333", selection="#cce4f7",
+    native=True,
+)
 
 LIGHT = Palette(
     bg="#f3f3f3", surface="#fafafa", field="#ffffff", text="#1c1c1c",
@@ -71,16 +89,36 @@ def resolve(mode: str) -> Palette:
         return DARK
     if mode == "light":
         return LIGHT
-    return DARK if windows_prefers_dark() else LIGHT
+    # "system" was an earlier name for follow-Windows; treat it as such rather
+    # than silently turning old configs native.
+    if mode == "system":
+        return DARK if windows_prefers_dark() else LIGHT
+    return NATIVE
 
 
-def apply(root: tk.Misc, mode: str = "system") -> Palette:
-    """Restyle every ttk widget class. Returns the palette in use."""
+def apply(root: tk.Misc, mode: str = "native") -> Palette:
+    """Apply a theme. Returns the palette in use.
+
+    In native mode nothing is restyled: Windows' own widget appearance is left
+    exactly as it is, and only the semantic colours are used by callers.
+    """
     palette = resolve(mode)
     style = ttk.Style(root)
+
+    if palette.native:
+        # Restore the platform default, in case a previous call switched to clam
+        # during this session.
+        for candidate in ("vista", "winnative", "xpnative", "default"):
+            if candidate in style.theme_names():
+                try:
+                    style.theme_use(candidate)
+                    break
+                except tk.TclError:
+                    continue
+        _clear_listbox_colours(root)
+        return palette
+
     try:
-        # clam is the only built-in theme that honours colour options properly;
-        # vista and xpnative draw from native bitmaps and ignore most of this.
         style.theme_use("clam")
     except tk.TclError:
         log.debug("clam theme unavailable; keeping the default")
@@ -146,8 +184,23 @@ def apply(root: tk.Misc, mode: str = "system") -> Palette:
     return palette
 
 
+def _clear_listbox_colours(root: tk.Misc) -> None:
+    """Undo combobox dropdown colours set by a previous light/dark apply()."""
+    for option in ("background", "foreground", "selectBackground",
+                   "selectForeground"):
+        try:
+            root.option_add(f"*TCombobox*Listbox.{option}", "")
+        except tk.TclError:
+            pass
+
+
 def style_text_widget(widget: tk.Text, palette: Palette) -> None:
-    """Colour a classic Tk Text, which ttk styling does not reach."""
+    """Colour a classic Tk Text, which ttk styling does not reach.
+
+    A no-op in native mode: the platform default appearance is the point.
+    """
+    if palette.native:
+        return
     try:
         widget.configure(
             background=palette.field, foreground=palette.text,

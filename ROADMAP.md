@@ -11,8 +11,9 @@ reason something changed is usually worth more than the plan itself.
 
 ## Status
 
-**Current release: 0.5.0** — published, installer and checksum attached.
-Release automation is verified: tagging `v*` builds and publishes on its own.
+**Current release: 0.5.1** — 0.5.0 published with installer and checksum attached;
+0.5.1 reverts the interface to Windows' native appearance. Release automation is
+verified: tagging `v*` builds and publishes on its own.
 
 | | |
 |---|---|

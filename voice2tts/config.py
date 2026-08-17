@@ -21,7 +21,8 @@ MODES = ("ptt", "vad", "both")
 # Raise when a change needs a migration in Config.migrate(). Adding a field does
 # not: the loader fills unknown-but-missing fields from the dataclass defaults.
 #   1 -> 2  update repository became prefilled rather than blank
-CURRENT_SCHEMA = 2
+#   2 -> 3  theme default returned to the native Windows appearance
+CURRENT_SCHEMA = 3
 WHISPER_MODELS = ("tiny.en", "base.en", "small.en", "medium.en", "distil-small.en", "large-v3")
 
 
@@ -175,7 +176,10 @@ class Config:
     schema_version: int = CURRENT_SCHEMA
     start_minimized: bool = True
     run_at_login: bool = False
-    theme: str = "system"            # system | light | dark
+    # native = Windows' own widget appearance, untouched. light/dark repaint the
+    # interface for anyone who wants a dark window; native is the default because
+    # this is a utility and should look like one.
+    theme: str = "native"            # native | light | dark
     log_level: str = "INFO"
     first_run_complete: bool = False
 
@@ -249,7 +253,7 @@ class Config:
             schema_version=int(data.get("schema_version", 1)),
             start_minimized=bool(data.get("start_minimized", True)),
             run_at_login=bool(data.get("run_at_login", False)),
-            theme=str(data.get("theme", "system")),
+            theme=str(data.get("theme", "native")),
             log_level=str(data.get("log_level", "INFO")),
             first_run_complete=bool(data.get("first_run_complete", False)),
         )
@@ -270,6 +274,13 @@ class Config:
         if self.schema_version < 2 and not self.updates.repo:
             self.updates.repo = DEFAULT_UPDATE_REPO
             notes.append(f"update repository set to {DEFAULT_UPDATE_REPO}")
+
+        # 0.5.0 briefly defaulted to a repainted interface. Native widgets suit a
+        # utility better, so anything still on the old default moves across; an
+        # explicit light or dark choice is left alone.
+        if self.schema_version < 3 and self.theme == "system":
+            self.theme = "native"
+            notes.append("theme reset to the native Windows appearance")
         self.schema_version = CURRENT_SCHEMA
         return notes
 
@@ -306,9 +317,9 @@ class Config:
         if "github.com/" in self.updates.repo:
             self.updates.repo = self.updates.repo.split("github.com/", 1)[1]
         self.updates.interval_hours = max(0, int(self.updates.interval_hours))
-        if self.theme not in ("system", "light", "dark"):
-            log.warning("unknown theme %r, using system", self.theme)
-            self.theme = "system"
+        if self.theme not in ("native", "light", "dark", "system"):
+            log.warning("unknown theme %r, using native", self.theme)
+            self.theme = "native"
 
     def save(self, path: Path | None = None) -> Path:
         path = path or config_path()

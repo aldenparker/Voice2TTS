@@ -317,19 +317,24 @@ def test_theme() -> None:
 
     from voice2tts import theme
 
-    light, dark = theme.LIGHT, theme.DARK
+    light, dark, native = theme.LIGHT, theme.DARK, theme.NATIVE
+    check("native is the first offered mode", theme.MODES[0] == "native",
+          str(theme.MODES))
     check("light and dark differ", light.bg != dark.bg)
     check("dark palette identifies as dark", dark.is_dark and not light.is_dark)
+    check("native is never treated as dark", not native.is_dark)
     check("explicit modes ignore the system setting",
           theme.resolve("dark") is dark and theme.resolve("light") is light)
-    check("system mode returns a palette", theme.resolve("system") in (light, dark))
-    check("unknown mode falls back to a palette",
-          theme.resolve("banana") in (light, dark))
+    check("native mode resolves to the native palette",
+          theme.resolve("native") is native)
+    check("legacy 'system' still follows Windows",
+          theme.resolve("system") in (light, dark))
+    check("unknown mode falls back to native", theme.resolve("banana") is native)
     check("windows preference readable",
           isinstance(theme.windows_prefers_dark(), bool))
 
     # Every semantic colour must be set, or status text goes invisible.
-    for name, palette in (("light", light), ("dark", dark)):
+    for name, palette in (("light", light), ("dark", dark), ("native", native)):
         missing = [f for f in ("bg", "text", "muted", "ok", "warn", "error")
                    if not getattr(palette, f).startswith("#")]
         check(f"{name} palette complete", not missing, str(missing))
@@ -337,12 +342,32 @@ def test_theme() -> None:
     root = tk.Tk()
     root.withdraw()
     try:
+        from tkinter import ttk
+
+        style = ttk.Style(root)
+        platform_default = style.theme_use()
+
         applied = theme.apply(root, "dark")
         check("applying returns the palette in use", applied is dark)
         text = tk.Text(root)
         theme.style_text_widget(text, applied)
         check("text widget takes the palette background",
               text.cget("background") == dark.field, text.cget("background"))
+
+        # The point of native mode: nothing is repainted, and it undoes a previous
+        # light/dark apply() rather than leaving clam behind.
+        native_applied = theme.apply(root, "native")
+        check("native returns the native palette", native_applied is native)
+        check("native restores the platform ttk theme",
+              style.theme_use() == platform_default,
+              f"{style.theme_use()} vs {platform_default}")
+
+        plain = tk.Text(root)
+        before = plain.cget("background")
+        theme.style_text_widget(plain, native_applied)
+        check("native leaves text widgets untouched",
+              plain.cget("background") == before, plain.cget("background"))
+
         theme.apply(root, "light")
         check("theme can be switched at runtime", True)
     finally:
@@ -836,6 +861,17 @@ def test_updates() -> None:
     off.migrate()
     check("clearing the repo stays cleared at current schema", off.updates.repo == "",
           repr(off.updates.repo))
+
+    # Schema 3: the briefly-shipped repainted interface goes back to native, but a
+    # deliberate light or dark choice is not overridden.
+    themed = Config.from_dict({"schema_version": 2, "theme": "system"})
+    themed.migrate()
+    check("old default theme migrates to native", themed.theme == "native",
+          themed.theme)
+    chosen = Config.from_dict({"schema_version": 2, "theme": "dark"})
+    chosen.migrate()
+    check("an explicit theme choice survives migration", chosen.theme == "dark")
+    check("new configs default to native", Config().theme == "native")
 
     # Config normalisation: a pasted URL should become owner/name.
     cfg = Config()
