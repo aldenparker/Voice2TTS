@@ -1025,6 +1025,16 @@ def test_release_is_gated() -> None:
     verify_steps = " ".join(step_names(jobs.get("verify", {}))).lower()
     check("verify runs the self-test", "self-test" in verify_steps, verify_steps)
     check("verify runs the linter", "lint" in verify_steps, verify_steps)
+    # ci.yml ignores tags, so every suite has to be named here or it never runs
+    # against the commit that actually ships. 0.5.1 shipped with every dropdown
+    # broken because the GUI suite was not part of the gate.
+    check("verify runs the GUI test", "gui test" in verify_steps, verify_steps)
+    ci_steps = " ".join(name for job in ci.get("jobs", {}).values()
+                        for name in step_names(job)).lower()
+    for suite in ("self-test", "gui test"):
+        check(f"every suite CI runs is also in the release gate ({suite})",
+              suite not in ci_steps or suite in verify_steps,
+              f"ci={suite in ci_steps} verify={suite in verify_steps}")
     check("verify checks the tag against __version__",
           "resolve version" in verify_steps, verify_steps)
 

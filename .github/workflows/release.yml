@@ -90,6 +90,12 @@ jobs:
       - name: Self-test
         run: python scripts/selftest.py --no-audio
 
+      # ci.yml ignores tags, so this is the ONLY place the GUI tests run before
+      # a release. Without it a broken settings window ships -- which is how
+      # 0.5.1 went out with every dropdown dead.
+      - name: GUI test
+        run: python scripts/guitest.py
+
   release:
     needs: verify
     runs-on: windows-latest
