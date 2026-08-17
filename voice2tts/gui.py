@@ -1265,12 +1265,15 @@ class SettingsWindow(tk.Toplevel):
         tab.columnconfigure(2, weight=1)
         self._refresh_studio()
 
-        from .studioui import RecordingPanel
+        from .studioui import RecordingPanel, TrainingPanel
 
         self.record_panel = RecordingPanel(
             self.studio_nb, self.palette,
             all_apis=not self.cfg.audio.prefer_wasapi)
         self.studio_nb.add(self.record_panel, text="Record")
+
+        self.train_panel = TrainingPanel(self.studio_nb, self.palette)
+        self.studio_nb.add(self.train_panel, text="Train")
 
     def _refresh_studio(self) -> None:
         hw = studiopack.probe()

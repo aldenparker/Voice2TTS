@@ -623,6 +623,78 @@ def test_dataset() -> None:
               f"{issues} {stats}")
 
 
+def test_checkpoints() -> None:
+    """Locating base checkpoints. Offline: listings are real captured responses."""
+    print("\n[checkpoints]")
+    from voice2tts import checkpoints as ck
+
+    check("voice key maps to the repo layout",
+          ck.voice_directory("en_US-lessac-medium") == "en/en_US/lessac/medium",
+          ck.voice_directory("en_US-lessac-medium"))
+    # The name may contain underscores; only dashes separate the three fields.
+    check("underscored names survive",
+          ck.voice_directory("en_GB-northern_english_male-medium")
+          == "en/en_GB/northern_english_male/medium")
+    for bad in ("lessac", "en_US-lessac-medium-extra", ""):
+        try:
+            ck.voice_directory(bad)
+            check(f"malformed key {bad!r} rejected", False, "no error")
+        except ValueError:
+            check(f"malformed key {bad!r} rejected", True)
+
+    # Exactly what the HuggingFace API returned for lessac/medium.
+    listing = [
+        {"type": "file", "path": "en/en_US/lessac/medium/.gitattributes", "size": 1},
+        {"type": "file", "path": "en/en_US/lessac/medium/MODEL_CARD", "size": 400},
+        {"type": "file", "path": "en/en_US/lessac/medium/config.json", "size": 4000},
+        {"type": "file", "path": "en/en_US/lessac/medium/dataset.jsonl.gz",
+         "size": 3_000_000},
+        {"type": "file",
+         "path": "en/en_US/lessac/medium/epoch=2164-step=1355540.ckpt",
+         "size": 845_898_328},
+        {"type": "file", "path": "en/en_US/lessac/medium/train.sh", "size": 300},
+    ]
+    found = ck.pick_checkpoint(listing)
+    check("the checkpoint is picked out of the directory",
+          found and found.filename == "epoch=2164-step=1355540.ckpt", str(found))
+    check("size carried through", found.size == 845_898_328)
+    check("size reported in GB", abs(found.size_gb - 0.846) < 0.01,
+          f"{found.size_gb:.3f}")
+    check("config.json is not mistaken for a checkpoint",
+          not found.filename.endswith(".json"))
+    check("directory derived from the path",
+          found.directory == "en/en_US/lessac/medium")
+    # The "=" in the filename has to survive into a usable URL.
+    check("download url quotes the epoch marker",
+          "epoch%3D2164" in found.url and found.url.startswith("https://"),
+          found.url)
+    check("a directory with no checkpoint yields nothing",
+          ck.pick_checkpoint([{"type": "file", "path": "x/MODEL_CARD"}]) is None)
+    check("an empty listing yields nothing", ck.pick_checkpoint([]) is None)
+
+    # Verbatim from the lessac/medium MODEL_CARD.
+    card = (
+        "# Model card for lessac (medium)\n\n"
+        "* Language: en_US (English, United States)\n"
+        "* Speakers: 1\n"
+        "* Quality: medium\n"
+        "* Samplerate: 22,050Hz\n\n"
+        "## Dataset\n\n"
+        "* URL: https://www.cstr.ed.ac.uk/projects/blizzard/2013/lessac_blizzard2013/\n"
+        "* License: https://www.cstr.ed.ac.uk/projects/blizzard/2013/"
+        "lessac_blizzard2013/license.html\n"
+    )
+    check("licence read from the model card",
+          ck.licence_from_card(card).endswith("license.html"),
+          ck.licence_from_card(card))
+    check("dataset url read from the model card",
+          ck.dataset_from_card(card).startswith("https://"),
+          ck.dataset_from_card(card))
+    # A voice with unknown terms must read as unknown, never as permissive.
+    check("a card with no licence line reports nothing, not a guess",
+          ck.licence_from_card("# Model card\n\nNothing useful here.\n") == "")
+
+
 def test_recorder() -> None:
     """The clip recorder's buffering, without opening a real microphone.
 
@@ -1738,6 +1810,7 @@ def main() -> int:
     test_prompts()
     test_dataset()
     test_recorder()
+    test_checkpoints()
     test_training()
     test_studio_gate()
     test_release_is_gated()

@@ -13,11 +13,21 @@ redo now and worthless to discover after the recording session is over.
 from __future__ import annotations
 
 import logging
+import re
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from . import dataset, devices, prompts, recorder
+from . import (
+    checkpoints,
+    dataset,
+    devices,
+    prompts,
+    recorder,
+    studiopack,
+    training,
+    voices,
+)
 from .theme import Palette
 
 log = logging.getLogger(__name__)
@@ -371,6 +381,368 @@ class RecordingPanel(ttk.Frame):
             text=f"About {count} more sentences ({left / 60:.0f} min) "
                  f"at {wpm:.0f} words per minute.",
             foreground=self.palette.muted)
+
+
+class TrainingPanel(ttk.Frame):
+    """Turn a recorded dataset into an installed voice.
+
+    Everything slow happens in a subprocess, so this panel only ever starts
+    things, reports what they are doing, and stops them. It deliberately keeps
+    working across a restart: a run is identified by its work directory, and the
+    trainer writes last.ckpt every epoch, so closing the app costs one epoch.
+    """
+
+    def __init__(self, parent, palette: Palette):
+        super().__init__(parent, padding=10)
+        self.palette = palette
+        self.run: training.TrainingRun | None = None
+        self.checkpoint: checkpoints.Checkpoint | None = None
+        self.base_path: Path | None = None
+        self._tick: str | None = None
+
+        self._build()
+        self.refresh()
+
+    # -- layout --------------------------------------------------------------
+
+    def _build(self) -> None:
+        ttk.Label(self, text="Train the voice", font=("", 10, "bold")).grid(
+            row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(
+            self,
+            text="Hours of work for the graphics card. It can be stopped and "
+                 "picked up later —\nprogress is saved every epoch.",
+            foreground=self.palette.muted, justify="left",
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 10))
+
+        row = ttk.Frame(self)
+        row.grid(row=2, column=0, columnspan=4, sticky="ew")
+        ttk.Label(row, text="Dataset").pack(side="left")
+        self.dataset_var = tk.StringVar()
+        self.dataset_box = ttk.Combobox(row, textvariable=self.dataset_var,
+                                        state="readonly", width=34)
+        self.dataset_box.pack(side="left", padx=6)
+        self.dataset_box.bind("<<ComboboxSelected>>", lambda _e: self._show_dataset())
+        ttk.Button(row, text="Refresh", command=self.refresh).pack(side="left")
+
+        self.dataset_label = ttk.Label(self, text="", foreground=self.palette.muted)
+        self.dataset_label.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 8))
+
+        row = ttk.Frame(self)
+        row.grid(row=4, column=0, columnspan=4, sticky="ew")
+        ttk.Label(row, text="Start from").pack(side="left")
+        self.base_var = tk.StringVar()
+        self.base_box = ttk.Combobox(row, textvariable=self.base_var,
+                                     state="readonly", width=34)
+        self.base_box.pack(side="left", padx=6)
+        self.base_box.bind("<<ComboboxSelected>>", lambda _e: self._clear_base())
+        self.base_btn = ttk.Button(row, text="Get checkpoint",
+                                   command=self._get_checkpoint)
+        self.base_btn.pack(side="left")
+
+        self.base_label = ttk.Label(self, text="", foreground=self.palette.muted,
+                                    wraplength=560, justify="left")
+        self.base_label.grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 8))
+
+        ttk.Separator(self, orient="horizontal").grid(
+            row=6, column=0, columnspan=4, sticky="ew", pady=6)
+
+        row = ttk.Frame(self)
+        row.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(4, 8))
+        ttk.Label(row, text="Batch size").pack(side="left")
+        self.batch_var = tk.StringVar(value="12")
+        ttk.Spinbox(row, from_=2, to=64, increment=2, width=5,
+                    textvariable=self.batch_var).pack(side="left", padx=6)
+        self.batch_hint = ttk.Label(row, text="", foreground=self.palette.muted)
+        self.batch_hint.pack(side="left")
+
+        row = ttk.Frame(self)
+        row.grid(row=8, column=0, columnspan=4, sticky="ew")
+        self.train_btn = ttk.Button(row, text="Start training",
+                                    command=self._toggle_training)
+        self.train_btn.pack(side="left")
+        self.export_btn = ttk.Button(row, text="Export voice",
+                                     command=self._export)
+        self.export_btn.pack(side="left", padx=6)
+
+        self.train_progress = ttk.Progressbar(self, mode="determinate", maximum=100)
+        self.train_progress.grid(row=9, column=0, columnspan=4, sticky="ew",
+                                 pady=(10, 4))
+        self.train_status = ttk.Label(self, text="Not running.")
+        self.train_status.grid(row=10, column=0, columnspan=4, sticky="w")
+        self.train_log = ttk.Label(self, text="", foreground=self.palette.muted,
+                                   wraplength=580, justify="left")
+        self.train_log.grid(row=11, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        self.columnconfigure(3, weight=1)
+
+    # -- data ----------------------------------------------------------------
+
+    def refresh(self) -> None:
+        self._sessions = dataset.RecordingSession.list_sessions()
+        self.dataset_box["values"] = [p.name for p in self._sessions]
+        if self._sessions and not self.dataset_var.get():
+            self.dataset_var.set(self._sessions[0].name)
+
+        self.base_box["values"] = voices.installed_keys()
+        if not self.base_var.get() and self.base_box["values"]:
+            self.base_var.set(self.base_box["values"][0])
+
+        hardware = studiopack.probe()
+        suggested = training.suggest_batch_size(hardware.vram_gb)
+        self.batch_var.set(str(suggested))
+        self.batch_hint.config(
+            text=f"suggested for {hardware.vram_gb:.0f} GB of VRAM"
+            if hardware.vram_gb else "no NVIDIA GPU detected")
+
+        self._show_dataset()
+        self._update_state()
+
+    def _session(self) -> dataset.RecordingSession | None:
+        wanted = self.dataset_var.get()
+        path = next((p for p in self._sessions if p.name == wanted), None)
+        if path is None:
+            return None
+        try:
+            return dataset.RecordingSession.load(path)
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            log.warning("could not load session %s: %s", path, exc)
+            return None
+
+    def _show_dataset(self) -> None:
+        session = self._session()
+        if session is None:
+            self.dataset_label.config(text="No recorded datasets yet — "
+                                           "use the Record tab first.")
+            return
+        note = session.summary()
+        if not session.ready:
+            note += "  (below target — training will still run, but on less audio)"
+        self.dataset_label.config(text=note)
+        self._update_state()
+
+    def _work_dir(self) -> Path | None:
+        session = self._session()
+        return session.root / "training" if session else None
+
+    # -- base checkpoint -----------------------------------------------------
+
+    def _clear_base(self) -> None:
+        self.checkpoint = None
+        self.base_path = None
+        self.base_label.config(text="", foreground=self.palette.muted)
+        self._update_state()
+
+    def _get_checkpoint(self) -> None:
+        """Find, describe and download the checkpoint for the chosen voice."""
+        key = self.base_var.get()
+        if not key:
+            return
+        self.base_label.config(text=f"Looking up {key}…",
+                               foreground=self.palette.muted)
+        self.update_idletasks()
+        try:
+            found = checkpoints.resolve(key)
+        except LookupError as exc:
+            # Bundled voices do not all have a published checkpoint; the message
+            # from resolve() names the qualities that do.
+            self.base_label.config(text=str(exc), foreground=self.palette.error)
+            return
+        except Exception as exc:  # noqa: BLE001 - network, shown to the user
+            self.base_label.config(text=f"Could not reach the checkpoint "
+                                        f"repository: {exc}",
+                                   foreground=self.palette.error)
+            return
+
+        card = checkpoints.model_card(found)
+        licence = checkpoints.licence_from_card(card)
+        # A trained voice inherits these terms, so they are agreed to before the
+        # download rather than mentioned afterwards.
+        terms = licence or "not stated on the model card"
+        if not messagebox.askyesno(
+                "Base checkpoint",
+                f"{key}\n\n{found.size_gb:.2f} GB download.\n\n"
+                f"Your voice will be built on this one and inherits its terms.\n"
+                f"Licence: {terms}\n\nDownload it now?",
+                parent=self):
+            return
+
+        dest = studiopack.studio_dir() / "checkpoints" / key
+        self.checkpoint = found
+
+        def progress(done: int, total: int) -> None:
+            pct = done * 100 // total if total else 0
+            self.base_label.config(
+                text=f"Downloading {found.filename}: {pct}% "
+                     f"({done / 1e6:.0f} of {total / 1e6:.0f} MB)")
+            self.update_idletasks()
+
+        try:
+            self.base_path = checkpoints.download(found, dest, progress)
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            self.base_label.config(text=f"Download failed: {exc}",
+                                   foreground=self.palette.error)
+            self.base_path = None
+            return
+        self.base_label.config(
+            text=f"Ready: {found.filename} — licence: {terms}",
+            foreground=self.palette.ok)
+        self._update_state()
+
+    # -- training ------------------------------------------------------------
+
+    def _toggle_training(self) -> None:
+        if self.run is not None and self.run.running:
+            self.run.stop()
+            self.train_status.config(text="Stopping…")
+            return
+        self._start_training()
+
+    def _start_training(self) -> None:
+        session = self._session()
+        work = self._work_dir()
+        if session is None or work is None:
+            return
+        if not session.usable:
+            messagebox.showwarning("Voice Studio",
+                                   "That dataset has no usable clips yet.",
+                                   parent=self)
+            return
+        if not studiopack.status().usable:
+            messagebox.showwarning(
+                "Voice Studio",
+                "The training environment is not installed yet. "
+                "Set it up on the Setup tab first.", parent=self)
+            return
+
+        resuming = training.resume_point(work) is not None
+        if not resuming and self.base_path is None:
+            messagebox.showwarning(
+                "Voice Studio",
+                "Choose a voice to start from and download its checkpoint "
+                "first.\n\nTraining from nothing needs far more audio than a "
+                "recording session provides.", parent=self)
+            return
+
+        try:
+            csv_path = session.prepare()
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            messagebox.showerror("Voice Studio", f"Could not prepare the "
+                                                 f"dataset:\n{exc}", parent=self)
+            return
+
+        try:
+            batch = int(self.batch_var.get())
+        except ValueError:
+            batch = 12
+
+        cfg = training.TrainingConfig(
+            voice_name=_slug(session.name),
+            dataset_csv=csv_path,
+            work_dir=work,
+            base_checkpoint=self.base_path,
+            batch_size=batch,
+        )
+        self.run = training.TrainingRun(cfg, on_line=self._on_line)
+        try:
+            self.run.start()
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            self.run = None
+            messagebox.showerror("Voice Studio",
+                                 f"Training would not start:\n{exc}", parent=self)
+            return
+        self.train_status.config(text="Starting…", foreground=self.palette.text)
+        self._update_state()
+        self._poll_training()
+
+    def _on_line(self, line: str) -> None:
+        # Called from the reader thread; Tk is not thread-safe, so this only
+        # stores the line and _poll_training does the widget work.
+        self._last_line = line
+
+    def _poll_training(self) -> None:
+        run = self.run
+        if run is None:
+            return
+        progress = run.progress
+        self.train_progress["value"] = progress.fraction * 100
+        loss = f", loss {progress.loss:.3f}" if progress.loss is not None else ""
+        if run.running:
+            self.train_status.config(
+                text=f"Epoch {progress.epoch}, step {progress.step}"
+                     f"/{progress.total_steps}{loss} — "
+                     f"{run.elapsed / 60:.0f} min elapsed")
+            self.train_log.config(text=getattr(self, "_last_line", "")[:160])
+            self._tick = self.after(500, self._poll_training)
+            return
+
+        if run.error:
+            self.train_status.config(text="Training stopped with an error.",
+                                     foreground=self.palette.error)
+            self.train_log.config(text=run.error[-400:])
+        else:
+            self.train_status.config(
+                text=f"Stopped after {run.elapsed / 60:.0f} minutes. "
+                     "Export the voice, or start again to continue.",
+                foreground=self.palette.text)
+        self._update_state()
+
+    # -- export --------------------------------------------------------------
+
+    def _export(self) -> None:
+        session = self._session()
+        work = self._work_dir()
+        if session is None or work is None:
+            return
+        best = training.best_checkpoint(work)
+        if best is None:
+            messagebox.showinfo("Voice Studio",
+                                "Nothing has been trained yet.", parent=self)
+            return
+
+        name = _slug(session.name)
+        prov = training.Provenance(
+            voice_name=name,
+            base_checkpoint=self.checkpoint.filename if self.checkpoint else "",
+            dataset_clips=len(session.usable),
+            dataset_seconds=round(session.seconds, 1),
+            epochs=self.run.progress.epoch if self.run else 0,
+        )
+        self.train_status.config(text=f"Exporting from {best.name}…")
+        self.update_idletasks()
+        try:
+            final = training.export(best, work / "config.json",
+                                    voices.user_voices_dir(), name, prov)
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            self.train_status.config(text=f"Export failed: {exc}",
+                                     foreground=self.palette.error)
+            return
+        self.train_status.config(
+            text=f"Installed as {final.name}. Pick it on the Voice tab.",
+            foreground=self.palette.ok)
+
+    # -- state ---------------------------------------------------------------
+
+    def _update_state(self) -> None:
+        busy = self.run is not None and self.run.running
+        work = self._work_dir()
+        has_data = self._session() is not None
+        trained = work is not None and training.best_checkpoint(work) is not None
+
+        self.train_btn.config(text="Stop" if busy else "Start training")
+        for widget, enabled in (
+            (self.train_btn, has_data),
+            (self.export_btn, trained and not busy),
+            (self.base_btn, not busy),
+            (self.dataset_box, not busy),
+        ):
+            widget.state(["!disabled"] if enabled else ["disabled"])
+
+
+def _slug(name: str) -> str:
+    """A filename-safe voice name. Piper voices are dash-separated by habit."""
+    kept = [c if c.isalnum() else "-" for c in name.strip().lower()]
+    return re.sub(r"-+", "-", "".join(kept)).strip("-") or "my-voice"
 
 
 def _ask_text(parent, filename: str) -> str | None:

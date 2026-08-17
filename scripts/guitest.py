@@ -282,6 +282,63 @@ def main() -> int:
         check("controls disabled again",
               "disabled" in str(panel.record_btn.state()))
 
+    print("\n[studio training panel]")
+    from voice2tts import training as tr
+    from voice2tts import voices as voices_mod
+    from voice2tts.studioui import _slug
+
+    tp = win.train_panel
+    check("train panel is its own tab",
+          "Train" in [win.studio_nb.tab(t, "text") for t in win.studio_nb.tabs()])
+    check("batch size suggested from this machine",
+          tp.batch_var.get().isdigit() and int(tp.batch_var.get()) >= 4,
+          tp.batch_var.get())
+    check("batch hint explains the number", bool(tp.batch_hint.cget("text")),
+          tp.batch_hint.cget("text"))
+    check("base voices offered from what is installed",
+          list(tp.base_box["values"]) == voices_mod.installed_keys())
+    check("export disabled with nothing trained",
+          "disabled" in str(tp.export_btn.state()))
+    check("no base checkpoint until one is fetched", tp.base_path is None)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        from voice2tts import dataset as ds
+
+        root_dir = Path(tmp) / "ds"
+        sess = ds.RecordingSession("Train Me", root=root_dir, target_minutes=1.0)
+        rate = ds.TARGET_RATE
+        sess.add("k1", "A line of speech.", speech_like(3.0, rate), rate)
+        tp._sessions = [root_dir]
+        tp.dataset_box["values"] = [root_dir.name]
+        tp.dataset_var.set(root_dir.name)
+        tp._show_dataset()
+        check("dataset summary shown", "clips" in tp.dataset_label.cget("text"),
+              tp.dataset_label.cget("text"))
+        check("a short dataset is flagged, not blocked",
+              "below target" in tp.dataset_label.cget("text"),
+              tp.dataset_label.cget("text"))
+        check("training offered once a dataset is picked",
+              "disabled" not in str(tp.train_btn.state()))
+        check("work dir sits beside the dataset",
+              tp._work_dir() == root_dir / "training", str(tp._work_dir()))
+
+        # Export stays unavailable until a checkpoint actually exists.
+        check("export still disabled before training",
+              tr.best_checkpoint(tp._work_dir()) is None)
+        ckdir = tp._work_dir() / "lightning_logs" / "version_0" / "checkpoints"
+        ckdir.mkdir(parents=True)
+        (ckdir / "last.ckpt").write_bytes(b"x")
+        tp._update_state()
+        check("export offered once a checkpoint exists",
+              "disabled" not in str(tp.export_btn.state()))
+
+    check("voice name becomes a safe slug",
+          _slug("My Voice!") == "my-voice", _slug("My Voice!"))
+    check("slug collapses runs of separators",
+          _slug("  A -- B  ") == "a-b", _slug("  A -- B  "))
+    check("an unusable name still yields something",
+          _slug("!!!") == "my-voice", _slug("!!!"))
+
     print("\n[updates tab]")
     import voice2tts as pkg
     from voice2tts import updater
