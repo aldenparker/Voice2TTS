@@ -104,6 +104,13 @@ a = Analysis(
         "pynput.mouse._win32",
         # Pulled in lazily by the voice library and GPU pack downloaders.
         "piper.download_voices",
+        # designer.py imports onnx inside its functions, and onnx builds itself
+        # out of generated protobuf modules that import analysis does not always
+        # follow. Naming it costs nothing and the failure mode is the Design tab
+        # breaking only in the frozen build.
+        "onnx",
+        "onnx.numpy_helper",
+        "onnx.helper",
     ],
     hookspath=[],
     runtime_hooks=[],
