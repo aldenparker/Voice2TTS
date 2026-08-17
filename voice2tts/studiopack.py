@@ -110,18 +110,36 @@ def _nvidia_smi(query: str) -> str:
         return ""
 
 
-def probe() -> Hardware:
+# Only the GPU identity is cached, and only because it costs two nvidia-smi
+# launches (~100 ms) that the Studio tab triggers several times as it builds.
+# Free disk and the GPU pack are re-read every call: both change while the app
+# is open, and a stale answer to either would be wrong rather than merely slow.
+_GPU_CACHE: tuple[str, float] | None = None
+
+
+def _gpu_identity(force: bool = False) -> tuple[str, float]:
+    global _GPU_CACHE
+    if _GPU_CACHE is not None and not force:
+        return _GPU_CACHE
+
+    name = _nvidia_smi("name")
+    vram = 0.0
+    total = _nvidia_smi("memory.total")
+    if total:
+        try:
+            vram = round(float(total) / 1024.0, 1)
+        except ValueError:
+            pass
+    _GPU_CACHE = (name, vram)
+    return _GPU_CACHE
+
+
+def probe(force: bool = False) -> Hardware:
     """What this machine has. Never raises."""
     from .gpupack import status as gpu_status
 
     hw = Hardware()
-    hw.gpu_name = _nvidia_smi("name")
-    total = _nvidia_smi("memory.total")
-    if total:
-        try:
-            hw.vram_gb = round(float(total) / 1024.0, 1)
-        except ValueError:
-            pass
+    hw.gpu_name, hw.vram_gb = _gpu_identity(force)
     try:
         hw.free_disk_gb = round(shutil.disk_usage(cache_dir()).free / 1e9, 1)
     except OSError as exc:

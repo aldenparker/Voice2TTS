@@ -282,6 +282,28 @@ def main() -> int:
         check("controls disabled again",
               "disabled" in str(panel.record_btn.state()))
 
+    # Closing the window destroys it, so a take in progress has to let go of the
+    # microphone here or the device stays held until the whole app exits.
+    released = []
+
+    class FakeRecorder:
+        peak = 0.0
+        seconds = 0.0
+        clipped = overran = False
+
+        def stop(self):
+            released.append(True)
+            import numpy as _np
+            return _np.zeros(0, dtype=_np.float32), 48000
+
+    panel.recorder = FakeRecorder()
+    panel.shutdown()
+    check("shutdown releases the microphone", released == [True])
+    check("and clears the recorder", panel.recorder is None)
+    check("shutdown on an idle panel is harmless", panel.shutdown() is None)
+    check("both studio panels expose shutdown",
+          callable(panel.shutdown) and callable(win.train_panel.shutdown))
+
     print("\n[studio training panel]")
     from voice2tts import training as tr
     from voice2tts import voices as voices_mod
@@ -335,6 +357,28 @@ def main() -> int:
         # must not be gated on training having finished.
         check("audition offered once a checkpoint exists",
               "disabled" not in str(tp.audition_btn.state()))
+
+        # A trainer started before this window was last closed is still going,
+        # and this panel has no handle on it. Offering Start would put a second
+        # trainer on the same checkpoints.
+        original = tr.running_elsewhere
+        tr.running_elsewhere = lambda _w: 4242
+        try:
+            tp._update_state()
+            check("an orphaned run blocks starting another",
+                  "disabled" in str(tp.train_btn.state()),
+                  str(tp.train_btn.state()))
+            check("and says what is happening",
+                  "already running" in tp.train_status.cget("text")
+                  and "4242" in tp.train_status.cget("text"),
+                  tp.train_status.cget("text"))
+            check("auditioning an orphaned run is still allowed",
+                  "disabled" not in str(tp.audition_btn.state()))
+        finally:
+            tr.running_elsewhere = original
+        tp._update_state()
+        check("start is offered again once the orphan is gone",
+              "disabled" not in str(tp.train_btn.state()))
 
     check("voice name becomes a safe slug",
           _slug("My Voice!") == "my-voice", _slug("My Voice!"))
@@ -442,8 +486,15 @@ def main() -> int:
           "disabled" in str(win.cable_btn.state()) or devices_cable_present(),
           str(win.cable_btn.state()))
 
+    # Closing must reach the studio panels, not just destroy the window: a take
+    # in progress holds the microphone until something stops the stream.
+    closed = []
+    win.record_panel.shutdown = lambda: closed.append("record")
+    win.train_panel.shutdown = lambda: closed.append("train")
     win.close()
     root.update()
+    check("closing shuts the studio panels down", sorted(closed) == ["record", "train"],
+          str(closed))
     check("window closed cleanly", not win.winfo_exists())
 
     print("\n[setup wizard]")

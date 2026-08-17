@@ -1254,7 +1254,8 @@ class SettingsWindow(tk.Toplevel):
         self.studio_btn = ttk.Button(row, text="Download",
                                      command=self._toggle_studio_pack)
         self.studio_btn.pack(side="left")
-        ttk.Button(row, text="Re-check", command=self._refresh_studio).pack(
+        ttk.Button(row, text="Re-check",
+                   command=lambda: self._refresh_studio(force=True)).pack(
             side="left", padx=6)
         self.studio_progress = ttk.Progressbar(row, mode="indeterminate", length=180)
 
@@ -1275,8 +1276,10 @@ class SettingsWindow(tk.Toplevel):
         self.train_panel = TrainingPanel(self.studio_nb, self.palette)
         self.studio_nb.add(self.train_panel, text="Train")
 
-    def _refresh_studio(self) -> None:
-        hw = studiopack.probe()
+    def _refresh_studio(self, force: bool = False) -> None:
+        # Cached unless asked: the hardware does not change while the app is
+        # open, and this runs several times as the tab is built.
+        hw = studiopack.probe(force=force)
         gpu = f"{hw.gpu_name} ({hw.vram_gb:.0f} GB)" if hw.has_gpu else "no NVIDIA GPU"
         self.studio_hw.config(
             text=f"Graphics: {gpu}          Free disk: {hw.free_disk_gb:.0f} GB")
@@ -1925,6 +1928,15 @@ class SettingsWindow(tk.Toplevel):
 
     def close(self) -> None:
         self._closing = True
+        # This window is destroyed on close and rebuilt on reopen, so anything
+        # holding a device has to let go of it here.
+        for panel in ("record_panel", "train_panel"):
+            widget = getattr(self, panel, None)
+            if widget is not None:
+                try:
+                    widget.shutdown()
+                except Exception as exc:  # noqa: BLE001 - closing must not fail
+                    log.warning("%s did not shut down cleanly: %s", panel, exc)
         if self._on_close:
             self._on_close()
         self.destroy()

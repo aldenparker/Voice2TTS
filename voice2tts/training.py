@@ -218,6 +218,87 @@ def best_checkpoint(work_dir: Path) -> Path | None:
     return everything[0] if everything else None
 
 
+# -- knowing what is already running ----------------------------------------
+
+# The settings window is destroyed when closed and rebuilt when reopened, while
+# a training subprocess deliberately survives -- nobody wants six hours of GPU
+# work killed by closing a window. That combination means the panel can come back
+# with no memory of a run that is still going, and starting a second trainer on
+# the same directory would have both writing the same checkpoints.
+#
+# So a run records its pid beside its checkpoints, and the panel asks.
+
+PID_FILE = "training.pid"
+
+
+def _pid_path(work_dir: Path) -> Path:
+    return work_dir / PID_FILE
+
+
+def mark_running(work_dir: Path, pid: int) -> None:
+    try:
+        _pid_path(work_dir).write_text(str(pid), encoding="utf-8")
+    except OSError as exc:
+        log.debug("could not write the pid file: %s", exc)
+
+
+def clear_running(work_dir: Path) -> None:
+    try:
+        _pid_path(work_dir).unlink(missing_ok=True)
+    except OSError as exc:
+        log.debug("could not clear the pid file: %s", exc)
+
+
+def _process_image(pid: int) -> str | None:
+    """Full path of a running process's exe, or None if it is not running.
+
+    Checking liveness alone is not enough: pids are reused, and a stale file
+    naming a recycled pid would wrongly report training in progress forever.
+    Comparing the image path makes a false positive require the recycled pid to
+    also be the studio interpreter.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        size = wintypes.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buf,
+                                                   ctypes.byref(size)):
+            return None
+        return buf.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def running_elsewhere(work_dir: Path) -> int | None:
+    """The pid of a trainer already working here, or None.
+
+    Clears the record when it turns out to be stale, so a crashed run does not
+    lock the directory permanently.
+    """
+    path = _pid_path(work_dir)
+    if not path.is_file():
+        return None
+    try:
+        pid = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        clear_running(work_dir)
+        return None
+
+    image = _process_image(pid)
+    if image and Path(image) == studiopack.python_exe():
+        return pid
+    log.info("stale training pid %s in %s; clearing", pid, work_dir)
+    clear_running(work_dir)
+    return None
+
+
 # -- running ----------------------------------------------------------------
 
 
@@ -252,6 +333,12 @@ class TrainingRun:
             raise RuntimeError("This run is already going.")
 
         self.cfg.work_dir.mkdir(parents=True, exist_ok=True)
+        already = running_elsewhere(self.cfg.work_dir)
+        if already is not None:
+            raise RuntimeError(
+                f"Training is already running for this dataset (process "
+                f"{already}). Two trainers would write the same checkpoints."
+            )
         self.cfg.cache_dir.mkdir(parents=True, exist_ok=True)
 
         resume_from = resume_point(self.cfg.work_dir) if resume else None
@@ -271,6 +358,7 @@ class TrainingRun:
             # on Windows: CTRL_BREAK_EVENT can only be sent to a group.
             creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
         )
+        mark_running(self.cfg.work_dir, self._proc.pid)
         self._thread = threading.Thread(target=self._pump, daemon=True)
         self._thread.start()
 
@@ -293,6 +381,7 @@ class TrainingRun:
                         self._on_progress(update)
 
         self.returncode = self._proc.wait()
+        clear_running(self.cfg.work_dir)
         if self.returncode != 0 and not self._stopping:
             self.error = "\n".join(self._tail[-15:]) or "training exited unexpectedly"
             log.error("training failed (%s):\n%s", self.returncode, self.error)

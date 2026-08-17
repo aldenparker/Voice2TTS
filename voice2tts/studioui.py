@@ -343,6 +343,14 @@ class RecordingPanel(ttk.Frame):
         self._rebuild_queue()
         self._update_state()
 
+    # -- teardown ------------------------------------------------------------
+
+    def shutdown(self) -> None:
+        """Release the microphone. The window is destroyed when it closes, so
+        without this an interrupted take holds the device until the app exits."""
+        if self.recorder is not None:
+            self._stop_recording(keep=False)
+
     # -- state ---------------------------------------------------------------
 
     def _say(self, text: str, colour: str) -> None:
@@ -690,6 +698,18 @@ class TrainingPanel(ttk.Frame):
                 foreground=self.palette.text)
         self._update_state()
 
+    # -- teardown ------------------------------------------------------------
+
+    def shutdown(self) -> None:
+        """Stop polling, but leave training running.
+
+        Killing it would throw away hours of GPU work because a window closed.
+        The pid file is what lets the next panel find it again.
+        """
+        if self._tick is not None:
+            self.after_cancel(self._tick)
+            self._tick = None
+
     # -- auditioning ---------------------------------------------------------
 
     def _audition(self) -> None:
@@ -759,14 +779,27 @@ class TrainingPanel(ttk.Frame):
     # -- state ---------------------------------------------------------------
 
     def _update_state(self) -> None:
-        busy = self.run is not None and self.run.running
         work = self._work_dir()
         has_data = self._session() is not None
         trained = work is not None and training.best_checkpoint(work) is not None
 
-        self.train_btn.config(text="Stop" if busy else "Start training")
+        ours = self.run is not None and self.run.running
+        # A run started before this window was last closed is still going, and
+        # this panel has no handle on it. It must not be offered a second start.
+        orphan = (None if ours or work is None
+                  else training.running_elsewhere(work))
+        busy = ours or orphan is not None
+        if orphan is not None:
+            self.train_status.config(
+                text=f"Training is already running for this dataset "
+                     f"(process {orphan}). Progress is not shown here because it "
+                     f"was started before this window was reopened; it will "
+                     f"finish on its own.")
+
+        self.train_btn.config(text="Stop" if ours else "Start training")
         for widget, enabled in (
-            (self.train_btn, has_data),
+            # An orphan cannot be stopped from here -- there is no handle on it.
+            (self.train_btn, has_data and not orphan),
             (self.export_btn, trained and not busy),
             # Auditioning reads a written checkpoint on the CPU, so it stays
             # available mid-run -- that is when it is most worth doing.

@@ -764,6 +764,7 @@ def test_training() -> None:
     """
     print("\n[training]")
     import json
+    import os
     import tempfile
 
     from voice2tts import training
@@ -874,6 +875,36 @@ def test_training() -> None:
           len(set(training.AUDITION_TEXT.lower()) & set("aeiou")) >= 5
           and len(training.AUDITION_TEXT.split()) > 8, training.AUDITION_TEXT)
 
+    # A run outlives the settings window, which is destroyed on close. Without
+    # this record the next panel would offer to start a second trainer on the
+    # same directory, and both would write the same checkpoints.
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        check("nothing running in a fresh directory",
+              training.running_elsewhere(work) is None)
+
+        training.mark_running(work, os.getpid())
+        # This process is not the studio interpreter, so the record is stale by
+        # image path even though the pid is alive.
+        check("a pid that is not the trainer is treated as stale",
+              training.running_elsewhere(work) is None)
+        check("and the stale record is cleared, not left to block forever",
+              not (work / training.PID_FILE).exists())
+
+        training.mark_running(work, 999_999_999)
+        check("a dead pid is stale", training.running_elsewhere(work) is None)
+
+        (work / training.PID_FILE).write_text("not a number", encoding="utf-8")
+        check("a corrupt pid file is survivable",
+              training.running_elsewhere(work) is None)
+
+        training.mark_running(work, os.getpid())
+        training.clear_running(work)
+        check("clearing removes the record",
+              not (work / training.PID_FILE).exists())
+        check("clearing twice is harmless",
+              training.clear_running(work) is None)
+
     prov = training.Provenance(voice_name="mine", dataset_clips=120,
                                dataset_seconds=1800.0, epochs=400,
                                base_checkpoint="lessac.ckpt")
@@ -928,6 +959,21 @@ def test_studio_gate() -> None:
     result = studiopack.gate(hardware=no_cuda)
     check("missing GPU pack warns but does not block",
           result.ok and result.warnings, str(result.warnings))
+
+    # The GPU identity is cached because the Studio tab asks repeatedly, but a
+    # cached answer to "is the GPU pack installed" or "how much disk is free"
+    # would be wrong rather than merely slow.
+    first = studiopack.probe()
+    start = time.perf_counter()
+    again = studiopack.probe()
+    cached_ms = (time.perf_counter() - start) * 1000
+    check("a repeat probe skips nvidia-smi", cached_ms < 40, f"{cached_ms:.0f} ms")
+    check("cached probe agrees on the GPU",
+          (again.gpu_name, again.vram_gb) == (first.gpu_name, first.vram_gb))
+    check("disk and pack state are still re-read, not cached",
+          "free_disk_gb" in vars(studiopack.probe()))
+    forced = studiopack.probe(force=True)
+    check("forcing re-reads the hardware", forced.gpu_name == first.gpu_name)
 
     check("probe runs on this machine", isinstance(studiopack.probe(), Hardware))
     live = studiopack.probe()
