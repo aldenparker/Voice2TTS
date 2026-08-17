@@ -11,10 +11,14 @@ reason something changed is usually worth more than the plan itself.
 
 ## Status
 
-**Current release: 0.5.2** — 0.5.1 reverted the interface to Windows' native
-appearance and shipped with every dropdown broken; 0.5.2 fixes that. Release
-automation is verified: tagging `v*` runs lint and the self-test, then builds and
-publishes.
+**Latest release: 0.5.2. In progress: 0.6.0**, the Voice Studio — trainer and
+designer both. The code is complete and untested on real hardware; betas are
+being cut from it as `v0.6.0-beta-N`.
+
+Release automation is verified: tagging `vX.Y.Z` or `vX.Y.Z-beta-N` runs lint
+and both test suites, then builds and publishes. Betas go out as GitHub
+pre-releases, which is what keeps them out of `/releases/latest` and so away
+from everyone on the stable build.
 
 | | |
 |---|---|
