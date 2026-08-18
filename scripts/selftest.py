@@ -3411,6 +3411,86 @@ def test_network() -> None:
           f"{len(sized)}/{len(catalogue)}")
 
 
+def test_pipeline_translation_live() -> None:
+    """English in, German out, through the real threads.
+
+    Skips unless a model and a voice for the target language are both here --
+    each is a 60 MB download, and a machine without them is not broken.
+    Everything except the recording is real: Whisper, the chain, both
+    substitution stages, Piper.
+    """
+    print("\n[translation end to end]")
+    audio = load_sample_16k()
+    if audio is None:
+        check("speech sample available", False, "could not load or generate")
+        return
+
+    from voice2tts import translate, voices
+    from voice2tts.pipeline import Pipeline, State
+
+    pair = translate.find_pair("en", "de")
+    german_voice = next(
+        (key for key in voices.installed_keys() if key.startswith("de_")), None)
+    if pair is None or german_voice is None:
+        missing = ([] if pair else ["the en->de model"]) + \
+                  ([] if german_voice else ["a German voice"])
+        print(f"  SKIP  live translation ({' and '.join(missing)} not installed)")
+        return
+
+    cfg = load_config()
+    cfg.trigger.mode = "ptt"
+    for target in cfg.audio.outputs:
+        target.enabled = False  # silent run
+    cfg.translation.enabled = True
+    cfg.translation.source, cfg.translation.target = "en", "de"
+    # The voice has to speak the target language, or Piper reads German with an
+    # English phoneme set and produces confident nonsense.
+    cfg.tts.voice = german_voice
+
+    seen: list[tuple[str, str]] = []
+    pipeline = Pipeline(cfg, on_event=lambda k, m: seen.append((k, m)))
+    try:
+        pipeline.start()
+        check("the chain loaded", pipeline.translator is not None)
+        check("and knows its route",
+              pipeline.translator is not None
+              and pipeline.translator.pairs[0].target == "de")
+
+        pipeline._submit(audio)
+        deadline = time.time() + 40
+        while time.time() < deadline and not pipeline.history:
+            time.sleep(0.05)
+
+        deadline = time.time() + 20
+        while time.time() < deadline and pipeline.state is not State.IDLE:
+            time.sleep(0.05)
+        check("it did not get stuck", pipeline.state is State.IDLE,
+              pipeline.state.value)
+
+        check("something was translated", any(k == "translated" for k, _ in seen),
+              str([k for k, _ in seen]))
+        check("nothing failed", not [m for k, m in seen if k == "error"],
+              str([m for k, m in seen if k == "error"]))
+
+        check("an utterance was recorded", bool(pipeline.history))
+        if not pipeline.history:
+            return
+        item = pipeline.history[0]
+        check("it was spoken", bool(item.spoken))
+        # The give-away that translation did not happen is output identical to
+        # the input -- a chain that silently passed the text through.
+        check("and is not the English back again", item.spoken != item.heard,
+              f"{item.heard[:40]!r} -> {item.spoken[:40]!r}")
+        # Cheap check that it is the right language rather than merely different.
+        joined = f" {item.spoken.lower()} "
+        check("the output looks like German",
+              any(word in joined for word in
+                  (" ist ", " ein ", " der ", " die ", " das ", " und ", " es ")),
+              item.spoken[:70])
+    finally:
+        pipeline.shutdown()
+
+
 def test_pipeline_end_to_end() -> None:
     """Drive the real Pipeline threads with a recorded utterance.
 
@@ -3780,6 +3860,8 @@ def main() -> int:
         test_network()
     if not no_audio and "--no-e2e" not in sys.argv:
         test_pipeline_end_to_end()
+        # Needs an input device too, because Pipeline.start() opens one.
+        test_pipeline_translation_live()
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 
