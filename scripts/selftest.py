@@ -1961,6 +1961,57 @@ def test_release_powershell() -> None:
         check(f"tag {bad!r} is rejected ({why})", not ok)
 
 
+def test_perf_sampling() -> None:
+    """The CPU sampler, which exists to answer "what is eating the CPU?"."""
+    print("\n[cpu sampling]")
+    import threading as _threading
+
+    from voice2tts import perf
+
+    snap = perf.sample(0.3)
+    if not snap.supported:
+        print("  SKIP  CPU sampling is Windows-only")
+        return
+
+    check("sampling finds this process's threads", len(snap.threads) >= 1,
+          f"{len(snap.threads)} threads")
+    check("the sampled window is about what was asked for",
+          0.25 <= snap.seconds <= 1.0, f"{snap.seconds:.2f}s")
+    check("an idle process reports near-zero", snap.busy < 0.5,
+          f"{snap.busy * 100:.0f}% of one core")
+    check("the report is human-readable", any("Process CPU" in line
+                                              for line in snap.report()))
+
+    # The point of the tool: a runaway thread must be NAMED, not just counted.
+    stop = _threading.Event()
+
+    def burn():
+        data = np.random.rand(200, 200)
+        while not stop.is_set():
+            data @ data
+
+    worker = _threading.Thread(target=burn, name="v2t-test-burner", daemon=True)
+    worker.start()
+    try:
+        time.sleep(0.2)
+        hot = perf.sample(0.5)
+    finally:
+        stop.set()
+        worker.join(timeout=5)
+
+    check("a busy process is reported as busy", hot.busy > snap.busy,
+          f"{hot.busy * 100:.0f}% vs {snap.busy * 100:.0f}% of one core")
+    ranked = [name for name, _share in hot.threads[:4]]
+    check("the busiest threads are named first",
+          any("v2t-test-burner" in name for name in ranked), str(ranked))
+    check("busy threads appear in the report",
+          any("of a core" in line for line in hot.report()))
+
+    idle = perf.Snapshot(seconds=1.0, process_cpu=0.0, threads=[("MainThread", 0.0)])
+    check("an idle report says so plainly",
+          any("idle" in line for line in idle.report()), str(idle.report()))
+
+
 def test_packaging_bits() -> None:
     """Offline checks for the cable, voices and GPU-pack modules."""
     print("\n[packaging]")
@@ -2676,6 +2727,7 @@ def main() -> int:
     test_language_guard()
     if not no_audio:
         test_tts_and_sink()
+    test_perf_sampling()
     test_packaging_bits()
     test_updates()
     if "--no-network" not in sys.argv:

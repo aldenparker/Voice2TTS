@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import logging
 import re
+import tempfile
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -538,8 +540,15 @@ class TrainingPanel(ttk.Frame):
         self._update_state()
 
     def _work_dir(self) -> Path | None:
-        session = self._session()
-        return session.root / "training" if session else None
+        """Derived from the selected path, NOT by loading the session.
+
+        `_update_state` needs both this and the session, and loading the JSON
+        twice per call is pure waste -- it is called on every widget change and
+        after every training poll.
+        """
+        wanted = self.dataset_var.get()
+        path = next((p for p in self._sessions if p.name == wanted), None)
+        return path / "training" if path is not None else None
 
     # -- base checkpoint -----------------------------------------------------
 
@@ -721,7 +730,9 @@ class TrainingPanel(ttk.Frame):
         """Listen to the latest checkpoint, mid-run if need be.
 
         Allowed while training is going: it loads the checkpoint file, which is
-        already written, and runs on CPU, so it does not disturb the run.
+        already written, and runs on CPU, so it does not disturb the run. On a
+        worker thread, because loading a checkpoint and synthesising from it
+        takes seconds and would otherwise freeze the window.
         """
         work = self._work_dir()
         if work is None:
@@ -731,21 +742,29 @@ class TrainingPanel(ttk.Frame):
             messagebox.showinfo("Voice Studio", "Nothing has been trained yet.",
                                 parent=self)
             return
+        self.audition_btn.state(["disabled"])
         self.train_log.config(text=f"Synthesising from {best.name} on the CPU — "
                                    "this takes a few seconds…")
-        self.update_idletasks()
-        try:
-            wav = training.audition(best, work / "config.json", work / "audition")
-        except Exception as exc:  # noqa: BLE001 - shown to the user
-            self.train_log.config(text=f"Could not synthesise: {exc}")
+
+        def work_thread() -> None:
+            try:
+                wav = training.audition(best, work / "config.json",
+                                        work / "audition")
+                _play_wav(wav)
+            except Exception as exc:  # noqa: BLE001 - reported on the UI thread
+                failure = str(exc)
+                self.after(0, lambda: self._audition_done(None, failure))
+                return
+            self.after(0, lambda: self._audition_done(best.name, None))
+
+        threading.Thread(target=work_thread, daemon=True).start()
+
+    def _audition_done(self, name: str | None, error: str | None) -> None:
+        if not self.winfo_exists():
             return
-        try:
-            _play_wav(wav)
-        except Exception as exc:  # noqa: BLE001 - the file is still on disk
-            self.train_log.config(text=f"Rendered {wav.name} but could not "
-                                       f"play it: {exc}")
-            return
-        self.train_log.config(text=f"Played {best.name}.")
+        self.train_log.config(
+            text=f"Could not play it: {error}" if error else f"Played {name}.")
+        self._update_state()
 
     # -- export --------------------------------------------------------------
 
@@ -785,7 +804,9 @@ class TrainingPanel(ttk.Frame):
 
     def _update_state(self) -> None:
         work = self._work_dir()
-        has_data = self._session() is not None
+        # The selected path is enough to know a dataset exists; loading its JSON
+        # here would read the file on every widget change for a boolean.
+        has_data = work is not None
         trained = work is not None and training.best_checkpoint(work) is not None
 
         ours = self.run is not None and self.run.running
@@ -843,6 +864,11 @@ class DesignPanel(ttk.Frame):
         self._dry: np.ndarray | None = None
         self._dry_rate = 22050
         self._dry_key: tuple | None = None
+        # Canvas item ids, so a selection change restyles a couple of dots
+        # instead of rebuilding the whole map.
+        self._dots: list[int] = []
+        self._marker: int | None = None
+        self._drawn: set[int] = set()
 
         self._build()
         self.refresh()
@@ -1013,32 +1039,66 @@ class DesignPanel(ttk.Frame):
         return ((cx - margin) / span * 2 - 1, 1 - (cy - margin) / span * 2)
 
     def _draw_map(self) -> None:
+        """Lay the speakers out once. Selection changes do NOT come back here.
+
+        Rebuilding every dot per event was costing 3.9 ms with libritts-high's
+        904 speakers, and this is bound to <B1-Motion>, which fires 60-120 times
+        a second while dragging -- around half a core spent redrawing dots that
+        did not move.
+        """
         self.canvas.delete("all")
+        self._dots = []
+        self._marker = None
+        self._drawn = set()
         if self.coords is None:
             return
-        chosen = set(self.weights)
-        for index, (x, y) in enumerate(self.coords):
+        for x, y in self.coords:
             cx, cy = self._to_canvas(float(x), float(y))
-            if index in chosen:
-                self.canvas.create_oval(cx - 5, cy - 5, cx + 5, cy + 5,
-                                        fill=self.palette.accent, outline="")
-            else:
-                self.canvas.create_oval(cx - 2, cy - 2, cx + 2, cy + 2,
-                                        fill=self.palette.muted, outline="")
+            self._dots.append(self.canvas.create_oval(
+                cx - 2, cy - 2, cx + 2, cy + 2,
+                fill=self.palette.muted, outline=""))
+        self._mark_selection()
+
+    def _mark_selection(self) -> None:
+        """Restyle only the dots whose selected-ness actually changed."""
+        if self.coords is None or not self._dots:
+            return
+        chosen = set(self.weights)
+        for index in self._drawn ^ chosen:          # entered or left the blend
+            if index >= len(self._dots):
+                continue
+            picked = index in chosen
+            cx, cy = self._to_canvas(float(self.coords[index][0]),
+                                     float(self.coords[index][1]))
+            size = 5 if picked else 2
+            self.canvas.coords(self._dots[index],
+                               cx - size, cy - size, cx + size, cy + size)
+            self.canvas.itemconfigure(
+                self._dots[index],
+                fill=self.palette.accent if picked else self.palette.muted)
+        self._drawn = chosen
+
+        # Where the blend actually sits, which is not any one speaker.
+        if self._marker is not None:
+            self.canvas.delete(self._marker)
+            self._marker = None
         if chosen:
-            # Where the blend actually sits, which is not any one speaker.
             centre = np.average([self.coords[i] for i in chosen], axis=0,
                                 weights=[self.weights[i] for i in chosen])
             cx, cy = self._to_canvas(float(centre[0]), float(centre[1]))
-            self.canvas.create_oval(cx - 7, cy - 7, cx + 7, cy + 7,
-                                    outline=self.palette.ok, width=2)
+            self._marker = self.canvas.create_oval(
+                cx - 7, cy - 7, cx + 7, cy + 7,
+                outline=self.palette.ok, width=2)
 
     def _on_click(self, event) -> None:
         if self.coords is None or self.table is None:
             return
         x, y = self._from_canvas(event.x, event.y)
-        _vector, self.weights = designer.from_map(self.table, self.coords, x, y)
-        self._draw_map()
+        chosen = designer.from_map(self.table, self.coords, x, y)[1]
+        if chosen == self.weights:
+            return          # dragging within one speaker's cell changes nothing
+        self.weights = chosen
+        self._mark_selection()
         self._update_recipe()
 
     def _update_recipe(self) -> None:
@@ -1090,48 +1150,64 @@ class DesignPanel(ttk.Frame):
         return (self.base_key, tuple(sorted(self.weights.items())))
 
     def _preview(self) -> None:
-        """Bake, speak, shape, play -- reusing the dry audio where it can.
+        """Bake, speak, shape, play -- off the UI thread, reusing what it can.
 
-        Baking and loading a 77 MB model costs about 1.2 seconds, which is a
-        long time in a loop whose whole purpose is click-listen-adjust. Only the
-        *blend* needs that work: the macros are post-processing, so moving a
-        slider replays cached audio through the chain in a few milliseconds.
+        Baking and loading a 77 MB model costs about 1.2 seconds, and playback
+        blocks for as long as the sentence lasts. Doing either on the Tk thread
+        freezes the whole settings window, which looks exactly like the app has
+        hung. It runs on a worker instead and reports back through `after`.
+
+        Only the *blend* needs the rebuild: the macros are post-processing, so
+        moving a slider replays cached audio through the chain in milliseconds.
         """
         voice = self._current()
         if voice is None:
             return
         self._busy = True
         self._set_enabled(False)
-        try:
-            key = self._blend_key()
-            if key != self._dry_key:
-                self.status.config(text="Building the voice…",
-                                   foreground=self.palette.muted)
-                self.update_idletasks()
-                import tempfile
 
-                with tempfile.TemporaryDirectory() as tmp:
-                    # Baked without the effects sidecar, so what comes back is
-                    # dry and can be reshaped without synthesising again.
-                    path = self._bake_to(Path(tmp) / "preview.onnx", voice,
-                                         with_design=False)
-                    self._dry, self._dry_rate = _speak(path, self.PREVIEW_TEXT)
-                self._dry_key = key
+        key = self._blend_key()
+        design = self._design()
+        rebuild = key != self._dry_key
+        self.status.config(
+            text="Building the voice…" if rebuild else "Playing…",
+            foreground=self.palette.muted)
 
-            design = self._design()
-            shaped = (dsp.apply(self._dry, self._dry_rate, design)
-                      if not design.is_neutral else self._dry)
-            self.status.config(text="Playing…", foreground=self.palette.muted)
-            self.update_idletasks()
-            _play(shaped, self._dry_rate)
-            self.status.config(text="", foreground=self.palette.text)
-        except Exception as exc:  # noqa: BLE001 - shown to the user
-            log.warning("preview failed: %s", exc)
-            self.status.config(text=f"Could not preview: {exc}",
+        def work() -> None:
+            try:
+                if rebuild:
+                    with tempfile.TemporaryDirectory() as tmp:
+                        # Baked without the effects sidecar, so what comes back
+                        # is dry and can be reshaped without synthesising again.
+                        path = self._bake_to(Path(tmp) / "preview.onnx", voice,
+                                             with_design=False)
+                        dry, rate = _speak(path, self.PREVIEW_TEXT)
+                else:
+                    dry, rate = self._dry, self._dry_rate
+
+                shaped = dsp.apply(dry, rate, design) if not design.is_neutral else dry
+                _play(shaped, rate)
+            except Exception as exc:  # noqa: BLE001 - reported on the UI thread
+                log.warning("preview failed: %s", exc)
+                failure = str(exc)
+                self.after(0, lambda: self._preview_done(None, None, 0, failure))
+                return
+            self.after(0, lambda: self._preview_done(key, dry, rate, None))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _preview_done(self, key, dry, rate: int, error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        self._busy = False
+        self._set_enabled(True)
+        if error:
+            self.status.config(text=f"Could not preview: {error}",
                                foreground=self.palette.error)
-        finally:
-            self._busy = False
-            self._set_enabled(True)
+            return
+        if dry is not None:
+            self._dry, self._dry_rate, self._dry_key = dry, rate, key
+        self.status.config(text="", foreground=self.palette.text)
 
     def _install(self) -> None:
         voice = self._current()
@@ -1215,7 +1291,7 @@ class DesignPanel(ttk.Frame):
         for macro, value in voice.design.to_dict().items():
             if macro in self.macro_vars:
                 self.macro_vars[macro].set(value)
-        self._draw_map()
+        self._mark_selection()
         self._update_recipe()
         self.status.config(text=f"Opened {voice.name}.", foreground=self.palette.ok)
 

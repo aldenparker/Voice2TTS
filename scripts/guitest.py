@@ -497,11 +497,25 @@ def main() -> int:
     check("the selection is marked on the map",
           len(dp.canvas.find_all()) > 12, str(len(dp.canvas.find_all())))
 
+    # <B1-Motion> is bound to the same handler, so this runs 60-120 times a
+    # second while dragging. Rebuilding every dot each time cost 3.9 ms with
+    # libritts-high's 904 speakers -- about half a core spent redrawing dots
+    # that had not moved.
+    items_before = len(dp.canvas.find_all())
+    ids_before = dp.canvas.find_all()
+    dp._on_click(spot)
+    check("re-clicking the same speaker is a no-op",
+          dp.canvas.find_all() == ids_before,
+          "an unchanged selection must not touch the canvas")
+
     between = (dp.coords[4] + dp.coords[7]) / 2
     spot.x, spot.y = dp._to_canvas(float(between[0]), float(between[1]))
     dp._on_click(spot)
     check("clicking between speakers blends them", len(dp.weights) > 1,
           str(dp.weights))
+    check("changing the blend restyles dots rather than rebuilding them",
+          len(dp.canvas.find_all()) == items_before,
+          f"{len(dp.canvas.find_all())} vs {items_before} items")
     check("the blend is described as percentages",
           "%" in dp.recipe_label.cget("text"), dp.recipe_label.cget("text"))
 

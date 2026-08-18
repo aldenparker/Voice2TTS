@@ -101,6 +101,15 @@ def diagnostics(cfg=None, pipeline=None) -> str:
         except Exception as exc:  # noqa: BLE001
             out.append(f"(status unavailable: {exc})")
 
+    section("CPU right now")
+    # Sampled rather than described, because "the app feels heavy" is not
+    # something anyone can act on, and Task Manager stops at the process
+    # boundary -- it cannot say WHICH thread.
+    from .perf import sample
+
+    for line in sample(1.0).report():
+        out.append(line)
+
     section("Installed voices")
     out.extend(f"  {k}" for k in voices.installed_keys())
 
