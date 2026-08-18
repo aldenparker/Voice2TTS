@@ -127,11 +127,18 @@ def from_dict(data: dict) -> DesignedVoice:
         # it silently would leave the voice sounding wrong for no visible reason.
         log.warning("ignoring unknown macros in the recipe: %s", ", ".join(unknown))
 
+    try:
+        design = Design.from_dict({k: v for k, v in macros.items() if k in MACROS})
+    except (TypeError, ValueError) as exc:
+        # These files are meant to be hand-editable, so a typo in a macro has to
+        # come back as "this recipe is wrong", not as a raw ValueError.
+        raise UnreadableVoice(f"A macro in [design] is not a number: {exc}") from exc
+
     return DesignedVoice(
         name=str(data.get("name") or "My Voice"),
         base_voice=base,
         speakers=speakers,
-        design=Design.from_dict({k: v for k, v in macros.items() if k in MACROS}),
+        design=design,
         notes=str(data.get("notes") or ""),
     )
 

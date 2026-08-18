@@ -525,6 +525,12 @@ def export(checkpoint: Path, config_json: Path, dest_dir: Path, voice_name: str,
         config_json.read_text(encoding="utf-8"), encoding="utf-8")
     staging.replace(final)
 
+    # Same reason as designer.bake(): a trained voice exported over a designed
+    # one of the same name would otherwise keep the designer's effects chain.
+    from .voices import clear_sidecars
+
+    clear_sidecars(final, keep=(".onnx.json",))
+
     if provenance is not None:
         provenance.checkpoint = checkpoint.name
         final.with_suffix(".onnx.provenance.json").write_text(

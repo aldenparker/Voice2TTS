@@ -42,6 +42,19 @@ log = logging.getLogger(__name__)
 METER_MAX = 100
 
 
+def _post(widget, callback) -> None:
+    """Hand a worker's result back to the UI thread, tolerating a closed window.
+
+    Both Studio panels do slow work on threads. A worker that finishes after the
+    settings window is destroyed would otherwise raise out of a thread nobody is
+    watching -- the window is rebuilt on every open, so this is not rare.
+    """
+    try:
+        widget.after(0, callback)
+    except (tk.TclError, RuntimeError):
+        log.debug("dropped a background result: the window is gone")
+
+
 class RecordingPanel(ttk.Frame):
     """Record prompts into a dataset, one take at a time."""
 
@@ -753,9 +766,9 @@ class TrainingPanel(ttk.Frame):
                 _play_wav(wav)
             except Exception as exc:  # noqa: BLE001 - reported on the UI thread
                 failure = str(exc)
-                self.after(0, lambda: self._audition_done(None, failure))
+                _post(self, lambda: self._audition_done(None, failure))
                 return
-            self.after(0, lambda: self._audition_done(best.name, None))
+            _post(self, lambda: self._audition_done(best.name, None))
 
         threading.Thread(target=work_thread, daemon=True).start()
 
@@ -869,6 +882,7 @@ class DesignPanel(ttk.Frame):
         self._dots: list[int] = []
         self._marker: int | None = None
         self._drawn: set[int] = set()
+        self._activated = False
 
         self._build()
         self.refresh()
@@ -989,6 +1003,23 @@ class DesignPanel(ttk.Frame):
 
         if self.base_var.get() not in usable:
             self.base_var.set(usable[0])
+        self.base_note.config(
+            text="Open this tab to load the speaker map.",
+            foreground=self.palette.muted)
+        if self._activated:
+            self._load_base()
+
+    def activate(self) -> None:
+        """Called when this tab is first shown.
+
+        Reading the speaker table means parsing the whole model: 453 ms for
+        en_US-libritts-high, on every settings window open, for a tab most
+        people never visit. Deferring it costs nothing, because the map is not
+        visible until this runs anyway.
+        """
+        if self._activated:
+            return
+        self._activated = True
         self._load_base()
 
     def _load_base(self) -> None:
@@ -1134,12 +1165,23 @@ class DesignPanel(ttk.Frame):
             design=self._design(),
         )
 
+    def _snapshot(self) -> tuple:
+        """Freeze what a bake needs, on the UI thread.
+
+        The map stays clickable while a preview runs, so a worker reading
+        self.table/self.weights could bake a different blend from the one the
+        preview was started for -- and then cache it under the wrong key.
+        """
+        return (self.base_key, self.table,
+                dict(self.weights) if self.weights else {})
+
     def _bake_to(self, destination: Path, voice: v2tvoice.DesignedVoice,
-                 with_design: bool = True) -> Path:
-        base = voices.installed_path(self.base_key)
+                 with_design: bool = True, snapshot: tuple | None = None) -> Path:
+        base_key, table, weights = snapshot or self._snapshot()
+        base = voices.installed_path(base_key)
         if base is None:
-            raise FileNotFoundError(f"{self.base_key} is no longer installed")
-        vector = designer.blend(self.table, self.weights)
+            raise FileNotFoundError(f"{base_key} is no longer installed")
+        vector = designer.blend(table, weights)
         path = designer.bake(base, base.with_suffix(".onnx.json"), vector,
                              destination, name=voice.name)
         if with_design and not voice.design.is_neutral:
@@ -1168,6 +1210,7 @@ class DesignPanel(ttk.Frame):
 
         key = self._blend_key()
         design = self._design()
+        snapshot = self._snapshot()
         rebuild = key != self._dry_key
         self.status.config(
             text="Building the voice…" if rebuild else "Playing…",
@@ -1180,7 +1223,7 @@ class DesignPanel(ttk.Frame):
                         # Baked without the effects sidecar, so what comes back
                         # is dry and can be reshaped without synthesising again.
                         path = self._bake_to(Path(tmp) / "preview.onnx", voice,
-                                             with_design=False)
+                                             with_design=False, snapshot=snapshot)
                         dry, rate = _speak(path, self.PREVIEW_TEXT)
                 else:
                     dry, rate = self._dry, self._dry_rate
@@ -1190,9 +1233,9 @@ class DesignPanel(ttk.Frame):
             except Exception as exc:  # noqa: BLE001 - reported on the UI thread
                 log.warning("preview failed: %s", exc)
                 failure = str(exc)
-                self.after(0, lambda: self._preview_done(None, None, 0, failure))
+                _post(self, lambda: self._preview_done(None, None, 0, failure))
                 return
-            self.after(0, lambda: self._preview_done(key, dry, rate, None))
+            _post(self, lambda: self._preview_done(key, dry, rate, None))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1280,7 +1323,13 @@ class DesignPanel(ttk.Frame):
             return
 
         self.base_var.set(voice.base_voice)
+        self._activated = True
         self._load_base()
+        if self.base_key != voice.base_voice:
+            # _load_base reports its own error; without this the speaker names
+            # below would still be the previous base's, and the recipe would
+            # resolve onto the wrong speakers.
+            return
         try:
             self.weights = v2tvoice.resolve_speakers(voice, self.names)
         except v2tvoice.UnreadableVoice as exc:

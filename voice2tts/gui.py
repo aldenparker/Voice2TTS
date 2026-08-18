@@ -1294,6 +1294,16 @@ class SettingsWindow(tk.Toplevel):
         self.design_panel = DesignPanel(self.studio_nb, self.palette)
         self.studio_nb.add(self.design_panel, text="Design")
 
+        # The Design tab parses the whole base model to read its speaker table.
+        # That is 453 ms for en_US-libritts-high, and it was happening on every
+        # settings window open whether or not anyone opened the tab.
+        self.studio_nb.bind("<<NotebookTabChanged>>", self._studio_tab_changed)
+
+    def _studio_tab_changed(self, _event=None) -> None:
+        chosen = self.studio_nb.select()
+        if chosen and self.studio_nb.tab(chosen, "text") == "Design":
+            self.design_panel.activate()
+
     def _refresh_studio(self, force: bool = False) -> None:
         # Cached unless asked: the hardware does not change while the app is
         # open, and this runs several times as the tab is built.

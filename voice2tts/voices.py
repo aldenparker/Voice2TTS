@@ -275,14 +275,58 @@ def play_sample(entry: VoiceEntry, device_index: int | None = None) -> float:
     return len(audio) / rate
 
 
+# Everything that can sit beside a voice. This list is the contract: a voice is
+# its model, its config, and whatever the Studio wrote next to it.
+#
+# It lives here because voices.py owns the voice directory. When the Studio
+# wrote sidecars that only it knew about, deleting a voice left them behind --
+# and a later voice with the same name silently inherited the dead one's effects
+# chain, which is not something anyone could have diagnosed from the interface.
+SIDECAR_SUFFIXES = (
+    ".onnx.json",              # Piper's own config; a voice is unusable without it
+    ".onnx.design.json",       # Voice Designer effects chain
+    ".onnx.provenance.json",   # what a trained voice was built from
+    ".v2tvoice",               # the recipe a designed voice was built from
+)
+
+
+def voice_files(model_path: Path) -> list[Path]:
+    """Every file belonging to the voice at `model_path`, existing or not."""
+    stem = model_path.with_suffix("")
+    return [model_path] + [Path(f"{stem}{suffix}") for suffix in SIDECAR_SUFFIXES]
+
+
+def clear_sidecars(model_path: Path, keep: tuple[str, ...] = ()) -> list[Path]:
+    """Remove anything left beside a voice path, and say what went.
+
+    Called after writing a new voice to a path, not only when deleting one:
+    installing over an existing name means the previous occupant's sidecars are
+    stale, and a stale effects chain is inherited in silence.
+
+    `keep` spares suffixes the caller has just written itself -- the config
+    above all, since a voice without one loads and then speaks nonsense.
+    """
+    gone = []
+    for path in voice_files(model_path)[1:]:
+        if any(path.name.endswith(suffix) for suffix in keep):
+            continue
+        if path.exists():
+            path.unlink()
+            gone.append(path)
+    if gone:
+        log.info("cleared %d stale file(s) beside %s",
+                 len(gone), model_path.name)
+    return gone
+
+
 def remove_voice(key: str) -> bool:
     """Delete a user-downloaded voice. Bundled voices are never removed."""
     if not is_removable(key):
         log.warning("refusing to remove %s (bundled or not user-installed)", key)
         return False
+    model = user_voices_dir() / f"{key}.onnx"
     removed = False
-    for suffix in (".onnx", ".onnx.json"):
-        path = user_voices_dir() / f"{key}{suffix}"
+    for path in voice_files(model):
         if path.exists():
             path.unlink()
             removed = True

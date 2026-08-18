@@ -1004,6 +1004,45 @@ def test_baking() -> None:
               designer.remove_designed(baked) and not baked.exists()
               and not baked.with_suffix(".onnx.json").exists())
 
+    # A voice is its model plus whatever the Studio wrote beside it. Nothing
+    # owned that list, so deleting a voice left its effects sidecar behind and
+    # the NEXT voice of the same name inherited it -- silently, with nothing in
+    # the interface to explain why a clean voice sounded processed.
+    with tempfile.TemporaryDirectory() as tmp:
+        from voice2tts import voices as voices_mod
+        from voice2tts.dsp import Design
+
+        base = Path(tmp) / "base.onnx"
+        table = _toy_multispeaker(base)
+        dest = Path(tmp) / "narrator.onnx"
+
+        designer.bake(base, base.with_suffix(".onnx.json"), table[0], dest)
+        designer.write_design(dest, Design(warmth=0.9), "narrator")
+        check("a designed voice has an effects sidecar",
+              designer.read_design(dest) is not None)
+
+        # Re-baking the same name with no effects must not keep the old ones.
+        designer.bake(base, base.with_suffix(".onnx.json"), table[1], dest)
+        check("re-baking a name clears the previous effects",
+              designer.read_design(dest) is None,
+              "otherwise a neutral voice keeps the old warmth")
+
+        designer.write_design(dest, Design(space=0.5), "narrator")
+        listed = voices_mod.voice_files(dest)
+        check("the voice file list covers model, config and sidecars",
+              len(listed) == 5 and listed[0] == dest,
+              str([p.name for p in listed]))
+        cleared = voices_mod.clear_sidecars(dest)
+        check("clearing removes the sidecars but not the model",
+              dest.exists() and designer.read_design(dest) is None
+              and len(cleared) >= 1, str([p.name for p in cleared]))
+
+        # And an exported trained voice lands on the same guarantee.
+        designer.write_design(dest, Design(warmth=0.9), "narrator")
+        voices_mod.clear_sidecars(dest)
+        check("a trained export would not inherit either",
+              designer.read_design(dest) is None)
+
 
 def test_v2tvoice() -> None:
     """The recipe format: round trip, and refusing what it cannot read."""
@@ -1069,6 +1108,18 @@ def test_v2tvoice() -> None:
             check(f"a recipe with {why} is refused", False, "no error")
         except v2tvoice.UnreadableVoice:
             check(f"a recipe with {why} is refused", True)
+
+    # These files are meant to be hand-edited, so a typo has to come back as
+    # "this recipe is wrong" rather than as a raw ValueError.
+    try:
+        v2tvoice.from_dict({"schema": 1, "base_voice": "b", "speakers": {"0": 1.0},
+                            "design": {"warmth": "hot"}})
+        check("a non-numeric macro is refused as a recipe error", False, "no error")
+    except v2tvoice.UnreadableVoice:
+        check("a non-numeric macro is refused as a recipe error", True)
+    except ValueError as exc:
+        check("a non-numeric macro is refused as a recipe error", False,
+              f"leaked a raw {type(exc).__name__}")
 
     # Unknown macros from a newer build are ignored, not fatal.
     forward = v2tvoice.from_dict({
@@ -2030,17 +2081,42 @@ def test_packaging_bits() -> None:
 
     # --- the spec must name what Analysis cannot see
     # PyInstaller walks module-level imports reliably; imports tucked inside a
-    # function are the ones that go missing from a frozen build, and the failure
-    # only shows up when a user clicks the tab that needs them.
-    spec = (Path(__file__).resolve().parent.parent / "Voice2TTS.spec").read_text(
-        encoding="utf-8")
-    gui_src = (Path(__file__).resolve().parent.parent / "voice2tts" / "gui.py"
-               ).read_text(encoding="utf-8")
-    lazy = set(re.findall(r"^\s+from \.(\w+) import ", gui_src, re.MULTILINE))
-    unlisted = sorted(m for m in lazy if f'"voice2tts.{m}"' not in spec)
-    check("lazily imported gui modules are declared in the spec",
-          not unlisted, f"missing from hiddenimports: {unlisted}" if unlisted
-          else ", ".join(sorted(lazy)) or "none are lazy")
+    # function are the ones that can go missing from a frozen build, and the
+    # failure only shows up when a user reaches the feature that needs them.
+    #
+    # Checking gui.py alone was not enough: updater, clipboard, loopback and perf
+    # are all reachable ONLY through a function-level import, from other modules.
+    # A missing voice2tts.updater would stop updates working for everyone, in the
+    # shipped build only.
+    spec = (ROOT / "Voice2TTS.spec").read_text(encoding="utf-8")
+    package = ROOT / "voice2tts"
+    own = {p.stem for p in package.glob("*.py")} - {"__init__", "__main__"}
+
+    top_level = re.compile(r"^(?:from \.(\w+) import|from \. import ([\w, ]+))")
+    inside_a_function = re.compile(r"^\s+(?:from \.(\w+) import|from \. import ([\w, ]+))")
+
+    def collect(pattern) -> set[str]:
+        found: set[str] = set()
+        for source in package.glob("*.py"):
+            for line in source.read_text(encoding="utf-8").splitlines():
+                match = pattern.match(line)
+                if not match:
+                    continue
+                if match.group(1):
+                    found.add(match.group(1))
+                elif match.group(2):
+                    found.update(name.strip().split(" as ")[0]
+                                 for name in match.group(2).split(","))
+        return found & own
+
+    lazy_only = sorted(collect(inside_a_function) - collect(top_level))
+    check("some modules really are only imported lazily", bool(lazy_only),
+          ", ".join(lazy_only) or "none -- has the import style changed?")
+    undeclared = sorted(m for m in lazy_only if f'"voice2tts.{m}"' not in spec)
+    check("every lazily-reachable module is declared in the spec",
+          not undeclared,
+          f"missing from hiddenimports: {undeclared}" if undeclared
+          else ", ".join(lazy_only))
 
     # --- voices
     installed = voices.installed_keys()

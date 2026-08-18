@@ -204,6 +204,13 @@ def download(checkpoint: Checkpoint, dest_dir: Path, progress=None,
 
     partial = final.with_suffix(final.suffix + ".part")
     have = partial.stat().st_size if partial.exists() else 0
+    if checkpoint.size and have >= checkpoint.size:
+        # A leftover at or past the full size cannot be resumed -- asking for
+        # bytes beyond the end returns 416, and it would do so every time from
+        # then on. Start again rather than wedge the download permanently.
+        log.info("discarding an oversized partial download (%d bytes)", have)
+        partial.unlink(missing_ok=True)
+        have = 0
 
     headers = {"User-Agent": USER_AGENT}
     if have:

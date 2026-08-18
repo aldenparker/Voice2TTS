@@ -262,6 +262,14 @@ def bake(base_model: Path, base_config: Path, vector: np.ndarray,
         json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
     staging.replace(dest)
 
+    # Only now that the new voice is complete: whatever used to live at this
+    # path is not this voice, and a previous occupant's effects sidecar would
+    # be inherited with nothing in the interface to explain the difference.
+    # Done last so there is never a moment where the model has no config.
+    from .voices import clear_sidecars
+
+    clear_sidecars(dest, keep=(".onnx.json",))
+
     log.info("baked %s (%.1f MB)", dest.name, dest.stat().st_size / 1e6)
     return dest
 
