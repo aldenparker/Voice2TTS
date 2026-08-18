@@ -67,6 +67,28 @@ versioning follows [Semantic Versioning](https://semver.org/).
   pause is back, and is now one of the two modes above -- which is what that
   change was reaching for and the wrong way to get it.
 
+- **Japanese voices, as an optional download.** Settings → **Add-ons** fetches
+  the phonemizer Piper needs for them: about 100 MB, 330 MB on disk. Not
+  bundled, because that is a lot to add to every installer for one language.
+
+  The dictionary is most of it and is not optional: without it a sentence
+  containing a character with more than one reading is caught inside Piper and
+  produces no audio at all, silently. Measured on eight ordinary sentences — the
+  one containing 人 was the one that failed.
+
+- **An Add-ons tab.** One place for every optional download — GPU acceleration,
+  Japanese voices and the Studio training environment — each saying what it
+  costs and whether it is installed. The GPU pack used to be explained on the
+  Recognition tab and the Studio one inside Studio, so there was nowhere to look
+  for a third. Voices needing an add-on are marked in the voice library rather
+  than discovered after a 60 MB download.
+
+- **Settings is grouped by what you are doing**: Normal, Translate, Studio,
+  Add-ons, and Misc for everything else, nested the way Studio already nested
+  its own panels. Voice and Recognition were separate tabs despite both being
+  needed for ordinary speech, and making translation work meant visiting four
+  tabs with nothing saying so.
+
 ### Fixed
 
 - **A Japanese voice crashed on every utterance.** Piper imports `pyopenjtalk`

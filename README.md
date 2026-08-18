@@ -74,6 +74,16 @@ In **Discord → Settings → Voice & Video**:
 
 ## Using it
 
+Settings is organised by what you are doing:
+
+| Tab | What is in it |
+|---|---|
+| **Normal** | The voice, and how recognition works. Everything ordinary speech needs. |
+| **Translate** | The language pair, the models, and every reason a combination will not work. |
+| **Studio** | Recording, training and designing a voice of your own. |
+| **Add-ons** | Optional downloads: GPU acceleration, Japanese voices, Studio training. |
+| **Misc** | Audio devices, triggers, the voice library, word rules, history, updates, status. |
+
 The tray icon's colour is the current state:
 
 | Colour | Meaning |
@@ -98,7 +108,7 @@ combo you don't otherwise use, especially in games.
 
 ### When it speaks
 
-Settings → **Recognition** offers two modes. They are genuinely different jobs,
+Settings → **Normal** → Recognition offers two modes. They are genuinely different jobs,
 not a fast setting and a slow one, so pick by what you are doing:
 
 | | Wait for a sentence | Speak while talking |
@@ -148,7 +158,7 @@ fluent and wrong.
 
 ### Multiple outputs
 
-Settings → Audio holds a list of outputs. Add as many as you like; each has its own
+Settings → Misc → Audio holds a list of outputs. Add as many as you like; each has its own
 enable toggle and gain. Typical setup:
 
 | Device | Gain | Why |
@@ -210,16 +220,22 @@ Three things have to line up, and the tab says so in plain words when they do
 not:
 
 - **The recognition model must hear the language you speak.** The models ending
-  in `.en` hear English only. Settings → Recognition has the multilingual ones
+  in `.en` hear English only. Settings → Normal → Recognition has the multilingual ones
   and a spoken-language picker.
 - **The voice must speak the target language.** A German sentence read by an
   English voice is confident gibberish. The tab names a voice that fits and
   switches to it with one button.
-- **Words rules come in two lists.** Settings → Words has a *Rules for* switch:
+- **Words rules come in two lists.** Settings → Misc → Words has a *Rules for* switch:
   *What I said* fixes what the recogniser misheard and runs **before**
   translation; *What is spoken* fixes what the voice pronounces badly and runs
   **after** it. Applying an English pronunciation list to German output would be
   nonsense, which is why they are separate.
+
+**Japanese needs one extra download.** Japanese voices are built on a different
+phonemizer, which Piper does not carry — without it a Japanese voice cannot
+speak at all. Settings → **Add-ons** fetches it: about 100 MB, 330 MB on disk.
+It is not bundled because that is a lot to add to every installer for one
+language. Voices needing it are marked *needs add-on* in the voice library.
 
 Models are Helsinki-NLP's work, used under CC-BY-4.0. Each download carries a
 `LICENSE` file with the attribution that licence requires.
@@ -298,7 +314,7 @@ Updates work out of the box — the repository is baked into the build, so there
 nothing to configure. The app checks on startup (at most once every 24 hours,
 adjustable) and offers a one-click update when a newer release exists.
 
-Settings → **Updates** shows the repository if you want to point a fork somewhere
+Settings → Misc → **Updates** shows the repository if you want to point a fork somewhere
 else, and clearing that field disables update checking entirely. **Use default**
 puts it back.
 
@@ -377,7 +393,7 @@ mishears, expands abbreviations, and corrects words the voice says badly. Whole-
 matching by default, with a live preview.
 
 **History** lists recent utterances so you can say one again when someone missed it.
-Settings → Status also has a theme picker: `native` (the default, Windows' own
+Settings → Misc → Status also has a theme picker: `native` (the default, Windows' own
 appearance) plus `light` and `dark` if you want a dark window at night.
 
 **Review before speaking** (History tab) shows each transcript for approval first.
@@ -390,7 +406,7 @@ those describe the machine rather than the situation.
 
 ## Checking it reaches Discord
 
-Settings → Audio → **Test the Discord path** plays a tone into the virtual cable and
+Settings → Misc → Audio → **Test the Discord path** plays a tone into the virtual cable and
 listens on the recording side, confirming the exact route Discord will use. If it
 fails, **Find the right device** plays one tone and reports which recording device
 actually receives the audio.
@@ -439,7 +455,7 @@ a warmup pass at startup either way, so this never lands on your first utterance
 
 **"no usable output devices"** — every output in your config is disabled, or none
 could be opened. Loading the config repairs this by enabling the system default, but
-you can also tick one in Settings → Audio, or delete
+you can also tick one in Settings → Misc → Audio, or delete
 `%APPDATA%\Voice2TTS\config.toml` to regenerate defaults.
 
 **"Discord can't hear anything"** — noise suppression. Turn Krisp off. Then check in
@@ -450,7 +466,7 @@ moves, the problem is Discord's settings; if it doesn't, the problem is this app
 <https://vb-audio.com/Cable/>: unzip, right-click `VBCABLE_Setup_x64.exe` → *Run as
 administrator*, reboot. The wizard's Re-check button will find it.
 
-**Whisper falls back to CPU** — Settings → Recognition shows the GPU pack state.
+**Whisper falls back to CPU** — Settings → **Add-ons** shows the GPU pack state.
 Re-download it there if it reports missing libraries.
 
 **"Library cublas64_12.dll is not found"** — the CUDA DLLs live in a directory
@@ -546,6 +562,7 @@ speakers and no microphone.
       cable.py        virtual cable detection and assisted install
       voices.py       Piper catalogue and downloader
       gpupack.py      on-demand CUDA download
+      jppack.py       on-demand Japanese phonemizer
       studioui.py     Voice Studio panels: record, train, design
       studiopack.py   training environment install and hardware gate
       recorder.py     clip capture at the microphone's own rate
