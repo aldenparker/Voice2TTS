@@ -31,11 +31,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import __version__
+from .net import USER_AGENT
 from .paths import cache_dir, is_frozen
 
 log = logging.getLogger(__name__)
 
-USER_AGENT = f"Voice2TTS/{__version__}"
 API_TEMPLATE = "https://api.github.com/repos/{repo}/releases/latest"
 # The full list, newest-created first. Only consulted when someone has opted in
 # to betas: /releases/latest deliberately skips pre-releases, which is what keeps

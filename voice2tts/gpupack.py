@@ -21,11 +21,11 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .net import USER_AGENT
 from .paths import cuda_dir, whisper_cache
 
 log = logging.getLogger(__name__)
 
-USER_AGENT = "Voice2TTS/0.2"
 PYPI_JSON = "https://pypi.org/pypi/{package}/json"
 
 # Version-pinned to what was verified working with ctranslate2 4.8.1 on Blackwell.

@@ -31,11 +31,11 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .net import USER_AGENT
 from .paths import cache_dir
 
 log = logging.getLogger(__name__)
 
-USER_AGENT = "Voice2TTS/0.6"
 
 # Matches the interpreter the application itself is built with, so the Piper
 # training code sees the Python it expects.

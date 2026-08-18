@@ -21,7 +21,6 @@ the card is fetched and shown rather than buried.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import urllib.parse
@@ -29,12 +28,13 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import net
+
 log = logging.getLogger(__name__)
 
 REPO = "rhasspy/piper-checkpoints"
 API = f"https://huggingface.co/api/datasets/{REPO}/tree/main"
 RESOLVE = f"https://huggingface.co/datasets/{REPO}/resolve/main"
-USER_AGENT = "Voice2TTS"
 
 # For training a voice from scratch rather than fine-tuning one.
 BASE_MODEL_DIR = "_base_model"
@@ -92,9 +92,7 @@ def _tree(path: str, timeout: float = 30.0) -> list[dict]:
     if path in _TREE_CACHE:
         return _TREE_CACHE[path]
     url = f"{API}/{urllib.parse.quote(path)}".rstrip("/")
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        entries = json.load(resp)
+    entries = net.fetch_json(url, timeout)
     _TREE_CACHE[path] = entries
     return entries
 
@@ -175,10 +173,8 @@ def dataset_from_card(card: str) -> str:
 
 def model_card(checkpoint: Checkpoint, timeout: float = 30.0) -> str:
     url = f"{RESOLVE}/{urllib.parse.quote(checkpoint.directory)}/MODEL_CARD"
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", errors="replace")
+        return net.fetch(url, timeout).decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001 - absence is not fatal
         log.warning("no model card for %s: %s", checkpoint.directory, exc)
         return ""
@@ -193,55 +189,8 @@ def download(checkpoint: Checkpoint, dest_dir: Path, progress=None,
 
     850 MB over a domestic connection is long enough that an interruption is
     likely, and starting again from zero each time is what makes a feature like
-    this feel broken. The CDN supports range requests, so a partial download is
-    continued rather than discarded.
+    this feel broken. net.download does the range handling.
     """
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    final = dest_dir / checkpoint.filename
-    if final.exists() and checkpoint.size and final.stat().st_size == checkpoint.size:
-        log.info("checkpoint already downloaded: %s", final.name)
-        return final
-
-    partial = final.with_suffix(final.suffix + ".part")
-    have = partial.stat().st_size if partial.exists() else 0
-    if checkpoint.size and have >= checkpoint.size:
-        # A leftover at or past the full size cannot be resumed -- asking for
-        # bytes beyond the end returns 416, and it would do so every time from
-        # then on. Start again rather than wedge the download permanently.
-        log.info("discarding an oversized partial download (%d bytes)", have)
-        partial.unlink(missing_ok=True)
-        have = 0
-
-    headers = {"User-Agent": USER_AGENT}
-    if have:
-        headers["Range"] = f"bytes={have}-"
-        log.info("resuming %s at %.0f MB", checkpoint.filename, have / 1e6)
-
-    req = urllib.request.Request(checkpoint.url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        # A server that ignores Range answers 200 with the whole file, and
-        # appending to what we already have would corrupt it.
-        resuming = resp.status == 206
-        if have and not resuming:
-            log.info("server ignored the range request; starting over")
-            have = 0
-        total = int(resp.headers.get("Content-Length") or 0) + have
-
-        with partial.open("ab" if resuming else "wb") as fh:
-            while True:
-                chunk = resp.read(1024 * 512)
-                if not chunk:
-                    break
-                fh.write(chunk)
-                have += len(chunk)
-                if progress:
-                    progress(have, total or checkpoint.size)
-
-    if checkpoint.size and partial.stat().st_size != checkpoint.size:
-        raise RuntimeError(
-            f"{checkpoint.filename} is {partial.stat().st_size} bytes, expected "
-            f"{checkpoint.size}. The download was cut short; try again."
-        )
-    partial.replace(final)
-    log.info("downloaded %s (%.0f MB)", final.name, final.stat().st_size / 1e6)
-    return final
+    return net.download(checkpoint.url, dest_dir / checkpoint.filename,
+                        expected_size=checkpoint.size, progress=progress,
+                        timeout=timeout)

@@ -15,6 +15,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from .net import USER_AGENT
 from .paths import list_voices, resource_root, user_data_dir
 
 log = logging.getLogger(__name__)
@@ -23,7 +24,6 @@ CATALOGUE_URL = (
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.json?download=true"
 )
 CATALOGUE_PAGE = "https://huggingface.co/rhasspy/piper-voices"
-USER_AGENT = "Voice2TTS/0.2"
 
 # Shipped in the installer; never offered for deletion.
 BUNDLED = ("en_US-lessac-medium", "en_US-amy-medium", "en_US-ryan-high")

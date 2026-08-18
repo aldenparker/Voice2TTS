@@ -2002,6 +2002,144 @@ def _fake_model(root: Path, code: str) -> Path:
     return directory
 
 
+def test_net() -> None:
+    """Downloading: resume, checksums, and refusing to keep a bad file.
+
+    Against a real local server rather than a mocked urlopen -- the parts that
+    actually go wrong here are HTTP-level (a server that ignores Range answers
+    200, not 206) and a mock would simply agree with whatever we assumed.
+    """
+    print("\n[networking]")
+    import hashlib
+    import http.server
+    import tempfile
+    import threading
+
+    from voice2tts import __version__ as version
+    from voice2tts import net
+
+    payload = bytes(range(256)) * 400          # 102 400 bytes, easy to slice
+    digest = hashlib.sha256(payload).hexdigest()
+    requests: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        honour_range = True
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            requests.append(self.headers.get("Range", "full"))
+            start = 0
+            rng = self.headers.get("Range")
+            if rng and Handler.honour_range:
+                start = int(rng.split("=")[1].split("-")[0])
+                if start >= len(payload):
+                    self.send_error(416)
+                    return
+                self.send_response(206)
+                self.send_header("Content-Range",
+                                 f"bytes {start}-{len(payload) - 1}/{len(payload)}")
+            else:
+                self.send_response(200)
+            body = payload[start:]
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/model.zip"
+
+    try:
+        expected_agent = f"Voice2TTS/{version}"
+        check("the user agent names this build",
+              expected_agent == net.USER_AGENT, net.USER_AGENT)
+        check("and can carry a contact note",
+              net.user_agent("https://example.test/").endswith(
+                  "(+https://example.test/)"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            dest = root / "a.zip"
+            net.download(url, dest, expected_size=len(payload), sha256=digest)
+            check("downloads a file", dest.read_bytes() == payload)
+            check("and leaves no .part behind",
+                  not dest.with_suffix(".zip.part").exists())
+
+            # A second call must not refetch: the file is already correct.
+            before = len(requests)
+            net.download(url, dest, expected_size=len(payload), sha256=digest)
+            check("a complete file is not downloaded twice",
+                  len(requests) == before, f"{len(requests) - before} extra request(s)")
+
+            # Resume. Half a file on disk, a server that honours Range.
+            resumed = root / "b.zip"
+            part = resumed.with_suffix(".zip.part")
+            part.write_bytes(payload[:40000])
+            requests.clear()
+            net.download(url, resumed, expected_size=len(payload), sha256=digest)
+            check("resumes a partial download", resumed.read_bytes() == payload)
+            check("and asks only for the missing bytes",
+                  requests == ["bytes=40000-"], str(requests))
+
+            # A server that ignores Range answers 200 with the whole file.
+            # Appending to what we have would corrupt it silently.
+            Handler.honour_range = False
+            ignored = root / "c.zip"
+            ignored.with_suffix(".zip.part").write_bytes(payload[:40000])
+            seen: list[tuple[int, int]] = []
+            net.download(url, ignored, expected_size=len(payload), sha256=digest,
+                         progress=lambda done, total: seen.append((done, total)))
+            check("starts over when the server ignores Range",
+                  ignored.read_bytes() == payload,
+                  f"{len(ignored.read_bytes())} bytes")
+            # The file is correct either way, because the stream is opened "wb".
+            # What the restart protects is the count: carrying the 40 000 bytes
+            # forward would report 140 000 of 102 400 downloaded.
+            check("and reports progress that does not exceed the total",
+                  all(done <= total for done, total in seen),
+                  str(seen[-1]) if seen else "no progress reported")
+            check("and finishes at exactly the file size",
+                  seen[-1] == (len(payload), len(payload)) if seen else False,
+                  str(seen[-1]) if seen else "no progress reported")
+            Handler.honour_range = True
+
+            # A partial at or past full size cannot be resumed -- the server
+            # answers 416 and would do so on every later run.
+            oversized = root / "d.zip"
+            oversized.with_suffix(".zip.part").write_bytes(payload + b"junk")
+            net.download(url, oversized, expected_size=len(payload), sha256=digest)
+            check("an oversized leftover is discarded, not resumed forever",
+                  oversized.read_bytes() == payload)
+
+            # The checksum is the point of publishing one.
+            bad = root / "e.zip"
+            try:
+                net.download(url, bad, expected_size=len(payload),
+                             sha256="0" * 64)
+                check("a wrong checksum is refused", False, "it was accepted")
+            except RuntimeError as exc:
+                check("a wrong checksum is refused", "checksum" in str(exc))
+            check("and the bad file is not left on disk",
+                  not bad.exists() and not bad.with_suffix(".zip.part").exists(),
+                  "a corrupt file at the right path defeats every later run")
+
+            # Right size, wrong bytes: size alone cannot catch this.
+            stale = root / "f.zip"
+            stale.write_bytes(b"x" * len(payload))
+            net.download(url, stale, expected_size=len(payload), sha256=digest)
+            check("a file of the right size but wrong content is refetched",
+                  stale.read_bytes() == payload)
+
+            check("sha256_of reads a file in chunks correctly",
+                  net.sha256_of(dest) == digest)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_translate() -> None:
     """Managing translation models. Translating itself needs one installed."""
     print("\n[translation]")
@@ -3301,6 +3439,7 @@ def main() -> int:
     test_profiles()
     test_history_and_review()
     test_vad()
+    test_net()
     test_translate()
     test_stt()
     test_device_lists()
