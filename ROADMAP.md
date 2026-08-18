@@ -336,6 +336,9 @@ fewer, longer, better-punctuated chunks.
 **Goal.** Speak English, have the other side hear German. A translation stage
 between recognition and speech, running entirely on this machine.
 
+Also in this release: **streaming recognition as a third mode**, which removes
+the floor 0.6.1 left behind. See below.
+
 **Not in scope.** Translating what *they* say back to you — that needs their
 audio, which means loopback capture and a second pipeline. Worth doing later,
 but it is a different feature wearing the same word.
@@ -442,6 +445,55 @@ second hop and its compounding errors.
       default to on when translating: an ASR error feeds a translator that will
       produce something fluent and wrong
 - [ ] Show both texts in the transcript, source above target
+
+### Streaming recognition — a third mode
+
+0.6.1 bounded the wait by cutting speech into segments; it did not remove it.
+The floor is still `max_segment_s`, because recognition cannot start until a
+segment is closed. Streaming removes that floor by recognising *while* someone
+is still speaking.
+
+**How it works.** Re-transcribe a growing buffer every second or so and compare
+consecutive passes. Whatever two passes agree on is stable and can be spoken;
+the rest is still in flux and is held. This is the LocalAgreement rule that
+whisper-streaming uses, and it works because Whisper's output for the early part
+of a buffer stops changing once enough context follows it.
+
+**Why it is a mode and not the default.** Three costs, all real:
+
+- **Compute.** The same audio is decoded many times. A 10 s utterance
+  re-transcribed every second is roughly 10 passes over a growing buffer rather
+  than one pass at the end. Fine on a 5080, not fine on the CPU path that ships
+  by default.
+- **It fits speech synthesis badly.** You cannot un-speak. Once Piper has said a
+  word it is out, so only *stable* text can be spoken — and to avoid sounding
+  robotic it has to be buffered to a phrase or sentence boundary anyway, which
+  gives back part of the latency the technique bought.
+- **Prosody.** Sentences spoken in pieces lose their intonation contour. The
+  Designer's own effects chain has the same character: fine in isolation,
+  noticeable when it happens every few words.
+
+So it belongs behind a switch, alongside push-to-talk and VAD, for people who
+want the lowest possible lag and have the hardware to pay for it.
+
+- [ ] **Spike it before building.** Two numbers decide the design: how long
+      until a word stabilises (which is the true latency, not the transcription
+      time), and what the repeated decoding costs on both CPU and GPU. Reuse
+      `spike/08_translate.py`'s shape — measure first, commit after.
+- [ ] `streaming.py` — a growing buffer, a scheduled re-transcribe, and the
+      agreement rule as a pure function over two token lists, so it can be
+      tested without a model
+- [ ] Speak only stable text, buffered to a phrase boundary
+- [ ] A hard fallback to segmented mode when a pass takes longer than the
+      interval — otherwise the buffer grows without bound and the lag it was
+      meant to remove comes back worse
+- [ ] Mode selector: push to talk / automatic / **streaming**, with the compute
+      cost stated plainly next to it
+- [ ] Interaction with translation: a translator sees a stable prefix rather
+      than a whole sentence, and translation quality depends heavily on having
+      the whole clause. Very likely translation must stay on sentence
+      boundaries even when recognition does not — measure before assuming
+      either way.
 
 ### Risks
 
