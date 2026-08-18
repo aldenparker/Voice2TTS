@@ -301,6 +301,71 @@ def test_substitutions() -> None:
           p.substituter.apply("tell aiden") == "tell aiden")
 
 
+def test_observer_isolation() -> None:
+    """A stalled interface must not be able to stop the audio path.
+
+    The tray and settings window marshal onto the Tk thread with
+    `root.after()`, and a cross-thread Tkinter call serialises on the Tcl
+    interpreter lock -- so a busy interface can block whichever thread
+    announced the change. When that was the worker, it blocked inside
+    _set_state(THINKING) before ever reaching speak(): silent, stuck on
+    "thinking", unrecoverable short of a restart.
+
+    Verified by wedging an observer permanently. With observers called
+    synchronously this hangs the whole pipeline at the first state change.
+    """
+    print("\n[observer isolation]")
+    import threading
+
+    from voice2tts.config import Config
+    from voice2tts.pipeline import Pipeline, State
+
+    cfg = Config()
+    for target in cfg.audio.outputs:
+        target.enabled = False
+
+    blocked = threading.Event()
+    blocked.set()
+    seen: list[str] = []
+
+    def wedged(state) -> None:
+        seen.append(state.value)
+        while blocked.is_set():
+            time.sleep(0.02)
+
+    pipeline = Pipeline(cfg, on_state=wedged, on_event=lambda k, m: wedged(State.IDLE))
+    try:
+        # Every state change goes through the notifier, so this must return
+        # promptly even though the observer never does.
+        start = time.perf_counter()
+        for state in (State.LISTENING, State.THINKING, State.SPEAKING, State.IDLE):
+            pipeline._set_state(state)
+        elapsed = time.perf_counter() - start
+        check("announcing state never blocks the caller", elapsed < 0.5,
+              f"{elapsed * 1000:.0f} ms for four transitions")
+        check("the state itself is still correct", pipeline.state is State.IDLE,
+              pipeline.state.value)
+        check("emitting an event never blocks either",
+              (lambda t0: (pipeline._emit("info", "x"),
+                           time.perf_counter() - t0 < 0.5)[1])(time.perf_counter()))
+
+        # Notices are droppable; the queue must not grow without limit.
+        for i in range(1000):
+            pipeline._emit("info", f"flood {i}")
+        check("a stalled observer cannot grow the queue without limit",
+              pipeline._notices.qsize() <= 256,
+              f"{pipeline._notices.qsize()} queued")
+    finally:
+        blocked.clear()
+
+    # Utterances are NOT droppable: speaking N seconds takes N seconds, so a
+    # talker who does not pause is always ahead of playback. Falling behind is
+    # recoverable; a dropped sentence is not.
+    check("the utterance queue is unbounded",
+          pipeline._utterances.maxsize == 0,
+          f"maxsize={pipeline._utterances.maxsize}")
+
+
 def test_device_recovery() -> None:
     """A microphone that goes away must be retried, not written off."""
     print("\n[device recovery]")
@@ -1853,6 +1918,32 @@ def test_vad() -> None:
           min(required) >= on.min_silence_floor_ms // WINDOW_MS,
           f"min {min(required)} windows")
 
+    # -- suspending while the app speaks -------------------------------------
+    # The pipeline stops feeding windows while its own voice is playing. That
+    # used to call reset(), which discarded the buffer -- including the tail a
+    # mid-speech split deliberately carries forward. Speech captured BEFORE
+    # playback started was real and was going to be said.
+    seg = VadSegmenter(on, preroll_ms=300, max_utterance_s=30)
+    for i in range(0, 16000 * 2, WINDOW):
+        seg.process(audio[i:i + WINDOW])
+    check("the segmenter is mid-utterance", seg.active)
+
+    rescued = seg.suspend()
+    check("suspending hands back what was already captured", rescued is not None,
+          f"{0 if rescued is None else len(rescued) / 16000:.1f}s rescued")
+    check("and stops listening", not seg.active)
+    check("with nothing left buffered", seg._buf == [])
+
+    # Suspending when there is nothing to save must be harmless.
+    quiet = VadSegmenter(on, preroll_ms=300, max_utterance_s=30)
+    check("suspending an idle segmenter yields nothing",
+          quiet.suspend() is None and not quiet.active)
+
+    # And it must be able to hear again afterwards.
+    for i in range(0, 16000 * 2, WINDOW):
+        seg.process(audio[i:i + WINDOW])
+    check("it listens again after suspending", seg.active)
+
 
 def test_stt() -> None:
     print("\n[stt]")
@@ -2961,6 +3052,9 @@ def main() -> int:
     test_hotkey_manager()
     test_clipboard()
     test_substitutions()
+    # Observer isolation never starts the pipeline, so it needs no hardware --
+    # and it guards the bug that made 0.6.1 hang, so it should run everywhere.
+    test_observer_isolation()
     if not no_audio:
         test_device_recovery()
     test_theme()

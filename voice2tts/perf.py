@@ -19,10 +19,12 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+import sys
 import threading
 import time
 from ctypes import wintypes
 from dataclasses import dataclass, field
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +84,31 @@ class Snapshot:
         for name, share in hot[:12]:
             lines.append(f"  {share / self.seconds * 100:5.0f}% of a core  {name}")
         return lines
+
+
+def stacks(skip_main: bool = False) -> list[str]:
+    """Where every thread is, right now.
+
+    The counterpart to sample(): that says which thread is busy, this says what
+    it is doing. Together they cover the two ways this app goes wrong -- burning
+    CPU, and stopping dead. A hang reported as "it got stuck" is not actionable;
+    a hang reported with the frame it stopped in is.
+    """
+    import traceback
+
+    names = {t.ident: t.name for t in threading.enumerate()}
+    lines: list[str] = []
+    for ident, frame in sys._current_frames().items():
+        name = names.get(ident, f"thread-{ident}")
+        if skip_main and name == "MainThread":
+            continue
+        lines.append(f"  {name} (id {ident})")
+        for entry in traceback.extract_stack(frame)[-8:]:
+            where = Path(entry.filename).name
+            lines.append(f"      {where}:{entry.lineno} {entry.name}()")
+            if entry.line:
+                lines.append(f"          {entry.line.strip()[:100]}")
+    return lines
 
 
 def _python_thread_names() -> dict[int, str]:
