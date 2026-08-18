@@ -524,10 +524,11 @@ of a buffer stops changing once enough context follows it.
 
 **Why it is a mode and not the default.** Three costs, all real:
 
-- **Compute.** The same audio is decoded many times. A 10 s utterance
-  re-transcribed every second is roughly 10 passes over a growing buffer rather
-  than one pass at the end. Fine on a 5080, not fine on the CPU path that ships
-  by default.
+- **Compute.** The same audio is decoded many times: ~0.5x realtime,
+  continuously, for as long as someone is talking. *(Written before the spike as
+  "fine on a 5080, not fine on CPU" — the measurement says otherwise. It costs
+  the same on both, and the CPU is no worse. The cost is real; the reason given
+  for it was wrong.)*
 - **It fits speech synthesis badly.** You cannot un-speak. Once Piper has said a
   word it is out, so only *stable* text can be spoken — and to avoid sounding
   robotic it has to be buffered to a phrase or sentence boundary anyway, which
@@ -539,19 +540,63 @@ of a buffer stops changing once enough context follows it.
 So it belongs behind a switch, alongside push-to-talk and VAD, for people who
 want the lowest possible lag and have the hardware to pay for it.
 
-- [ ] **Spike it before building.** Two numbers decide the design: how long
-      until a word stabilises (which is the true latency, not the transcription
-      time), and what the repeated decoding costs on both CPU and GPU. Reuse
-      `spike/08_translate.py`'s shape — measure first, commit after.
+#### Spiked ✅ — `spike/09_streaming.py`. It works, and it is not what I expected.
+
+LocalAgreement-2 over a growing buffer, re-transcribed every second, measured on
+28.5 s of varied synthesized English (five distinct sentences — **not** one clip
+repeated: Whisper falls into repetition loops on duplicated audio, which
+produced a 26 s decode and made the first run meaningless).
+
+| | `base.en` CPU int8 | `base.en` CUDA fp16 |
+|---|---|---|
+| Total decode | 14.0 s for 28.5 s audio (**0.49×**) | 14.5 s (**0.51×**) |
+| First word out | 2.0 s (segmented: 28.5 s) | 2.0 s |
+| Mean commit lag | 2.3 s behind the speech | 2.1 s |
+| Worst commit lag | 5.3 s | 5.2 s |
+| Words held to the end | 0 | 0 |
+
+**The GPU does not help.** 0.51× against 0.49× — within noise of each other.
+Per-pass, CUDA starts far ahead (61 ms against 336 ms on a 1 s buffer) and gives
+it all back as the buffer grows (884 ms against 816 ms at 28.5 s). Decoding a
+long transcript is a sequence of small dependent steps, so it is latency-bound
+rather than compute-bound, and the GPU has nothing to bite on. This kills the
+"only for people with the hardware" framing: the CPU keeps up just as well.
+
+**The cost grows with buffer length, and it runs away.** Fitting pass time
+against buffer:
+
+- CUDA: ~35 ms per second of buffer → a pass exceeds the 1 s interval at **29 s**
+- CPU: ~17 ms per second + 269 ms fixed → at **43 s**
+
+Past that the buffer grows faster than it can be decoded and the lag it was
+meant to remove comes back worse. So **trimming the committed prefix out of the
+buffer is mandatory, not an optimisation** — and the hard fallback below is what
+catches it when trimming is not enough.
+
+**The latency win is real but smaller than it looks.** "First word at 2 s instead
+of 28.5 s" flatters it: that comparison is against one 28.5 s segment, and 0.6.1
+already splits at `max_segment_s = 6 s`. Against what actually ships, the honest
+figures are a **mean 2.2 s** commit lag versus up to 6 s, with a **worst case of
+5.3 s** — which is barely better than the ceiling we already have. Streaming
+improves the *typical* case substantially and the *worst* case hardly at all.
+
+Which reframes the feature: it is worth building, but as a latency *smoother*,
+not a latency *floor remover*, and the interface should not promise more.
+
+- [x] **Spike it before building.** Done; see above.
 - [ ] `streaming.py` — a growing buffer, a scheduled re-transcribe, and the
       agreement rule as a pure function over two token lists, so it can be
       tested without a model
 - [ ] Speak only stable text, buffered to a phrase boundary
+- [ ] **Trim the committed prefix out of the buffer.** Promoted from "not
+      mentioned" to mandatory by the measurement above: without it the mode
+      stops keeping up at 29 s (GPU) or 43 s (CPU) of continuous speech
 - [ ] A hard fallback to segmented mode when a pass takes longer than the
-      interval — otherwise the buffer grows without bound and the lag it was
-      meant to remove comes back worse
+      interval — the backstop for when trimming is not enough
 - [ ] Mode selector: push to talk / automatic / **streaming**, with the compute
-      cost stated plainly next to it
+      cost stated plainly next to it — ~0.5x realtime continuously, on CPU *or*
+      GPU, and honestly described as improving the typical delay rather than
+      the worst one
 - [ ] Interaction with translation: a translator sees a stable prefix rather
       than a whole sentence, and translation quality depends heavily on having
       the whole clause. Very likely translation must stay on sentence
