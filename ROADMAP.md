@@ -383,24 +383,53 @@ der Tests scheitern immer noch unter Windows."*
 The reason this is cheap is dependencies: **CTranslate2 is already here**,
 because faster-whisper runs on it.
 
-**Models come from Argos Translate, pre-converted.** Their `.argosmodel`
-packages are a zip holding a CTranslate2 model directory and the SentencePiece
-tokenizer that goes with it, so nothing has to be converted — which matters,
-because converting Helsinki-NLP's own weights needs `transformers` and `torch`
-purely to rewrite files we would never train. 49 pairs from English, 100 in
-total.
+### Models — we convert and host them ourselves ✅ done
 
-Measured facts that correct the original plan:
+The original plan was to take Argos Translate's pre-converted `.argosmodel`
+packages, because converting Helsinki-NLP's weights needs `transformers` and
+`torch` purely to rewrite files we would never train.
 
-- **~150 MB per pair, not 75.** The Argos CT2 model is 162 MB; the earlier
-  figure was for raw OPUS-MT weights.
-- **`sentencepiece` is a new runtime dependency.** 1.2 MB wheel. Small enough
-  not to argue about.
-- The packages also carry a `stanza/` directory — Argos's own sentence splitter,
-  a torch model. **Ignorable**: this pipeline already works one utterance at a
-  time, and unpacking it would drag torch in for nothing.
-- **`argos-net.com` answers Python's default User-Agent with 403.** The
-  downloader must set one.
+**The licence question decided it.** Argos state terms for their *software* and
+say nothing about the model weights — not in the index, not in the package, not
+in the README. "Probably inherits CC-BY-4.0 from upstream" is not a licence, and
+a GPL application should not put a download button on a guess.
+
+So `scripts/convert_mt.py` converts Helsinki-NLP's originals at build time.
+torch and transformers are build-time only, already in the PyInstaller
+`excludes`, and never reach a user's machine. The result is better on every
+axis that was supposed to be the cost:
+
+| | Argos package | Ours |
+|---|---|---|
+| Packaged size | 151 MB | **63 MB** (int8) |
+| "can you hear me?" | 37 ms | **19 ms** |
+| A 25-word sentence | 98 ms | **68 ms** |
+| Licence | unstated | **CC-BY-4.0, shipped in the package** |
+
+Each pair ships `model/`, both tokenizers, a `LICENSE` carrying the attribution
+CC-BY requires and the Tiedemann & Thottingal citation, and a `metadata.json`.
+A `manifest.json` lists every pair with its size and sha256, so the app can show
+what is available without downloading 60 MB to find out, and the list does not
+go stale inside a shipped build.
+
+Two things that produce *fluent nonsense* rather than an error, both found by
+measurement and now guarded by tests:
+
+- **Marian keeps two tokenizers**, one per direction. Decoding output with the
+  source tokenizer does not fail — it leaves raw `▁` pieces in the text.
+- **The input needs an explicit `</s>`.** Without it the model rambles:
+  *"Hallo Hallo Hallo, können Sie hören Sie mich hören????"*
+
+Other measured facts:
+
+- **`sentencepiece` is a new runtime dependency.** 1.2 MB wheel.
+- Argos packages carry a `stanza/` sentence splitter — a torch model, dropped on
+  install. This pipeline already works one utterance at a time.
+- **`argos-net.com` answers Python's default User-Agent with 403**, which no
+  longer matters now that we host the models.
+- `ct2-opus-mt-converter` needs only numpy and yaml and would make the CI job
+  much lighter than transformers + torch, but the native OPUS-MT host 404'd on
+  the filenames tried. Worth revisiting if the conversion job gets slow.
 
 Alternatives considered:
 
@@ -429,12 +458,13 @@ second hop and its compounding errors.
 ### Work
 
 - [x] **Spike first** — `spike/08_translate.py`. Done; see the table above.
-- [ ] **Decide the model licence question.** The Argos index and the package
-      metadata both state no licence. Upstream OPUS-MT is CC-BY-4.0, which is
-      fine, but "probably inherits it" is not good enough to put a download
-      button on in a GPL application. Either establish the terms and record
-      them the way base-voice licences already are, or convert Helsinki-NLP's
-      weights ourselves at build time, where the licence is stated plainly.
+- [x] **Decide the model licence question.** Settled: we convert Helsinki-NLP's
+      CC-BY-4.0 originals ourselves and host the result, so the terms are known
+      and the attribution travels with the model. See above.
+- [x] `scripts/convert_mt.py` — conversion, packaging, checksums, manifest
+- [ ] The download side: read the manifest, fetch, verify sha256, install
+- [ ] A CI job that runs `convert_mt.py --all` and attaches the assets to a
+      `models-*` release tag
 - [ ] Split the substitution stage into source-side and target-side lists
 - [ ] `translate.py` — model download, cache, and a `translate(text, src, dst)`
       that is a pure function over a loaded model

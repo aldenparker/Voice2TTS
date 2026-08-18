@@ -8,6 +8,7 @@ on. Does not touch the microphone.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -108,6 +109,17 @@ def speech_like(seconds: float, rate: int, room_tone: float = 0.001) -> np.ndarr
 
     tone = np.random.default_rng(0).standard_normal(len(t)) * room_tone
     return (voiced * envelope + tone).astype(np.float32)
+
+
+# The console on Windows is cp1252, and this suite prints text it does not
+# control: translated sentences, tokenizer pieces, voice names. A character the
+# console cannot represent must degrade to "?", not kill the run half way
+# through -- losing 400 later checks to a print is a bad trade.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, OSError):  # redirected to something simpler
+        pass
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -2033,6 +2045,38 @@ def test_translate() -> None:
                   translate.find_pair("en", "fr") is None,
                   "half a model would translate to nonsense")
 
+            # Marian keeps two tokenizers -- one for the language going in, one
+            # for the language coming out. Decoding with the source tokenizer
+            # does not fail, it leaves raw sentencepiece pieces in the text.
+            pair_dir = root / "en_de"
+            (pair_dir / "sentencepiece.model").unlink()
+            (pair_dir / "source.spm").write_bytes(b"in")
+            (pair_dir / "target.spm").write_bytes(b"out")
+            found = translate.tokenizers_in(pair_dir)
+            check("a two-tokenizer model is recognised",
+                  found is not None and found[0].name == "source.spm"
+                  and found[1].name == "target.spm", str(found))
+            check("and counts as usable", translate.find_pair("en", "de") is not None)
+
+            (pair_dir / "target.spm").unlink()
+            check("half a tokenizer pair is not usable",
+                  translate.tokenizers_in(pair_dir) is None,
+                  "decoding needs the target side")
+            (pair_dir / "target.spm").write_bytes(b"out")
+
+            # A shared tokenizer is the other layout publishers use.
+            shared_dir = root / "en_pl"
+            (shared_dir / "model").mkdir(parents=True)
+            (shared_dir / "model" / "model.bin").write_bytes(b"x")
+            (shared_dir / "sentencepiece.model").write_bytes(b"both")
+            shared = translate.tokenizers_in(shared_dir)
+            check("a shared tokenizer is returned for both sides",
+                  shared is not None and shared[0] == shared[1], str(shared))
+
+            check("the end-of-sentence marker is defined",
+                  translate.EOS == "</s>",
+                  "without it Marian rambles instead of erroring")
+
             check("a direct route is one hop",
                   [p.code for p in translate.route("en", "de")] == ["en_de"])
             check("no route to a language nobody installed",
@@ -2113,6 +2157,18 @@ def test_translate() -> None:
     check("stays inside the latency budget", elapsed < 0.3,
           f"{elapsed * 1000:.0f} ms")
     check("empty input is safe", chain.translate("") == "")
+    # The two failure modes that produce plausible-looking output rather than an
+    # error: decoding with the wrong tokenizer leaves raw pieces behind, and a
+    # missing end-of-sentence marker makes the model repeat itself.
+    check("no raw tokenizer pieces leak into the text", "▁" not in out,
+          out[:60])
+    # Strip punctuation and case before grouping: "Hallo Hallo Hallo," is a run
+    # of three, and comparing the raw tokens would score it as two.
+    words = [w.strip(".,!?;:“”\"'()").lower() for w in out.split()]
+    longest_run = max((sum(1 for _ in group) for _, group in
+                       itertools.groupby(w for w in words if w)), default=0)
+    check("the model is not repeating itself", longest_run <= 2,
+          f"longest run of one word: {longest_run} in {out[:70]!r}")
     chain.close()
 
 

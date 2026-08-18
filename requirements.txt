@@ -7,6 +7,9 @@ onnx==1.20.0                 # Voice Studio only: reads and rewrites the speaker
                              # cannot substitute -- it drops unused initializers,
                              # so the speaker embeddings are not readable from a
                              # loaded session.
+sentencepiece==0.2.2         # tokenizer for the translation models. The
+                             # models themselves are converted at build time by
+                             # scripts/convert_mt.py; nothing here needs torch.
 sounddevice==0.5.5           # PortAudio bindings
 soxr==1.1.0                  # streaming resampler
 numpy>=2.0

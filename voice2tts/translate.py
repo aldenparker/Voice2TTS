@@ -36,7 +36,22 @@ from .paths import cache_dir
 log = logging.getLogger(__name__)
 
 MODEL_DIR_NAME = "model"
-TOKENIZER_NAMES = ("sentencepiece.model", "source.spm", "sp.model")
+
+# Marian keeps two tokenizers: one for the language going in, one for the
+# language coming out. Decoding the output with the source tokenizer does not
+# fail -- it leaves raw "▁" pieces in the text and produces something that
+# looks almost right. Some publishers ship a single shared tokenizer instead,
+# which is why both layouts are recognised.
+SOURCE_TOKENIZER = "source.spm"
+TARGET_TOKENIZER = "target.spm"
+SHARED_TOKENIZER_NAMES = ("sentencepiece.model", "sp.model")
+
+# Marian is trained with an explicit end-of-sentence marker on the input.
+# Without it the model does not error -- it rambles, repeating fragments until
+# it hits the decoding limit ("Hallo Hallo Hallo, koennen Sie hoeren Sie mich
+# hoeren????"). Fluent-looking nonsense is the worst failure mode there is, so
+# this is appended on the way in and stripped on the way out.
+EOS = "</s>"
 
 # Beam 4 costs 96 ms against beam 1's 78 ms on a long sentence, for output that
 # was identical on the sentences measured. Cheap enough to keep the better
@@ -87,18 +102,34 @@ def models_dir() -> Path:
     return d
 
 
-def _tokenizer_in(directory: Path) -> Path | None:
-    for name in TOKENIZER_NAMES:
-        candidate = directory / name
-        if candidate.is_file():
-            return candidate
-    return next(iter(sorted(directory.glob("*.spm"))), None)
+def tokenizers_in(directory: Path) -> tuple[Path, Path] | None:
+    """The (source, target) tokenizers for a model, or None if incomplete.
+
+    A shared tokenizer is returned as the same path twice, so callers do not
+    have to care which layout a publisher used.
+    """
+    source = directory / SOURCE_TOKENIZER
+    target = directory / TARGET_TOKENIZER
+    if source.is_file() and target.is_file():
+        return source, target
+    for name in SHARED_TOKENIZER_NAMES:
+        shared = directory / name
+        if shared.is_file():
+            return shared, shared
+    # A single loose .spm is a shared tokenizer under an unfamiliar name -- but
+    # only if it is not half of a pair. A lone source.spm is a broken download,
+    # and using it to decode is the silent-gibberish case above.
+    loose = [p for p in sorted(directory.glob("*.spm"))
+             if p.name not in (SOURCE_TOKENIZER, TARGET_TOKENIZER)]
+    if len(loose) == 1:
+        return loose[0], loose[0]
+    return None
 
 
 def is_usable(directory: Path) -> bool:
     """Both halves present. A model without its tokenizer produces gibberish."""
     return ((directory / MODEL_DIR_NAME / "model.bin").is_file()
-            and _tokenizer_in(directory) is not None)
+            and tokenizers_in(directory) is not None)
 
 
 def installed_pairs() -> list[Pair]:
@@ -174,8 +205,16 @@ def install_package(archive: Path, source: str, target: str) -> Path:
             shutil.rmtree(keep, ignore_errors=True)
         keep.mkdir()
         shutil.move(str(root / MODEL_DIR_NAME), str(keep / MODEL_DIR_NAME))
-        tokenizer = _tokenizer_in(root)
-        shutil.move(str(tokenizer), str(keep / "sentencepiece.model"))
+        source_spm, target_spm = tokenizers_in(root)
+        if source_spm == target_spm:
+            shutil.move(str(source_spm), str(keep / SHARED_TOKENIZER_NAMES[0]))
+        else:
+            shutil.move(str(source_spm), str(keep / SOURCE_TOKENIZER))
+            shutil.move(str(target_spm), str(keep / TARGET_TOKENIZER))
+        # The attribution CC-BY requires has to travel with the model.
+        for extra in ("LICENSE", "metadata.json"):
+            if (root / extra).is_file():
+                shutil.move(str(root / extra), str(keep / extra))
         keep.rename(destination)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -210,17 +249,21 @@ class Translator:
         import ctranslate2
         import sentencepiece
 
-        tokenizer = _tokenizer_in(pair.path)
-        if tokenizer is None or not is_usable(pair.path):
+        found = tokenizers_in(pair.path)
+        if found is None or not is_usable(pair.path):
             raise TranslationUnavailable(f"{pair.path} is not a usable model")
+        source_spm, target_spm = found
 
         self.pair = pair
         self.beam_size = beam_size
         self._engine = ctranslate2.Translator(
             str(pair.path / MODEL_DIR_NAME), device="cpu",
             inter_threads=1, intra_threads=threads)
-        self._tokenizer = sentencepiece.SentencePieceProcessor(
-            model_file=str(tokenizer))
+        self._source = sentencepiece.SentencePieceProcessor(
+            model_file=str(source_spm))
+        self._target = (self._source if target_spm == source_spm
+                        else sentencepiece.SentencePieceProcessor(
+                            model_file=str(target_spm)))
         log.info("translation ready: %s to %s", pair.source, pair.target)
 
     def translate(self, text: str) -> str:
@@ -228,15 +271,18 @@ class Translator:
         sentences = split_sentences(text)
         if not sentences:
             return ""
-        batch = [self._tokenizer.encode(s, out_type=str) for s in sentences]
+        batch = [[*self._source.encode(s, out_type=str), EOS] for s in sentences]
         results = self._engine.translate_batch(
             batch, beam_size=self.beam_size,
             max_decoding_length=MAX_DECODING_LENGTH)
-        return " ".join(self._tokenizer.decode(r.hypotheses[0]) for r in results)
+        return " ".join(
+            self._target.decode([t for t in r.hypotheses[0] if t != EOS])
+            for r in results)
 
     def close(self) -> None:
         self._engine = None
-        self._tokenizer = None
+        self._source = None
+        self._target = None
 
 
 class Chain:
