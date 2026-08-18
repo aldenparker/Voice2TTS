@@ -5,6 +5,30 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.1]
+
+### Fixed
+
+- **Speaking quickly meant nothing was said until you stopped.** The endpoint
+  rule waited for 600 ms of silence, and fast speech never leaves that much: on
+  34 seconds of continuous speech the first audio came out at 30 seconds — the
+  hard cap, which cut mid-word. It now comes out at 5.
+
+  Lowering "End-of-speech silence" could not have fixed this. On that audio the
+  speech probability sits at 1.0, only 7% of windows fall below the threshold at
+  all, and *no* gap reaches 600 ms; even at 300 ms there are zero usable cut
+  points. The pauses in fast speech are 100–250 ms.
+
+  So after a few seconds the requirement is eased down, and if no pause arrives
+  the segment is cut at the quietest moment of the last second — between two
+  words rather than mid-vowel — with the remainder carried forward as the start
+  of the next segment. Nothing is lost: 33.7 of 33.9 seconds survived the test.
+
+  Short utterances followed by a real pause behave exactly as before. Two new
+  sliders in Settings → Detection tuning control it, and setting "Start
+  splitting after" to 0 restores the old behaviour entirely.
+
+
 ### Added — Voice Studio (0.6.0, in progress)
 
 - **Record your own voice.** A Studio → Record tab shows one sentence at a time

@@ -659,6 +659,25 @@ def main() -> int:
     check("collect normalises repo URL",
           win._collect() and cfg.updates.repo == "someone/Voice2TTS",
           cfg.updates.repo)
+    # The soft endpoint bounds how long fast speech is held before anything is
+    # spoken. The ceiling must stay above the point where splitting starts, or
+    # the pair describes a window that cannot exist.
+    win.soft_endpoint.set(8.0)
+    win.max_segment.set(4.0)
+    win._collect()
+    check("the segment ceiling is kept above the split point",
+          cfg.vad.max_segment_s > cfg.vad.soft_endpoint_s,
+          f"soft {cfg.vad.soft_endpoint_s}s, ceiling {cfg.vad.max_segment_s}s")
+    win.soft_endpoint.set(3.0)
+    win.max_segment.set(6.0)
+    win._collect()
+    check("sensible values are kept as given",
+          (cfg.vad.soft_endpoint_s, cfg.vad.max_segment_s) == (3.0, 6.0),
+          f"{cfg.vad.soft_endpoint_s}, {cfg.vad.max_segment_s}")
+    win._load_from_config()
+    check("and load back into the sliders",
+          (win.soft_endpoint.get(), win.max_segment.get()) == (3.0, 6.0))
+
     check("collect stores interval", cfg.updates.interval_hours == 12)
     check("collect stores check-on-start", cfg.updates.check_on_start is False)
 

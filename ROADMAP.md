@@ -11,9 +11,9 @@ reason something changed is usually worth more than the plan itself.
 
 ## Status
 
-**Latest release: 0.5.2. In progress: 0.6.0**, the Voice Studio — trainer and
-designer both. The code is complete and untested on real hardware; betas are
-being cut from it as `v0.6.0-beta-N`.
+**Latest release: 0.6.0. In progress: 0.6.1** — the Voice Studio shipped, and 0.6.1 fixes
+the delay fast speech used to cause. Work on 0.7.0 happens on the
+`0.7.0-translation` branch so main stays free for fixes like this one.
 
 Release automation is verified: tagging `vX.Y.Z` or `vX.Y.Z-beta-N` runs lint
 and both test suites, then builds and publishes. Betas go out as GitHub
@@ -266,6 +266,68 @@ sidecar alongside.
 | 2.5 GB pack scares people off | On demand only; the app is fully usable without it |
 | Trained voices sound poor | Audition at checkpoints so quality is visible early |
 | Torch pulls CUDA that conflicts with the GPU pack | Verify during Phase 1; `cuda.py` already preloads by absolute path |
+
+---
+
+## 0.6.1 — Fast speech no longer waits ✅
+
+**The problem.** Speaking quickly never leaves a 600 ms gap, so the endpoint rule
+never fired and nothing was spoken until the speaker stopped or the 30 s cap cut
+them off mid-word.
+
+Measured on 34 s of continuous speech:
+
+| | Before | After |
+|---|---|---|
+| First audio | **30.0 s** (the hard cap) | **5.0 s** |
+| Segments | 2 | 7 |
+| Speech kept | 33.5 s | 33.7 s |
+
+**Lowering `min_silence_ms` could not have fixed it.** On that audio the Silero
+probability sits at 1.0, only 7% of windows fall below the threshold at all, and
+*no* gap reaches 600 ms — at 300 ms there are still zero cut points. The pauses
+in fast speech are 100–250 ms, below anything the old rule could use.
+
+- [x] **Soft endpoint.** Past `soft_endpoint_s` the silence requirement eases
+      from `min_silence_ms` down to `min_silence_floor_ms`, reaching the floor at
+      `max_segment_s`. Eased rather than stepped, so there is no length at which
+      behaviour changes abruptly.
+- [x] **A ceiling that cuts at the quietest moment.** When no pause arrives at
+      all, the segment is cut at the lowest probability in the last second
+      rather than at whatever sample the counter reached — at worst that lands
+      between two words instead of mid-vowel.
+- [x] **The remainder carries forward.** A forced cut is not the end of an
+      utterance: the speaker is still talking, so the tail becomes the start of
+      the next segment. Verified that 33.7 s of 33.9 s survives.
+- [x] Exposed in Settings → Detection tuning, with the ceiling held above the
+      split point so the pair cannot describe an impossible window.
+- [x] `soft_endpoint_s = 0` disables the whole feature — relaxation *and*
+      ceiling. An earlier version left the ceiling armed, which gave a third
+      behaviour that was nobody's intent.
+
+**The guarantee is about short utterances, not all of them.** Anything shorter
+than `soft_endpoint_s` is segmented identically to before, and that is tested.
+Something longer, followed by a real pause, may now end slightly sooner — at a
+phrase boundary, which is the point.
+
+Defaults are 3 s and 6 s: the ceiling is what bounds the wait, so it is set for
+conversation rather than for transcript quality. 6 s still leaves ~5 s of
+context per chunk, well above where recognition starts to suffer. Raise both for
+fewer, longer, better-punctuated chunks.
+
+### Still open
+
+- [ ] **Push-to-talk is unchanged.** A long key press has the same problem, but
+      no VAD runs in that mode, so there are no probabilities to find a quiet
+      moment with. Options: run the VAD alongside PTT purely to find cut points,
+      or cut on signal energy. Less pressing, because releasing the key is a
+      control the speaker already has.
+- [ ] **No context is carried across a cut.** Whisper sees each segment cold, so
+      a sentence split across two segments loses the thread and may come back
+      with odd capitalisation or punctuation. `faster-whisper` accepts an
+      `initial_prompt`; passing the previous segment's tail, plus ~200 ms of
+      audio overlap, should recover most of it. Worth doing before 0.7.0's
+      streaming work, which makes the same problem sharper.
 
 ---
 
