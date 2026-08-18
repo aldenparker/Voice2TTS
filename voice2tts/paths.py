@@ -43,6 +43,11 @@ def cuda_dir() -> Path:
     return cache_dir() / "cuda"
 
 
+def japanese_dir() -> Path:
+    """Where the on-demand Japanese phonemizer is unpacked."""
+    return cache_dir() / "japanese"
+
+
 def whisper_cache() -> Path:
     d = cache_dir() / "whisper"
     d.mkdir(parents=True, exist_ok=True)

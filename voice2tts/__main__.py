@@ -203,6 +203,14 @@ def main(argv: list[str] | None = None) -> int:
     mode = enable_dpi_awareness()
     logging.getLogger(__name__).info("DPI awareness: %s", mode)
 
+    # Optional packs go on the import path before anything asks what this build
+    # can do. Whether a Japanese voice is usable is answered by find_spec, so
+    # asking before this ran would always answer no.
+    from . import jppack
+
+    if jppack.activate():
+        logging.getLogger(__name__).info("Japanese phonemizer available")
+
     from .app import TrayApp
 
     try:

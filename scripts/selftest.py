@@ -2101,6 +2101,77 @@ def _fake_model(root: Path, code: str) -> Path:
     return directory
 
 
+def test_japanese_pack() -> None:
+    """The optional phonemizer download."""
+    print("\n[japanese pack]")
+    import inspect
+    import sys
+    import tempfile
+    import zipfile
+
+    from voice2tts import jppack
+
+    check("the probe module is what piper imports",
+          jppack.PROBE_MODULE == "pyopenjtalk",
+          "anything else would report a pack that does not work as working")
+    names = [name for name, _ in jppack.PACKAGES]
+    check("the dictionary is included", "sudachidict_core" in names, str(names))
+    check("and the phonemizer fork, not the source-only original",
+          "pyopenjtalk-plus" in names,
+          "plain pyopenjtalk publishes no Windows wheels at all")
+
+    # A compiled wheel is built against one Python ABI. PyPI lists cp310 first
+    # for these, and installing that under 3.12 unpacks perfectly and then
+    # cannot import -- the worst kind of failure, because nothing says so until
+    # somebody tries to speak.
+    source = inspect.getsource(jppack._wheel_url)
+    check("the wheel picker matches the running interpreter",
+          "sys.version_info" in source,
+          "otherwise it happily installs a wheel for another Python")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        real_dir = jppack.japanese_dir
+        jppack.japanese_dir = lambda: root
+        try:
+            check("nothing installed to begin with", not jppack.status().installed)
+            check("and activating does nothing", not jppack.activate())
+            check("the path is not polluted", str(root) not in sys.path)
+
+            # A wheel is a zip; unpacking it is what pip --target does.
+            wheel = root / "fake.whl"
+            with zipfile.ZipFile(wheel, "w") as zf:
+                zf.writestr("pyopenjtalk/__init__.py", "# stand-in\n")
+                zf.writestr("pyopenjtalk/data/table.bin", b"\x00" * 32)
+            jppack._extract(wheel, root)
+            check("a wheel unpacks to its package layout",
+                  (root / "pyopenjtalk" / "data" / "table.bin").is_file())
+            check("and now reports installed", jppack.status().installed)
+            check("activating puts it on the path", jppack.activate())
+            check("appended, never prepended",
+                  sys.path[-1] == str(root),
+                  "a pack must not be able to shadow what the app ships")
+            check("activating twice does not duplicate it",
+                  (jppack.activate(), sys.path.count(str(root)))[1] == 1)
+
+            # A wheel that tries to escape its directory must be refused.
+            escape = root / "evil.whl"
+            with zipfile.ZipFile(escape, "w") as zf:
+                zf.writestr("../escaped.py", "x = 1\n")
+            try:
+                jppack._extract(escape, root)
+                check("a wheel cannot write outside the pack", False, "it did")
+            except RuntimeError as exc:
+                check("a wheel cannot write outside the pack", "unsafe" in str(exc))
+
+            check("uninstalling removes it", jppack.uninstall())
+            check("and takes it off the path", str(root) not in sys.path)
+        finally:
+            jppack.japanese_dir = real_dir
+            while str(root) in sys.path:
+                sys.path.remove(str(root))
+
+
 def test_unspeakable_voices() -> None:
     """Voices this build has no phonemizer for must be refused, not crash.
 
@@ -4456,6 +4527,7 @@ def main() -> int:
     test_profiles()
     test_history_and_review()
     test_vad()
+    test_japanese_pack()
     test_unspeakable_voices()
     test_streaming()
     test_streaming_faults()

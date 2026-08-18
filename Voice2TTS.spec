@@ -108,6 +108,7 @@ a = Analysis(
         "voice2tts.perf",
         "voice2tts.translate",
         "voice2tts.streaming",
+        "voice2tts.jppack",
         # Backends chosen by runtime import; Analysis cannot see these.
         "pystray._win32",
         "pynput.keyboard._win32",
