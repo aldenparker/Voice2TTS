@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -16,6 +17,15 @@ from .vad import SAMPLE_RATE
 log = logging.getLogger(__name__)
 
 _PUNCT = re.compile(r"[^\w\s]")
+
+
+@dataclass(frozen=True)
+class TimedText:
+    """A piece of transcript and where it sits in the audio, in seconds."""
+
+    text: str
+    start: float
+    end: float
 
 
 class WhisperEngine:
@@ -95,8 +105,17 @@ class WhisperEngine:
 
     def transcribe(self, audio: np.ndarray) -> str:
         """Transcribe 16 kHz mono float32 audio. Returns "" if nothing usable."""
+        return self.transcribe_timed(audio)[0]
+
+    def transcribe_timed(self, audio: np.ndarray) -> tuple[str, list[TimedText]]:
+        """Transcribe, and also say where each piece sits in the audio.
+
+        Streaming needs the timings: it drops audio it has already committed,
+        and can only cut on a boundary the recogniser itself drew. Sentence mode
+        ignores the second value entirely.
+        """
         if audio is None or len(audio) < SAMPLE_RATE // 10:
-            return ""
+            return "", []
         t0 = time.perf_counter()
         segments, _ = self.model.transcribe(
             audio.astype(np.float32, copy=False),
@@ -111,18 +130,22 @@ class WhisperEngine:
             # Whisper invent continuations of whatever was said before.
             condition_on_previous_text=False,
         )
-        text = " ".join(s.text.strip() for s in segments).strip()
+        # The generator is consumed once, so collect timings on the same pass.
+        timed = [TimedText(text=s.text.strip(), start=float(s.start),
+                           end=float(s.end))
+                 for s in segments if s.text.strip()]
+        text = " ".join(t.text for t in timed).strip()
         text = re.sub(r"\s+", " ", text)
 
         if self._is_noise(text):
             log.info("dropped likely hallucination: %r", text)
-            return ""
+            return "", []
 
         log.info(
             "transcribed %.2f s audio in %.0f ms: %r",
             len(audio) / SAMPLE_RATE, (time.perf_counter() - t0) * 1000, text,
         )
-        return text
+        return text, timed
 
     def _is_noise(self, text: str) -> bool:
         if len(text) < self.cfg.min_chars:

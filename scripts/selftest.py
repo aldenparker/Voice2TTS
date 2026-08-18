@@ -2029,6 +2029,168 @@ def _fake_model(root: Path, code: str) -> Path:
     return directory
 
 
+def test_streaming() -> None:
+    """Recognising while someone is still talking. No model needed."""
+    print("\n[streaming]")
+    from voice2tts import streaming
+    from voice2tts.streaming import StreamingRecognizer, agree
+    from voice2tts.stt import TimedText
+
+    # -- the rule itself -----------------------------------------------------
+    check("agreement is the common prefix",
+          agree(["the", "build", "finished", "but"], ["the", "build", "finished", "and"])
+          == ["the", "build", "finished"])
+    check("nothing agrees with nothing", agree([], ["a"]) == [])
+    check("a shorter pass caps the agreement",
+          agree(["a", "b", "c"], ["a", "b"]) == ["a", "b"])
+    check("a changed first word settles nothing",
+          agree(["the"], ["a"]) == [])
+
+    check("a full stop is a boundary",
+          streaming.phrase_boundary(["Hello", "there.", "How", "are"]) == 2)
+    check("no boundary means hold everything",
+          streaming.phrase_boundary(["no", "ending", "yet"]) == 0)
+    check("closing punctuation still counts",
+          streaming.phrase_boundary(['"Stop."', "Then"]) == 1,
+          "a quote after the full stop must not hide it")
+    check("a comma is a soft boundary",
+          streaming.soft_boundary(["one,", "two", "three"]) == 1)
+
+    # -- a scripted recogniser ----------------------------------------------
+    class FakeEngine:
+        """Returns a prepared transcript per pass, with plausible timings."""
+
+        def __init__(self, script, delay=0.0):
+            self.script = list(script)
+            self.delay = delay
+            self.calls = 0
+            self.saw: list[float] = []
+
+        def transcribe_timed(self, audio):
+            self.saw.append(len(audio) / 16000)
+            text = self.script[min(self.calls, len(self.script) - 1)]
+            self.calls += 1
+            if self.delay:
+                time.sleep(self.delay)
+            # One "segment" per sentence, spread evenly over the audio.
+            pieces, sentences = [], [s for s in text.split(". ") if s]
+            span = (len(audio) / 16000) / max(1, len(sentences))
+            for i, sentence in enumerate(sentences):
+                body = sentence if sentence.endswith(".") else sentence + "."
+                pieces.append(TimedText(text=body, start=i * span,
+                                        end=(i + 1) * span))
+            return text, pieces
+
+    second = np.zeros(16000, dtype=np.float32)
+
+    def drive(rec, passes):
+        """Run `passes` polls, ignoring the timer."""
+        out = []
+        for _ in range(passes):
+            rec.feed(second)
+            rec._last_pass = 0.0          # pretend the interval has elapsed
+            out.append(rec.poll())
+        return out
+
+    # Nothing is spoken until two passes agree AND a sentence closes.
+    rec = StreamingRecognizer(FakeEngine([
+        "The build",
+        "The build finished",
+        "The build finished cleanly.",
+        "The build finished cleanly. Two tests",
+        "The build finished cleanly. Two tests failed.",
+    ]))
+    results = drive(rec, 5)
+    check("the first pass says nothing", results[0].speakable == "",
+          "there is nothing to agree with yet")
+    check("an unstable tail is reported but not spoken",
+          results[1].unstable and not results[1].speakable,
+          f"{results[1].unstable!r} / {results[1].speakable!r}")
+    spoken = [r.speakable for r in results if r.speakable]
+    check("a settled sentence is spoken once it closes",
+          spoken == ["The build finished cleanly."], str(spoken))
+    check("and is not spoken twice",
+          sum(r.speakable.count("The build finished cleanly.")
+              for r in results) == 1,
+          "you cannot un-speak a word, so it must go out exactly once")
+
+    # The tail never gets an agreeing pass, so the end of speech releases it.
+    tail = rec.finish()
+    check("finishing releases what was still held", "Two tests failed." in tail,
+          tail)
+    check("and clears the buffer", rec.buffered_s == 0.0)
+
+    # A sentence that never ends must still come out.
+    long_sentence = " ".join(f"word{i}" for i in range(40))
+    rec = StreamingRecognizer(FakeEngine([long_sentence] * 4),
+                              max_sentence_words=10)
+    spoken = [r.speakable for r in drive(rec, 4) if r.speakable]
+    check("a sentence with no end is still spoken", bool(spoken),
+          "holding forever is worse than a slightly early break")
+
+    # ...and prefers a clause break when there is one.
+    clause = "one two three four five, six seven eight nine ten eleven"
+    rec = StreamingRecognizer(FakeEngine([clause] * 4), max_sentence_words=6)
+    spoken = [r.speakable for r in drive(rec, 4) if r.speakable]
+    check("and breaks at a comma when it can",
+          spoken and spoken[0].endswith("five,"), str(spoken))
+
+    # -- falling behind ------------------------------------------------------
+    rec = StreamingRecognizer(FakeEngine(["hello there."] * 6, delay=0.05),
+                              interval_s=0.25)
+    rec.interval_s = 0.01          # every pass is now "slow"
+    results = drive(rec, 4)
+    check("a machine that cannot keep up says so",
+          any(r.fell_behind for r in results),
+          "pretending otherwise makes the lag worse than sentence mode")
+    check("and it latches, rather than flapping", rec.behind)
+
+    # One slow pass is a hiccup, not a verdict.
+    rec = StreamingRecognizer(FakeEngine(["hello there."] * 6))
+    rec._slow_passes = 1
+    drive(rec, 1)
+    check("a single slow pass is forgiven", not rec.behind,
+          "a page fault is not a hardware verdict")
+
+    # -- trimming ------------------------------------------------------------
+    # Mandatory, not an optimisation: the spike measured the cost running away
+    # at 29 s of unbroken speech.
+    check("the trim point is well below the measured crossover",
+          streaming.TRIM_AFTER_S < 29.0, f"{streaming.TRIM_AFTER_S}s")
+    check("and keeps enough tail for the unstable words",
+          streaming.KEEP_TAIL_S >= 3.0, f"{streaming.KEEP_TAIL_S}s")
+
+    sentences = ". ".join(f"sentence number {i}" for i in range(1, 9)) + "."
+    rec = StreamingRecognizer(FakeEngine([sentences] * 30))
+    for _ in range(20):
+        rec.feed(second)
+        rec._last_pass = 0.0
+        rec.poll()
+    check("a long stream is trimmed rather than growing without bound",
+          rec.buffered_s <= streaming.TRIM_AFTER_S + 1.0,
+          f"{rec.buffered_s:.0f}s buffered after 20s of speech")
+
+    # Trimming must never drop audio for words that have not been spoken --
+    # that would delete the evidence for text still in flux.
+    rec = StreamingRecognizer(FakeEngine([sentences] * 30))
+    for _ in range(20):
+        rec.feed(second)
+    rec._last_pass = 0.0
+    rec._spoken_words = 0        # nothing has gone out yet
+    before = rec.buffered_s
+    rec.poll()
+    check("nothing is trimmed while all of it is still unspoken",
+          rec.buffered_s == before,
+          f"{before:.0f}s -> {rec.buffered_s:.0f}s")
+
+    # -- resetting -----------------------------------------------------------
+    rec = StreamingRecognizer(FakeEngine(["a b c."] * 4))
+    drive(rec, 3)
+    rec.reset()
+    check("reset clears everything", rec.buffered_s == 0.0 and not rec.behind
+          and rec.finish() == "")
+
+
 def test_net() -> None:
     """Downloading: resume, checksums, and refusing to keep a bad file.
 
@@ -3804,6 +3966,7 @@ def main() -> int:
     test_profiles()
     test_history_and_review()
     test_vad()
+    test_streaming()
     test_net()
     test_translate()
     test_model_catalogue()
