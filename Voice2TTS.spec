@@ -106,6 +106,7 @@ a = Analysis(
         "voice2tts.clipboard",
         "voice2tts.loopback",
         "voice2tts.perf",
+        "voice2tts.translate",
         # Backends chosen by runtime import; Analysis cannot see these.
         "pystray._win32",
         "pynput.keyboard._win32",
@@ -119,6 +120,11 @@ a = Analysis(
         "onnx",
         "onnx.numpy_helper",
         "onnx.helper",
+        # translate.py imports sentencepiece inside its functions, and it is
+        # only reachable through voice2tts.translate above -- so without both
+        # names here the Translate tab works in a source run and fails only
+        # once frozen.
+        "sentencepiece",
     ],
     hookspath=[],
     runtime_hooks=[],

@@ -167,6 +167,30 @@ class TextConfig:
 
 
 @dataclass
+class TranslationConfig:
+    # Off unless asked for. Translation is a second model in the hot path and a
+    # download the user has to choose, so it should never appear by surprise.
+    enabled: bool = False
+
+    # What you speak, and what the far end should hear. `source` has to agree
+    # with the recognition language: Whisper's bundled base.en hears English and
+    # nothing else, so anything other than "en" here needs a multilingual model
+    # selected in [stt] first. validate() says so rather than failing silently.
+    source: str = "en"
+    target: str = "de"
+
+    # Pairs OPUS-MT does not publish directly go through this language, at the
+    # cost of a second hop and its compounding errors. English because that is
+    # what almost every pair is published against.
+    pivot: str = "en"
+
+    # Beam 4 costs ~20 ms more than beam 1 on a long sentence for output that
+    # was identical on the sentences measured. Exposed so a slow machine can
+    # trade it away.
+    beam_size: int = 4
+
+
+@dataclass
 class StudioConfig:
     # "I know what I am doing": proceed with training even though the hardware
     # check objected. Under-spec hardware fails by running out of memory, which
@@ -221,6 +245,7 @@ class Config:
     stt: SttConfig = field(default_factory=SttConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
     text: TextConfig = field(default_factory=TextConfig)
+    translation: TranslationConfig = field(default_factory=TranslationConfig)
     profiles: ProfilesConfig = field(default_factory=ProfilesConfig)
     studio: StudioConfig = field(default_factory=StudioConfig)
     updates: UpdateConfig = field(default_factory=UpdateConfig)
@@ -267,20 +292,26 @@ class Config:
             if isinstance(o, dict)
         ]
 
+        def rules(blob: Any) -> list[SubstitutionRule]:
+            return [
+                SubstitutionRule(
+                    pattern=str(r.get("pattern", "")),
+                    replacement=str(r.get("replacement", "")),
+                    enabled=bool(r.get("enabled", True)),
+                    whole_word=bool(r.get("whole_word", True)),
+                    regex=bool(r.get("regex", False)),
+                    case_sensitive=bool(r.get("case_sensitive", False)),
+                )
+                for r in (blob or [])
+                if isinstance(r, dict)
+            ]
+
         text_cfg = section(TextConfig, data.get("text"))
-        raw_rules = (data.get("text") or {}).get("substitutions") or []
-        text_cfg.substitutions = [
-            SubstitutionRule(
-                pattern=str(r.get("pattern", "")),
-                replacement=str(r.get("replacement", "")),
-                enabled=bool(r.get("enabled", True)),
-                whole_word=bool(r.get("whole_word", True)),
-                regex=bool(r.get("regex", False)),
-                case_sensitive=bool(r.get("case_sensitive", False)),
-            )
-            for r in raw_rules
-            if isinstance(r, dict)
-        ]
+        # Both lists need rebuilding, not just the source one: `section` copies
+        # whatever was in the file, which for these is a list of plain dicts.
+        raw_text = data.get("text") or {}
+        text_cfg.substitutions = rules(raw_text.get("substitutions"))
+        text_cfg.target_substitutions = rules(raw_text.get("target_substitutions"))
 
         profiles_cfg = section(ProfilesConfig, data.get("profiles"))
         raw_profiles = (data.get("profiles") or {}).get("entries") or []
@@ -301,6 +332,7 @@ class Config:
             stt=section(SttConfig, data.get("stt")),
             tts=section(TtsConfig, data.get("tts")),
             text=text_cfg,
+            translation=section(TranslationConfig, data.get("translation")),
             profiles=profiles_cfg,
             studio=section(StudioConfig, data.get("studio")),
             updates=section(UpdateConfig, data.get("updates")),
@@ -374,6 +406,22 @@ class Config:
         if self.theme not in ("native", "light", "dark", "system"):
             log.warning("unknown theme %r, using native", self.theme)
             self.theme = "native"
+
+        self.translation.beam_size = max(1, int(self.translation.beam_size))
+        self.translation.source = self.translation.source.strip().lower()
+        self.translation.target = self.translation.target.strip().lower()
+        if self.translation.enabled and self.translation.source == self.translation.target:
+            log.warning("translation is on but %s -> %s is a no-op; turning it off",
+                        self.translation.source, self.translation.target)
+            self.translation.enabled = False
+        # An English-only recognition model cannot hear the language it is being
+        # asked to translate from. Left enabled but said out loud, because the fix
+        # is to change the STT model and the user needs to be told which one.
+        if (self.translation.enabled and self.stt.model.endswith(".en")
+                and self.translation.source != "en"):
+            log.warning(
+                "translating from %r needs a multilingual recognition model; "
+                "%s hears English only", self.translation.source, self.stt.model)
 
     def save(self, path: Path | None = None) -> Path:
         path = path or config_path()

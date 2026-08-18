@@ -422,6 +422,22 @@ class Translator:
         self._target = None
 
 
+def chain_for(source: str, target: str, pivot: str = "en",
+              beam_size: int = DEFAULT_BEAM) -> Chain:
+    """A ready chain for a language pair, or a failure that names the pair.
+
+    Chain itself takes a route, because that is what it needs; callers almost
+    always have two language codes and would otherwise each repeat the routing
+    and write their own version of this message.
+    """
+    pairs = route(source, target, pivot)
+    if not pairs:
+        raise TranslationUnavailable(
+            f"no model installed for {language_name(source)} to "
+            f"{language_name(target)}")
+    return Chain(pairs, beam_size=beam_size)
+
+
 class Chain:
     """One or more hops, so a pivot looks the same as a direct translation."""
 

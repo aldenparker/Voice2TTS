@@ -2140,6 +2140,122 @@ def test_net() -> None:
         server.server_close()
 
 
+def test_pipeline_translation() -> None:
+    """The translation stage inside the pipeline. Needs no audio hardware."""
+    print("\n[translation in the pipeline]")
+    import numpy as np
+
+    from voice2tts.pipeline import Pipeline
+    from voice2tts.substitutions import Rule
+
+    silence = np.zeros(1600, dtype=np.float32)
+
+    class FakeStt:
+        def __init__(self, text):
+            self.text = text
+
+        def transcribe(self, audio):
+            return self.text
+
+    def build(heard, **translation):
+        cfg = load_config()
+        for target in cfg.audio.outputs:
+            target.enabled = False
+        for key, value in translation.items():
+            setattr(cfg.translation, key, value)
+        spoken: list[str] = []
+        pipe = Pipeline(cfg)
+        pipe.stt = FakeStt(heard)
+        pipe.speak = lambda text, _t0=None: spoken.append(text)
+
+        # Observers are only called from the notifier thread, which is not
+        # running here -- that separation is the 0.6.2 fix and worth keeping in
+        # the tests too, so read the queue rather than reaching past it.
+        def drain() -> list[tuple[str, str]]:
+            out = []
+            while not pipe._notices.empty():
+                kind, payload = pipe._notices.get_nowait()
+                if kind == "event":
+                    out.append(payload)
+            return out
+
+        return pipe, drain, spoken
+
+    # Off by default: nothing loads, nothing changes.
+    pipe, drain, spoken = build("hello there")
+    check("translation is off unless asked for", not pipe.cfg.translation.enabled,
+          "a second model and a download should never appear by surprise")
+    pipe._load_translator()
+    check("no chain is built when it is off", pipe.translator is None)
+    pipe._handle_utterance(silence)
+    check("and the text is spoken unchanged", spoken == ["hello there"], str(spoken))
+
+    class FakeChain:
+        pairs = ()
+
+        def __init__(self, result=None, boom=None):
+            self.result, self.boom = result, boom
+            self.seen: list[str] = []
+
+        def translate(self, text):
+            self.seen.append(text)
+            if self.boom:
+                raise self.boom
+            return self.result
+
+        def close(self):
+            pass
+
+    # The order the two rule sets run in is the whole point of the split.
+    pipe, drain, spoken = build("hello there")
+    pipe.substituter.load([Rule(pattern="hello", replacement="greetings")])
+    pipe.target_substituter.load([Rule(pattern="TRANSLATED", replacement="fixed")])
+    chain = FakeChain(result="TRANSLATED text")
+    pipe.translator = chain
+    pipe._handle_utterance(silence)
+    check("source rules run before translation", chain.seen == ["greetings there"],
+          str(chain.seen))
+    check("target rules run after it", spoken == ["fixed text"], str(spoken))
+    kinds = [k for k, _ in drain()]
+    check("the translation is reported", "translated" in kinds, str(kinds))
+
+    # A failure mid-call must not go silent.
+    pipe, drain, spoken = build("hello there")
+    pipe.translator = FakeChain(boom=RuntimeError("model exploded"))
+    pipe._handle_utterance(silence)
+    check("a translation failure still speaks the original",
+          spoken == ["hello there"], str(spoken))
+    events = drain()
+    check("and says so rather than failing quietly",
+          any(k == "warning" and "Translation failed" in m for k, m in events),
+          str(events))
+
+    # An empty result is the other silent failure.
+    pipe, drain, spoken = build("hello there")
+    pipe.translator = FakeChain(result="   ")
+    pipe._handle_utterance(silence)
+    check("an empty translation falls back to the original",
+          spoken == ["hello there"], str(spoken))
+
+    # A missing model must not stop the app starting.
+    pipe, drain, spoken = build("hello there", enabled=True, source="en",
+                                 target="xx")
+    pipe._load_translator()
+    check("a missing model leaves translation off", pipe.translator is None)
+    events = drain()
+    check("and explains why", any(k == "warning" and "Translation off" in m
+                                  for k, m in events), str(events))
+    check("the app is still usable", pipe.state is not None)
+
+    # Same language both ways is a no-op the config refuses to enable.
+    cfg = load_config()
+    cfg.translation.enabled = True
+    cfg.translation.source = cfg.translation.target = "en"
+    cfg.validate()
+    check("translating a language into itself is turned off",
+          not cfg.translation.enabled)
+
+
 def test_model_catalogue() -> None:
     """Finding, fetching and installing translation models."""
     print("\n[model catalogue]")
@@ -3583,6 +3699,7 @@ def main() -> int:
     test_net()
     test_translate()
     test_model_catalogue()
+    test_pipeline_translation()
     test_stt()
     test_device_lists()
     if not no_audio:

@@ -99,6 +99,7 @@ class Pipeline:
         self.segmenter: VadSegmenter | None = None
         self.substituter = Substituter()          # what was misheard
         self.target_substituter = Substituter()   # what is said badly
+        self.translator = None                    # a translate.Chain, when on
         self.apply_text_changes()
         self.last_transcript = ""
         self.output_failures: list[tuple[str, str]] = []
@@ -210,10 +211,36 @@ class Pipeline:
             self.tts = PiperEngine(self.cfg.tts)
             self._emit("info", f"Voice {self.tts.voice_path.stem}")
 
+        self._load_translator()
+
         # Pay cuDNN autotune and ONNX graph setup now, not on the first utterance.
         self._emit("info", "Warming up models...")
         self.stt.warmup()
         self.tts.warmup()
+
+    def _load_translator(self) -> None:
+        """Build the translation chain, or leave it off and say why.
+
+        A missing model must not stop the app starting. Speaking your own words
+        untranslated is a degraded service; refusing to run at all is not a
+        service, and the user cannot download a model from a window that will
+        not open.
+        """
+        self.translator = None
+        cfg = self.cfg.translation
+        if not cfg.enabled:
+            return
+        from . import translate
+
+        try:
+            self.translator = translate.chain_for(
+                cfg.source, cfg.target, pivot=cfg.pivot, beam_size=cfg.beam_size)
+        except translate.TranslationUnavailable as exc:
+            self._emit("warning",
+                       f"Translation off: {exc}. Speech will not be translated.")
+            return
+        hops = " via ".join(p.label for p in self.translator.pairs)
+        self._emit("info", f"Translating {hops}")
 
     def _open_audio(self) -> None:
         assert self.tts is not None
@@ -320,6 +347,9 @@ class Pipeline:
         self.stop()
         self.stt = None
         self.tts = None
+        if self.translator is not None:
+            self.translator.close()
+            self.translator = None
 
     # -- runtime reconfiguration ---------------------------------------------
 
@@ -369,6 +399,18 @@ class Pipeline:
         active += self.target_substituter.load(
             compile_rules(cfg.target_substitutions))
         return active
+
+    def apply_translation_changes(self) -> None:
+        """Rebuild the chain after a settings change.
+
+        Called on the interface thread, and loading a model takes ~200 ms, so
+        this is only worth doing when something actually changed -- which the
+        caller decides, because it is the one that knows what the user edited.
+        """
+        previous = self.translator
+        self._load_translator()
+        if previous is not None and previous is not self.translator:
+            previous.close()
 
     def apply_vad_changes(self) -> None:
         """Ask the segmenter thread to rebuild, rather than swapping it here.
@@ -628,6 +670,29 @@ class Pipeline:
                 if self._running.is_set():
                     self._set_state(State.IDLE)
 
+    def _translate(self, text: str) -> str | None:
+        """Translate, or keep going untranslated. None means drop the utterance.
+
+        A translation failure mid-call is not worth going silent over, so the
+        original text is spoken instead -- but it is said out loud in the event
+        log, because otherwise the far end quietly starts hearing English again
+        and nobody knows why.
+        """
+        assert self.translator is not None
+        started = time.perf_counter()
+        try:
+            translated = self.translator.translate(text)
+        except Exception as exc:  # falling back beats going silent
+            log.exception("translation failed")
+            self._emit("warning", f"Translation failed ({exc}); speaking as heard")
+            return text
+        if not translated.strip():
+            log.warning("translation of %r came back empty", text[:60])
+            return text
+        self._emit("translated",
+                   f"{translated}  [{(time.perf_counter() - started) * 1000:.0f} ms]")
+        return translated
+
     def _handle_utterance(self, audio: np.ndarray) -> None:
         assert self.stt is not None
         self._set_state(State.THINKING)
@@ -645,7 +710,10 @@ class Pipeline:
         # applied while the text is still in the language that was spoken.
         spoken = self.substituter.apply(text)
 
-        # Translation will go here, between the two rule sets.
+        if self.translator is not None:
+            spoken = self._translate(spoken)
+            if spoken is None:
+                return
 
         # Target rules last: they fix what the VOICE says badly, which is a
         # property of the output language.
