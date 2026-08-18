@@ -584,22 +584,26 @@ Which reframes the feature: it is worth building, but as a latency *smoother*,
 not a latency *floor remover*, and the interface should not promise more.
 
 - [x] **Spike it before building.** Done; see above.
-- [ ] `streaming.py` — a growing buffer, a scheduled re-transcribe, and the
+- [x] `streaming.py` — a growing buffer, a scheduled re-transcribe, and the
       agreement rule as a pure function over two token lists, so it can be
       tested without a model
-- [ ] Speak only stable text, buffered to a phrase boundary
-- [ ] **Trim the committed prefix out of the buffer.** Promoted from "not
-      mentioned" to mandatory by the measurement above: without it the mode
-      stops keeping up at 29 s (GPU) or 43 s (CPU) of continuous speech
-- [ ] A hard fallback to segmented mode when a pass takes longer than the
-      interval — the backstop for when trimming is not enough
-- [ ] Mode selector: push to talk / automatic / **streaming**, with the compute
-      cost stated plainly next to it — ~0.5x realtime continuously, on CPU *or*
-      GPU, and honestly described as improving the typical delay rather than
-      the worst one
-- [ ] Interaction with translation: a translator sees a stable prefix rather
-      than a whole sentence, and translation quality depends heavily on having
-      the whole clause. Very likely translation must stay on sentence
+- [x] Speak only stable text, buffered to a phrase boundary
+- [x] **Trim the committed prefix out of the buffer.** Both the trim point and
+      the poll interval now follow the *measured* cost rather than a constant:
+      the shipped default is `small.en` once the GPU pack is installed, which
+      costs ~100 ms per second of buffer against `base.en`'s ~35 ms, and no
+      single threshold suited both.
+- [x] A hard fallback to sentence mode, which also **discards the utterance the
+      segmenter accumulated in parallel** — found in testing: without that, the
+      handover re-spoke everything already said, which is the exact fault the
+      soft endpoint was reverted for.
+- [x] Mode selector, with the cost stated next to it. Not a third *trigger*
+      mode as originally sketched: it is orthogonal to push-to-talk, so it sits
+      on Recognition as "when to speak" and pairs with any trigger that has a
+      VAD.
+- [x] Interaction with translation: confirmed as expected, so with translation
+      on, streaming holds each sentence to its full stop rather than releasing
+      clause fragments. Translation stays on sentence
       boundaries even when recognition does not — measure before assuming
       either way.
 

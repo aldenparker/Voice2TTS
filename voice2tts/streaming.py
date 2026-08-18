@@ -139,11 +139,17 @@ class StreamingRecognizer:
 
     def __init__(self, engine, interval_s: float = DEFAULT_INTERVAL_S,
                  max_sentence_words: int = 25,
-                 max_interval_s: float = MAX_INTERVAL_S):
+                 max_interval_s: float = MAX_INTERVAL_S,
+                 sentences_only: bool = False):
         self.engine = engine
         self.interval_s = max(0.25, interval_s)
         self.max_interval_s = max(self.interval_s, max_interval_s)
         self.max_sentence_words = max_sentence_words
+        # Translation is done a sentence at a time, and a translator handed half
+        # a clause produces something fluent and wrong rather than an error. So
+        # when translating, wait for a real full stop however long it takes --
+        # the alternative is worse than the delay.
+        self.sentences_only = sentences_only
         # Stretches towards max_interval_s on a slower model or machine.
         self._interval_now = self.interval_s
 
@@ -269,6 +275,8 @@ class StreamingRecognizer:
             return ""
 
         take = phrase_boundary(pending)
+        if not take and self.sentences_only:
+            return ""
         if not take and len(pending) >= self.max_sentence_words:
             # A long sentence with no end in sight: a clause break will do, and
             # failing that just say it, because holding forever is worse.

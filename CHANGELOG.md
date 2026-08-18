@@ -7,6 +7,27 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Two recognition modes**, chosen in Settings → Recognition, because they
+  serve different purposes rather than being a fast setting and a slow one:
+
+  - **Wait for a sentence** — the default and what the app has always done.
+    Waits for a pause, then speaks the whole utterance with its natural
+    intonation. Costs nothing while you are quiet.
+  - **Speak while talking** — recognises as you go and speaks each phrase once
+    it settles, so a long stretch does not leave the other side in silence.
+    Typically runs about 2 s behind you, and costs roughly half a processor core
+    for as long as anyone is speaking.
+
+  A phrase is only spoken once two consecutive readings agree on it. That
+  matters: reading four seconds of "the tests are still failing", Whisper
+  produced an obscenity and corrected itself a second later. The word was never
+  spoken, because the two readings never agreed.
+
+  Measured, and against the obvious assumption: **a GPU does not make streaming
+  cheaper** (0.51x realtime on CUDA against 0.49x on CPU). If a machine cannot
+  keep up, the readings are spread further apart first, and past the point where
+  that beats simply waiting, it switches to sentence mode and says so.
+
 - **Live translation.** Speak one language, have the far end hear another,
   entirely on this machine. Settings → **Translate** picks the pair, downloads
   the models and says up front why a combination will not work.
@@ -33,6 +54,13 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 - The Translate tab names a voice that speaks the target language and switches
   to it with one button, rather than only warning about the mismatch.
+
+### Removed
+
+- **The soft endpoint that split continuous speech into segments** (0.6.1). In
+  use it cut mid-thought and the app talked over itself. Waiting for a real
+  pause is back, and is now one of the two modes above -- which is what that
+  change was reaching for and the wrong way to get it.
 
 ### Fixed
 

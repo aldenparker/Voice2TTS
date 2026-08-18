@@ -2137,6 +2137,16 @@ def test_streaming() -> None:
     check("and breaks at a comma when it can",
           spoken and spoken[0].endswith("five,"), str(spoken))
 
+    # Translating a clause fragment produces something fluent and wrong, so
+    # while translating it holds out for a real full stop.
+    rec = StreamingRecognizer(FakeEngine([long_sentence] * 4),
+                              max_sentence_words=10, sentences_only=True)
+    spoken = [r.speakable for r in drive(rec, 4) if r.speakable]
+    check("when translating, an unfinished sentence is held", not spoken,
+          str(spoken))
+    tail = rec.finish()
+    check("and released when the speaker stops", bool(tail), tail[:40])
+
     # -- falling behind ------------------------------------------------------
     # A pass slower than the ceiling: no room left to stretch the interval.
     # 0.25 s is the floor the constructor enforces, so the delay has to clear it.

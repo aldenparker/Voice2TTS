@@ -657,8 +657,11 @@ class Pipeline:
         from .streaming import StreamingRecognizer
 
         assert self.stt is not None
-        self.streamer = StreamingRecognizer(self.stt)
-        log.info("streaming recognition started")
+        # A translator handed a clause fragment produces fluent nonsense, so
+        # while translating this waits for a real sentence end.
+        translating = self.translator is not None
+        self.streamer = StreamingRecognizer(self.stt, sentences_only=translating)
+        log.info("streaming recognition started (sentences only: %s)", translating)
 
         while self._running.is_set():
             try:

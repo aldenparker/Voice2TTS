@@ -96,6 +96,48 @@ Right-click for Start/Stop, mode, **Speak text…**, **Settings** and **Setup wi
 The hotkey is **not** suppressed, so it still reaches whatever app has focus. Pick a
 combo you don't otherwise use, especially in games.
 
+### When it speaks
+
+Settings → **Recognition** offers two modes. They are genuinely different jobs,
+not a fast setting and a slow one, so pick by what you are doing:
+
+| | Wait for a sentence | Speak while talking |
+|---|---|---|
+| Speaks | the whole utterance, after you pause | each phrase as it settles |
+| Delay | however long you keep talking | typically ~2 s behind you |
+| Intonation | natural — a whole sentence at once | flatter, a phrase at a time |
+| Cost while speaking | nothing | ~half a processor core |
+| Works with push-to-talk | yes | no — it needs automatic detection |
+
+**Wait for a sentence** is the default and the right choice for most use. You
+say something, you pause, the far end hears it properly phrased.
+
+**Speak while talking** suits a long uninterrupted stretch — presenting,
+explaining, reading something out — where waiting for the end would leave the
+other side in silence for half a minute.
+
+How it works: the recogniser re-reads the last few seconds about once a second,
+and whatever two consecutive readings agree on is treated as settled and spoken.
+Agreement is the safeguard. Whisper genuinely does change its mind — reading
+four seconds of *"the tests are still failing"* it produced an obscenity, then
+corrected itself a second later once more context arrived. That word was never
+spoken, because the two readings never agreed on it.
+
+Two things worth knowing before you choose it:
+
+- **A GPU does not make it cheaper.** Measured at 0.51× realtime on CUDA against
+  0.49× on CPU. Decoding a long transcript is a chain of small dependent steps,
+  so it is waiting on latency rather than on arithmetic and there is nothing for
+  a GPU to speed up.
+- **If your machine cannot keep up, it says so and stops.** It first spreads the
+  readings further apart; past the point where that would be slower than simply
+  waiting for a pause, it switches to sentence mode and tells you. It does not
+  quietly keep pretending.
+
+With translation on, it holds each sentence until the full stop rather than
+speaking part of it — a translator given half a clause produces something
+fluent and wrong.
+
 ### Multiple outputs
 
 Settings → Audio holds a list of outputs. Add as many as you like; each has its own
@@ -477,6 +519,7 @@ speakers and no microphone.
       vad.py          Silero VAD + endpointing state machine
       stt.py          faster-whisper wrapper
       tts.py          Piper wrapper
+      streaming.py    recognising while someone is still speaking
       translate.py    OPUS-MT models: catalogue, install, translation
       output.py       multi-device fan-out
       hotkey.py       global hotkey with press/release
