@@ -2483,31 +2483,81 @@ def test_updates() -> None:
               app_dir not in path.parents and path != app_dir, str(path))
 
 
+def _reach(what: str, call, attempts: int = 3, pause: float = 2.0):
+    """Run a live network call, retrying transient failures.
+
+    Returns (value, unreachable_reason). These checks exist to confirm that OUR
+    parsing still matches what the service actually publishes -- a reset socket
+    says nothing about that, so a connection that never comes up is reported as
+    unreachable and skipped rather than failing the run. A release must not
+    hinge on somebody else's uptime, and CI lost a build to
+    "[WinError 10054] An existing connection was forcibly closed by the remote
+    host".
+
+    A 4xx other than 429 is NOT treated as transient: that means the URL we
+    hardcode is wrong, which is our bug and worth failing over.
+    """
+    import urllib.error
+
+    last = ""
+    for attempt in range(attempts):
+        try:
+            return call(), None
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500 and exc.code != 429:
+                raise
+            last = f"HTTP {exc.code}"
+        except (TimeoutError, urllib.error.URLError, ConnectionError, OSError) as exc:
+            last = str(exc)
+        if attempt + 1 < attempts:
+            time.sleep(pause * (attempt + 1))
+    return None, f"could not reach {what} after {attempts} tries: {last}"
+
+
 def test_network() -> None:
     """Live checks against VB-Audio and HuggingFace. Needs internet."""
     print("\n[network]")
+    # A non-transient HTTP error is our bug -- the address we ship is wrong --
+    # so it fails rather than skips. Caught here rather than left to propagate,
+    # because an exception out of a test takes the whole run down with it and a
+    # readable FAIL is more use than a traceback.
+    import urllib.error
+
     from voice2tts import cable, voices
 
     try:
-        url, source = cable.resolve_download_url()
+        resolved, unreachable = _reach("the VB-Audio download page",
+                                       cable.resolve_download_url)
+    except urllib.error.HTTPError as exc:
+        check("cable download URL resolves", False,
+              f"HTTP {exc.code} -- the address in cable.py may be wrong")
+        resolved, unreachable = None, None
+    if unreachable:
+        print(f"  SKIP  cable download URL ({unreachable})")
+    elif resolved is not None:
+        url, source = resolved
         check("cable download URL resolves",
               url.lower().endswith(".zip"), f"{source}: {url.rsplit('/', 1)[-1]}")
-    except Exception as exc:  # noqa: BLE001
-        check("cable download URL resolves", False, str(exc))
 
     try:
-        catalogue = voices.fetch_catalogue()
-        check("voice catalogue fetched", len(catalogue) > 50, f"{len(catalogue)} voices")
-        english = voices.filter_catalogue(catalogue, language_prefix="en_US")
-        check("catalogue filters by language", len(english) > 5, f"{len(english)} en_US")
-        keys = {e.key for e in catalogue}
-        missing = [v for v in voices.BUNDLED if v not in keys]
-        check("bundled voices exist in catalogue", not missing, str(missing))
-        sized = [e for e in catalogue if e.size_mb > 0]
-        check("catalogue reports sizes", len(sized) > len(catalogue) // 2,
-              f"{len(sized)}/{len(catalogue)}")
-    except Exception as exc:  # noqa: BLE001
-        check("voice catalogue fetched", False, str(exc))
+        catalogue, unreachable = _reach("the voice catalogue",
+                                        voices.fetch_catalogue)
+    except urllib.error.HTTPError as exc:
+        check("voice catalogue fetched", False,
+              f"HTTP {exc.code} -- CATALOGUE_URL in voices.py may be wrong")
+        return
+    if unreachable:
+        print(f"  SKIP  voice catalogue ({unreachable})")
+        return
+    check("voice catalogue fetched", len(catalogue) > 50, f"{len(catalogue)} voices")
+    english = voices.filter_catalogue(catalogue, language_prefix="en_US")
+    check("catalogue filters by language", len(english) > 5, f"{len(english)} en_US")
+    keys = {e.key for e in catalogue}
+    missing = [v for v in voices.BUNDLED if v not in keys]
+    check("bundled voices exist in catalogue", not missing, str(missing))
+    sized = [e for e in catalogue if e.size_mb > 0]
+    check("catalogue reports sizes", len(sized) > len(catalogue) // 2,
+          f"{len(sized)}/{len(catalogue)}")
 
 
 def test_pipeline_end_to_end() -> None:
