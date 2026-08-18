@@ -1952,11 +1952,11 @@ def test_vad() -> None:
     check("segmented speech from silence", len(utterances) >= 1,
           f"{len(utterances)} utterance(s), {total:.2f}s of {len(audio)/16000:.2f}s")
 
-    # -- the soft endpoint ---------------------------------------------------
-    # Someone speaking quickly never leaves a 600 ms gap, so the endpoint rule
-    # never fired and nothing was spoken until they stopped. Measured on this
-    # sample: probability sits at 1.0, no gap reaches 600 ms, and lowering
-    # min_silence_ms to 300 still yields zero cut points.
+    # -- continuous speech waits for a real pause ----------------------------
+    # 0.6.1 added a soft endpoint that cut continuous speech into segments
+    # instead. It was reverted for 0.7.0: in use it split mid-thought and made
+    # the app talk over itself. Waiting for the pause is now one of two explicit
+    # modes -- see streaming.py for the other.
     def segment(cfg, source):
         seg = VadSegmenter(cfg, preroll_ms=300, max_utterance_s=30)
         pieces, times = [], []
@@ -1971,66 +1971,29 @@ def test_vad() -> None:
             times.append(len(source) / 16000)
         return pieces, times
 
-    continuous = np.tile(audio, 4)
-    off = VadConfig(soft_endpoint_s=0.0)
     on = VadConfig()
+    continuous = np.tile(audio, 4)
+    pieces, at = segment(on, continuous)
+    check("continuous speech is held until the speaker stops",
+          at[0] > 20.0, f"first audio at {at[0]:.1f}s")
+    check("and arrives whole rather than in pieces", len(pieces) <= 2,
+          f"{len(pieces)} pieces")
 
-    was, was_at = segment(off, continuous)
-    now, now_at = segment(on, continuous)
-
-    check("without it, continuous speech waits for the hard cap",
-          was_at[0] > 20.0, f"first audio at {was_at[0]:.1f}s")
-    check("the soft endpoint cuts continuous speech into segments",
-          len(now) > len(was), f"{len(now)} vs {len(was)}")
-    check("and gets audio out far sooner", now_at[0] < was_at[0] / 3,
-          f"{now_at[0]:.1f}s vs {was_at[0]:.1f}s")
-    check("no segment outruns the ceiling",
-          max(len(p) for p in now) / 16000 <= on.max_segment_s + 1.0,
-          f"longest {max(len(p) for p in now) / 16000:.1f}s "
-          f"(ceiling {on.max_segment_s}s)")
-
-    # Cutting must CARRY THE REST FORWARD, not drop it -- the speaker has not
-    # stopped, so anything after the cut is still speech they expect to be said.
-    kept = sum(len(p) for p in now) / 16000
-    check("cutting loses no speech", kept > len(continuous) / 16000 * 0.97,
-          f"{kept:.1f}s of {len(continuous) / 16000:.1f}s")
-
-    # A short utterance followed by a real pause must be untouched: the whole
-    # point is that ordinary speech behaves as before.
+    # A short utterance followed by a real pause ends on the pause, which is the
+    # behaviour this mode exists to provide.
     gap = np.zeros(int(16000 * 0.9), dtype=np.float32)
     short = audio[:16000 * 2]
     polite = np.concatenate([np.zeros(8000, np.float32), short, gap, short, gap])
-    before, before_at = segment(off, polite)
-    after, after_at = segment(on, polite)
-    check("short utterances with real pauses are unaffected",
-          [len(p) for p in before] == [len(p) for p in after]
-          and before_at == after_at,
-          f"{[round(t, 2) for t in before_at]} vs {[round(t, 2) for t in after_at]}")
-
-    check("turning it off restores the old behaviour exactly",
-          segment(VadConfig(soft_endpoint_s=0.0), continuous)[1] == was_at)
-
-    # The relaxation itself: constant, then easing down, never below the floor.
-    probe = VadSegmenter(on, preroll_ms=300, max_utterance_s=30)
-    from voice2tts.vad import WINDOW_MS
-
-    required = []
-    for seconds in (0, 1, 2, 3, 4, 5, 6, 8):
-        probe._buf = [np.zeros(WINDOW, np.float32)] * int(seconds * 1000 / WINDOW_MS)
-        required.append(probe._required_silence())
-    check("the requirement never rises", required == sorted(required, reverse=True),
-          str(required))
-    check("it starts at the normal rule",
-          required[0] == on.min_silence_ms // WINDOW_MS, str(required[:2]))
-    check("and never drops below the floor",
-          min(required) >= on.min_silence_floor_ms // WINDOW_MS,
-          f"min {min(required)} windows")
+    spoken, spoken_at = segment(on, polite)
+    check("a real pause ends the utterance", len(spoken) == 2,
+          f"{len(spoken)} utterances at {[round(t, 2) for t in spoken_at]}")
+    check("and it does not wait for the hard cap", spoken_at[0] < 5.0,
+          f"first at {spoken_at[0]:.1f}s")
 
     # -- suspending while the app speaks -------------------------------------
     # The pipeline stops feeding windows while its own voice is playing. That
-    # used to call reset(), which discarded the buffer -- including the tail a
-    # mid-speech split deliberately carries forward. Speech captured BEFORE
-    # playback started was real and was going to be said.
+    # used to call reset(), which discarded the buffer outright. Speech captured
+    # BEFORE playback started was real and was going to be said.
     seg = VadSegmenter(on, preroll_ms=300, max_utterance_s=30)
     for i in range(0, 16000 * 2, WINDOW):
         seg.process(audio[i:i + WINDOW])
