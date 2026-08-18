@@ -154,11 +154,35 @@ def _installer_asset(entry: dict) -> tuple[dict | None, dict | None]:
     return installer, checksum
 
 
+# What an application release tag looks like: v1.2.3 or v1.2.3-beta-4. Anything
+# else in the repository's releases is not something we can install.
+_APP_TAG_RE = re.compile(r"^v?\d+\.\d+\.\d+(?:-beta-\d+)?$")
+
+
 def _tag_version(entry: dict) -> str:
     return str(entry.get("tag_name") or "").lstrip("vV")
 
 
-def pick_newest(entries: list[dict]) -> dict | None:
+def is_app_release(entry: dict) -> bool:
+    """Whether this release is a build of the app, rather than something else.
+
+    The translation models are published as a release of their own, under a
+    `models-N` tag. GitHub's /releases/latest returns the newest release that is
+    not a draft or a pre-release -- which was the models one -- and "models-2"
+    parses to a version below everything, so every user was told they were up to
+    date forever. The stable channel was dead and said nothing.
+    """
+    if entry.get("draft"):
+        return False
+    if not _APP_TAG_RE.match(str(entry.get("tag_name") or "")):
+        return False
+    # An installer is what makes it installable; a release without one cannot be
+    # offered even if the tag looks right.
+    return _installer_asset(entry)[0] is not None
+
+
+def pick_newest(entries: list[dict],
+                include_prereleases: bool = False) -> dict | None:
     """The newest usable release in a listing, by version rather than by date.
 
     Three things are filtered out, each for its own reason:
@@ -175,14 +199,13 @@ def pick_newest(entries: list[dict]) -> dict | None:
     """
     best: dict | None = None
     for entry in entries or []:
-        if entry.get("draft"):
+        if not is_app_release(entry):
+            log.debug("skipping %r: not an installable app release",
+                      entry.get("tag_name"))
+            continue
+        if entry.get("prerelease") and not include_prereleases:
             continue
         version = _tag_version(entry)
-        if not version:
-            continue
-        if _installer_asset(entry)[0] is None:
-            log.debug("skipping %s: no installer asset", version)
-            continue
         if best is None or parse_version(version) > parse_version(_tag_version(best)):
             best = entry
     return best
@@ -209,10 +232,16 @@ def check(repo: str, timeout: float = 15.0,
           include_prereleases: bool = False) -> Release | None:
     """Ask GitHub for the newest release. Returns None if it is not newer.
 
-    With `include_prereleases`, betas are considered too. That needs the full
-    listing rather than /releases/latest, which excludes them by design -- and
-    that exclusion is precisely what keeps betas away from everyone who has not
-    opted in, so the two paths are deliberately separate.
+    Both channels read the full listing and filter it here, rather than leaning
+    on /releases/latest for the stable one. That endpoint means "newest release
+    that is not a draft or a pre-release", which is not the same as "newest
+    release of the app": publishing the translation models as their own release
+    made THAT the latest, and since "models-2" parses below every real version,
+    every user on the stable channel was told they were up to date forever.
+
+    Filtering here also means the rule that keeps betas away from people who did
+    not ask for them is written down in one place instead of being a property of
+    somebody else's endpoint.
 
     Raises on network or API failure so callers can distinguish "up to date" from
     "could not tell".
@@ -223,16 +252,13 @@ def check(repo: str, timeout: float = 15.0,
             "Set it in Settings -> Updates."
         )
 
-    if include_prereleases:
-        listing = _fetch(RELEASES_TEMPLATE.format(repo=repo), repo, timeout)
-        if not isinstance(listing, list):
-            raise RuntimeError(f"Unexpected release listing for {repo}")
-        entry = pick_newest(listing)
-        if entry is None:
-            log.info("no installable release found for %s", repo)
-            return None
-    else:
-        entry = _fetch(API_TEMPLATE.format(repo=repo), repo, timeout)
+    listing = _fetch(RELEASES_TEMPLATE.format(repo=repo), repo, timeout)
+    if not isinstance(listing, list):
+        raise RuntimeError(f"Unexpected release listing for {repo}")
+    entry = pick_newest(listing, include_prereleases=include_prereleases)
+    if entry is None:
+        log.info("no installable release found for %s", repo)
+        return None
 
     version = _tag_version(entry) or "0"
     if not is_newer(version):

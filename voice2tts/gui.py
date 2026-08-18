@@ -2145,6 +2145,12 @@ class SettingsWindow(tk.Toplevel):
             )
             return
         self.cfg.updates.repo = repo
+        # Take the beta opt-in from the checkbox, not from the saved config.
+        # The repository was already read from its widget, so reading this one
+        # from the config meant ticking "include pre-releases" and pressing
+        # Check did nothing until you also pressed Apply -- which looks exactly
+        # like beta checking being broken.
+        self.cfg.updates.include_prereleases = bool(self.beta_var.get())
         self.cfg.validate()
         self.update_btn.config(state="disabled")
         self.update_status.config(text="Checking...")

@@ -69,6 +69,22 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Update checking was dead on the stable channel, and the beta checkbox did
+  nothing until you pressed Apply.** Two separate faults with the same symptom:
+
+  Publishing the translation models as their own GitHub release made *that* the
+  repository's "latest release" — the endpoint means "newest thing that is not a
+  draft or a pre-release", which the models release was. `models-2` parses below
+  every real version, so every user was told they were up to date, permanently.
+  Update checking now reads the full release listing and filters it here, and
+  only a `vX.Y.Z` or `vX.Y.Z-beta-N` tag with an installer attached counts as a
+  build of the app. The models release is also published as a pre-release now,
+  so it stops claiming to be the latest.
+
+  Separately, *Check for updates* read the repository from its text box but the
+  pre-release opt-in from the saved config — so ticking the box and pressing
+  Check silently checked the stable channel. It reads the checkbox now.
+
 - **The language pickers only offered languages you already had models for**, so
   you could not choose German until you had German and could not get German
   without choosing it. They now list every language, with names.

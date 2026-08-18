@@ -136,9 +136,20 @@ jobs:
           # to the app, so a run that dies part way through leaves the previous
           # catalogue intact rather than a half-published one.
           if gh release view "$TAG" >/dev/null 2>&1; then
+            # Also on the update path, so re-running fixes a release that was
+            # published before this flag existed. models-2 went out as a normal
+            # release and GitHub duly called it the latest one.
+            gh release edit "$TAG" --prerelease
             gh release upload "$TAG" dist/mt/*.zip dist/mt/*.zip.sha256 --clobber
           else
-            gh release create "$TAG" dist/mt/*.zip dist/mt/*.zip.sha256               --title "Translation models" --notes-file notes.md
+            # --prerelease so GitHub never calls this the "latest release".
+            # That endpoint means "newest thing that is not a draft or a
+            # pre-release", and when the models release took that spot, every
+            # user on the stable channel was told they were up to date forever.
+            # The app filters non-app releases out too; this keeps the
+            # repository page honest as well.
+            gh release create "$TAG" dist/mt/*.zip dist/mt/*.zip.sha256 \
+              --title "Translation models" --notes-file notes.md --prerelease
           fi
           gh release upload "$TAG" dist/mt/manifest.json --clobber
 

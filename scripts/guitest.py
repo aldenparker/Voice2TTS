@@ -9,6 +9,7 @@ Does not load Whisper or Piper -- this is purely about the Tk construction path.
 from __future__ import annotations
 
 import sys
+import time
 import tkinter as tk
 from pathlib import Path
 
@@ -17,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from voice2tts import devices as devices_mod  # noqa: E402
 from voice2tts import translate  # noqa: E402
+from voice2tts import updater as updater_mod  # noqa: E402
 from voice2tts.config import OutputTarget, load_config  # noqa: E402
 from voice2tts.gui import SettingsWindow  # noqa: E402
 from voice2tts.icon import make_icon  # noqa: E402
@@ -1056,6 +1058,41 @@ def main() -> int:
     check("the checkbox reflects a saved opt-in", win.beta_var.get() is True)
     cfg.updates.include_prereleases = False
     win._load_from_config()
+
+    # Ticking "include pre-releases" and pressing Check used to do nothing until
+    # Apply was pressed too: the repository was read from its widget but the
+    # opt-in from the saved config. That looks exactly like beta checking being
+    # broken, which is how it was reported.
+    #
+    # Checked on the config rather than on the network call, so nothing async
+    # has to settle: _check_updates writes the widget through before it spawns.
+    asked: list[bool] = []
+    real_check, real_done = updater_mod.check, win._check_done
+    win._check_done = lambda release, error: None      # leave the status alone
+
+    def spy(repo, timeout=15.0, include_prereleases=False):
+        asked.append(include_prereleases)
+        return None
+
+    updater_mod.check = spy
+    try:
+        cfg.updates.include_prereleases = False   # the saved value says no
+        win.beta_var.set(True)                    # the checkbox says yes
+        win._check_updates()
+        check("checking reads the checkbox, not the last saved value",
+              cfg.updates.include_prereleases is True,
+              "otherwise it silently checks the stable channel")
+        deadline = time.time() + 5
+        while not asked and time.time() < deadline:
+            root.update()
+            time.sleep(0.02)
+        check("and passes it to the update check", asked == [True], str(asked))
+    finally:
+        updater_mod.check = real_check
+        win._check_done = real_done
+    win.beta_var.set(False)
+    win.update_btn.config(state="normal")
+    win.update_status.config(text="")
 
     fake = updater.Release(
         version="9.9.9", tag="v9.9.9", notes="Test notes.",

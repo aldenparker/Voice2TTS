@@ -3495,13 +3495,47 @@ def test_updates() -> None:
     listing = [entry("v0.6.0-beta-1", prerelease=True),
                entry("v0.5.2"),
                entry("v0.6.0-beta-2", prerelease=True)]
-    picked = updater.pick_newest(listing)
-    check("the newest beta is picked from a listing",
+    # Selecting a beta now requires asking for one. Previously the caller had
+    # to remember to filter, which is how the models release -- not a beta, not
+    # an app build at all -- ended up being considered.
+    picked = updater.pick_newest(listing, include_prereleases=True)
+    check("the newest beta is picked when betas are wanted",
           picked and picked["tag_name"] == "v0.6.0-beta-2",
-          str(picked and picked["tag_name"]))
+          picked and picked["tag_name"])
+    stable = updater.pick_newest(listing)
+    check("and never when they are not",
+          stable and stable["tag_name"] == "v0.5.2",
+          stable and stable["tag_name"])
 
-    # GitHub orders by creation date. A patch to an older series published after
-    # a newer release would come back first and must not win.
+    # THE fault: the translation models are published as a release of their
+    # own, and GitHub's /releases/latest means "newest thing that is not a
+    # draft or a pre-release" -- which was the models one. "models-2" parses
+    # below every real version, so every user on the stable channel was told
+    # they were up to date, forever.
+    models = {"tag_name": "models-2", "draft": False, "prerelease": False,
+              "body": "", "html_url": "https://example.invalid/models",
+              "assets": [{"name": "en_de.zip", "size": 1,
+                          "browser_download_url": "https://example.invalid/z"}]}
+    check("a models release is not an app release",
+          not updater.is_app_release(models))
+    check("an app release is", updater.is_app_release(entry("v0.6.2")))
+    check("nor is a tag that is not a version",
+          not updater.is_app_release(entry("nightly")),
+          "only vX.Y.Z and vX.Y.Z-beta-N are builds of the app")
+    check("nor an app tag with no installer attached",
+          not updater.is_app_release(entry("v9.9.9", asset=False)),
+          "newer, but there is nothing to install")
+
+    poisoned = [models, entry("v0.6.2"), entry("v0.7.0-beta-2", prerelease=True)]
+    chosen = updater.pick_newest(poisoned)
+    check("the models release cannot become the offered update",
+          chosen and chosen["tag_name"] == "v0.6.2",
+          chosen and chosen["tag_name"])
+    chosen = updater.pick_newest(poisoned, include_prereleases=True)
+    check("and does not hide a beta either",
+          chosen and chosen["tag_name"] == "v0.7.0-beta-2",
+          chosen and chosen["tag_name"])
+
     out_of_order = [entry("v0.5.3"), entry("v0.9.0"), entry("v0.5.4")]
     check("selection goes by version, not by the order GitHub returns",
           updater.pick_newest(out_of_order)["tag_name"] == "v0.9.0",
