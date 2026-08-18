@@ -73,6 +73,25 @@ class VadConfig:
     min_silence_ms: int = 600        # trailing silence that ends an utterance
     speech_pad_ms: int = 150         # keep a little audio past the endpoint
 
+    # Someone speaking quickly never leaves a 600 ms gap, so the rule above never
+    # fires and nothing is spoken until they finally stop. Measured on continuous
+    # speech: the probability sits at 1.0, only 7% of windows fall below the
+    # threshold at all, and NO gap reaches 600 ms -- the utterance ends only when
+    # the speech does. Lowering min_silence_ms cannot fix it; at 300 ms that same
+    # audio still offers zero cut points.
+    #
+    # So past `soft_endpoint_s` the silence requirement is relaxed towards
+    # `min_silence_floor_ms`, and by `max_segment_s` the utterance is cut at the
+    # quietest moment available rather than waiting for a pause that is not coming.
+    # Measured on 34 s of continuous speech: first audio at 30 s before (the old
+    # hard cap, cutting mid-word), 5 s after. The ceiling is what bounds the
+    # wait, so it is set for conversation rather than for transcript quality --
+    # 6 s still leaves ~5 s of context per chunk, well above where recognition
+    # starts to suffer. Raise both for fewer, longer, better-punctuated chunks.
+    soft_endpoint_s: float = 3.0     # 0 disables the whole thing
+    max_segment_s: float = 6.0       # hard ceiling for one segment of speech
+    min_silence_floor_ms: int = 120  # shortest gap ever accepted as an endpoint
+
 
 @dataclass
 class SttConfig:

@@ -540,6 +540,24 @@ class SettingsWindow(tk.Toplevel):
             tab, 14, "Minimum speech (ms)", 50, 1000, "{:.0f}", vad_only=True
         )
         self.preroll = self._slider(tab, 15, "Pre-roll kept (ms)", 0, 1000, "{:.0f}")
+
+        # Speaking quickly leaves no gap for the rule above to find, so nothing
+        # is said until you stop. These bound that wait.
+        self.soft_endpoint = self._slider(
+            tab, 16, "Start splitting after (s)", 0, 15, "{:.0f}", vad_only=True
+        )
+        self.max_segment = self._slider(
+            tab, 17, "Longest unbroken segment (s)", 2, 30, "{:.0f}", vad_only=True
+        )
+        note = ttk.Label(
+            tab,
+            text="Fast speech never leaves a long enough gap, so a segment is "
+                 "cut at the quietest moment instead. Set 'start splitting' to "
+                 "0 to wait for a real pause, however long that takes.",
+            foreground=self.palette.muted, justify="left", wraplength=560,
+        )
+        note.grid(row=18, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self._vad_widgets.append(note)
         tab.columnconfigure(1, weight=1)
 
     def _slider(self, parent, row, label, lo, hi, fmt, vad_only: bool = False) -> tk.DoubleVar:
@@ -1843,6 +1861,8 @@ class SettingsWindow(tk.Toplevel):
         self.vad_threshold.set(c.vad.threshold)
         self.vad_silence.set(c.vad.min_silence_ms)
         self.vad_min_speech.set(c.vad.min_speech_ms)
+        self.soft_endpoint.set(c.vad.soft_endpoint_s)
+        self.max_segment.set(c.vad.max_segment_s)
         self.preroll.set(c.trigger.preroll_ms)
         self._on_mode_change()
 
@@ -1906,6 +1926,11 @@ class SettingsWindow(tk.Toplevel):
         c.vad.threshold = round(float(self.vad_threshold.get()), 3)
         c.vad.min_silence_ms = int(self.vad_silence.get())
         c.vad.min_speech_ms = int(self.vad_min_speech.get())
+        c.vad.soft_endpoint_s = round(float(self.soft_endpoint.get()), 1)
+        # The ceiling has to stay above the point where splitting starts, or the
+        # two describe an impossible window.
+        c.vad.max_segment_s = max(round(float(self.max_segment.get()), 1),
+                                  c.vad.soft_endpoint_s + 1.0)
 
         c.tts.voice = self.voice_var.get().strip()
         c.tts.length_scale = round(float(self.speed_var.get()), 3)
