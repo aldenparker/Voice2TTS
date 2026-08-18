@@ -137,9 +137,22 @@ class SubstitutionRule:
 
 @dataclass
 class TextConfig:
-    # Applied to the transcript before synthesis: fixes names Whisper mishears,
-    # expands abbreviations, and corrects words Piper pronounces badly.
+    # Two lists, because translation sits between them and they are corrections
+    # to different things.
+    #
+    # SOURCE rules fix what the recogniser misheard -- names, jargon, homophones.
+    # They correct the words you actually said, so they must run BEFORE
+    # translation, or the translator faithfully carries the mistake across.
+    #
+    # TARGET rules fix what the voice says badly. Pronunciation is a property of
+    # the output language and voice, so applying an English list to German
+    # output would be nonsense.
+    #
+    # With translation off the two run back to back over the same text, which is
+    # exactly what one list used to do -- so existing configurations behave
+    # identically, and their rules stay in `substitutions`.
     substitutions: list[SubstitutionRule] = field(default_factory=list)
+    target_substitutions: list[SubstitutionRule] = field(default_factory=list)
     substitutions_enabled: bool = True
 
     # Show the transcript for approval before speaking it. Costs latency, but stops

@@ -300,6 +300,38 @@ def test_substitutions() -> None:
     check("nothing rewritten when disabled",
           p.substituter.apply("tell aiden") == "tell aiden")
 
+    # Two rule sets, because translation goes between them. Source rules fix
+    # what the recogniser misheard and must run while the text is still in the
+    # language that was spoken; target rules fix what the VOICE says badly,
+    # which is a property of the output language.
+    cfg = Config()
+    cfg.text.substitutions = [SubstitutionRule("aiden", "Aidan")]
+    cfg.text.target_substitutions = [SubstitutionRule("Aidan", "AY-dan")]
+    p = Pipeline(cfg)
+    check("both rule sets compile", p.apply_text_changes() == 2)
+    check("source rules fix what was misheard",
+          p.substituter.apply("tell aiden") == "tell Aidan")
+    check("target rules fix what is said badly",
+          p.target_substituter.apply("tell Aidan") == "tell AY-dan")
+    check("with no translation between them they run back to back",
+          p.target_substituter.apply(p.substituter.apply("tell aiden"))
+          == "tell AY-dan")
+
+    # An existing configuration has one list and must behave exactly as before.
+    legacy = Config()
+    legacy.text.substitutions = [SubstitutionRule("aiden", "Aidan")]
+    old = Pipeline(legacy)
+    check("a config with no target rules is unchanged",
+          old.apply_text_changes() == 1
+          and old.target_substituter.apply("tell Aidan") == "tell Aidan",
+          "the target list is empty, so it is a passthrough")
+
+    cfg.text.substitutions_enabled = False
+    check("the switch turns off both sets", p.apply_text_changes() == 0)
+    check("and neither rewrites anything",
+          p.substituter.apply("tell aiden") == "tell aiden"
+          and p.target_substituter.apply("tell Aidan") == "tell Aidan")
+
 
 def test_device_recovery() -> None:
     """A microphone that goes away must be retried, not written off."""
@@ -1854,6 +1886,145 @@ def test_vad() -> None:
           f"min {min(required)} windows")
 
 
+def _fake_model(root: Path, code: str) -> Path:
+    """A directory shaped like a translation model, without the 164 MB.
+
+    is_usable() only asks whether both halves are present, so the parts that
+    manage models can be tested everywhere -- CI has no model and never will.
+    """
+    directory = root / code
+    (directory / "model").mkdir(parents=True, exist_ok=True)
+    (directory / "model" / "model.bin").write_bytes(b"not really a model")
+    (directory / "sentencepiece.model").write_bytes(b"not really a tokenizer")
+    return directory
+
+
+def test_translate() -> None:
+    """Managing translation models. Translating itself needs one installed."""
+    print("\n[translation]")
+    import tempfile
+    import zipfile
+
+    from voice2tts import translate
+
+    check("sentences split on terminal punctuation",
+          translate.split_sentences("First one. Then a second! And a third?")
+          == ["First one.", "Then a second!", "And a third?"])
+    check("a single sentence stays whole",
+          translate.split_sentences("No punctuation here") == ["No punctuation here"])
+    check("blank text yields nothing", translate.split_sentences("   ") == [])
+
+    real_dir = translate.models_dir
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        translate.models_dir = lambda: root
+        try:
+            check("nothing installed to begin with", translate.installed_pairs() == [])
+
+            _fake_model(root, "en_de")
+            _fake_model(root, "de_en")
+            pairs = translate.installed_pairs()
+            check("installed pairs are found",
+                  [p.code for p in pairs] == ["de_en", "en_de"],
+                  str([p.code for p in pairs]))
+            check("a pair knows its direction",
+                  pairs[1].source == "en" and pairs[1].target == "de")
+            check("find_pair matches a direction",
+                  translate.find_pair("en", "de") is not None
+                  and translate.find_pair("en", "fr") is None)
+
+            # A model without its tokenizer produces gibberish rather than an
+            # error, so half a model must not count as installed.
+            half = root / "en_fr"
+            (half / "model").mkdir(parents=True)
+            (half / "model" / "model.bin").write_bytes(b"x")
+            check("a model with no tokenizer is not offered",
+                  translate.find_pair("en", "fr") is None,
+                  "half a model would translate to nonsense")
+
+            check("a direct route is one hop",
+                  [p.code for p in translate.route("en", "de")] == ["en_de"])
+            check("no route to a language nobody installed",
+                  translate.route("en", "es") == [])
+            check("translating to the same language is a no-op",
+                  translate.route("en", "en") == [])
+
+            # Pivoting: de -> en -> ... needs the second half to exist too.
+            check("a pivot needs both halves", translate.route("de", "es") == [])
+            _fake_model(root, "en_es")
+            route = translate.route("de", "es")
+            check("a pivot is used when there is no direct model",
+                  [p.code for p in route] == ["de_en", "en_es"],
+                  str([p.code for p in route]))
+            # ...but a direct model always wins, because a pivot compounds errors.
+            _fake_model(root, "de_es")
+            check("a direct model beats a pivot",
+                  [p.code for p in translate.route("de", "es")] == ["de_es"])
+
+            # Installing from a package: whatever shape it arrives in, only the
+            # model and its tokenizer are kept.
+            archive = root / "package.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("translate-en_it/model/model.bin", "weights")
+                zf.writestr("translate-en_it/model/config.json", "{}")
+                zf.writestr("translate-en_it/sentencepiece.model", "tokens")
+                zf.writestr("translate-en_it/README.md", "hello")
+                # A sentence splitter ships alongside in some packages. It is a
+                # torch checkpoint, and unpacking it would drag torch in.
+                zf.writestr("translate-en_it/stanza/en/tokenize/ewt.pt", "torch!")
+            installed = translate.install_package(archive, "en", "it")
+            check("a package installs", translate.is_usable(installed))
+            check("and is normalised to model + tokenizer",
+                  sorted(p.name for p in installed.iterdir())
+                  == ["model", "sentencepiece.model"],
+                  str(sorted(p.name for p in installed.iterdir())))
+            check("the sentence splitter is dropped",
+                  not (installed / "stanza").exists(),
+                  "it is a torch checkpoint we do not need")
+            check("no staging directory is left behind",
+                  not any(p.name.startswith(".") for p in root.iterdir()),
+                  str([p.name for p in root.iterdir() if p.name.startswith(".")]))
+
+            bad = root / "bad.zip"
+            with zipfile.ZipFile(bad, "w") as zf:
+                zf.writestr("something/README.md", "no model here")
+            try:
+                translate.install_package(bad, "en", "pt")
+                check("a package with no model is refused", False, "no error")
+            except translate.TranslationUnavailable:
+                check("a package with no model is refused", True)
+
+            check("removing a pair works", translate.remove_pair("en", "it"))
+            check("and it is gone", translate.find_pair("en", "it") is None)
+            check("removing what is not there is not an error",
+                  translate.remove_pair("zz", "yy") is False)
+
+            try:
+                translate.Chain([])
+                check("a chain with no route is refused", False, "no error")
+            except translate.TranslationUnavailable:
+                check("a chain with no route is refused", True)
+        finally:
+            translate.models_dir = real_dir
+
+    # The real thing, if a model happens to be installed on this machine.
+    live = translate.installed_pairs()
+    if not live:
+        print("  SKIP  live translation (no model installed)")
+        return
+    pair = live[0]
+    chain = translate.Chain([pair])
+    start = time.perf_counter()
+    out = chain.translate("Hello, can you hear me?")
+    elapsed = time.perf_counter() - start
+    check(f"translates {pair.code}", bool(out.strip()),
+          f"{elapsed * 1000:.0f} ms -> {out[:40]!r}")
+    check("stays inside the latency budget", elapsed < 0.3,
+          f"{elapsed * 1000:.0f} ms")
+    check("empty input is safe", chain.translate("") == "")
+    chain.close()
+
+
 def test_stt() -> None:
     print("\n[stt]")
     audio = load_sample_16k()
@@ -2980,6 +3151,7 @@ def main() -> int:
     test_profiles()
     test_history_and_review()
     test_vad()
+    test_translate()
     test_stt()
     test_device_lists()
     if not no_audio:

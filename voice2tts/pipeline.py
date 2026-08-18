@@ -92,7 +92,8 @@ class Pipeline:
         self.capture: MicCapture | None = None
         self.hotkey: HotkeyManager | None = None
         self.segmenter: VadSegmenter | None = None
-        self.substituter = Substituter()
+        self.substituter = Substituter()          # what was misheard
+        self.target_substituter = Substituter()   # what is said badly
         self.apply_text_changes()
         self.last_transcript = ""
         self.output_failures: list[tuple[str, str]] = []
@@ -298,22 +299,29 @@ class Pipeline:
         self.tts.apply(self.cfg.tts)
 
     def apply_text_changes(self) -> int:
-        """Recompile the substitution rules. Returns how many are active."""
+        """Recompile both rule sets. Returns how many are active in total."""
         cfg = self.cfg.text
         if not cfg.substitutions_enabled:
+            self.target_substituter.load([])
             return self.substituter.load([])
-        rules = [
-            Rule(
-                pattern=r.pattern,
-                replacement=r.replacement,
-                enabled=r.enabled,
-                whole_word=r.whole_word,
-                regex=r.regex,
-                case_sensitive=r.case_sensitive,
-            )
-            for r in cfg.substitutions
-        ]
-        return self.substituter.load(rules)
+
+        def compile_rules(entries):
+            return [
+                Rule(
+                    pattern=r.pattern,
+                    replacement=r.replacement,
+                    enabled=r.enabled,
+                    whole_word=r.whole_word,
+                    regex=r.regex,
+                    case_sensitive=r.case_sensitive,
+                )
+                for r in entries
+            ]
+
+        active = self.substituter.load(compile_rules(cfg.substitutions))
+        active += self.target_substituter.load(
+            compile_rules(cfg.target_substitutions))
+        return active
 
     def apply_vad_changes(self) -> None:
         if self._running.is_set():
@@ -526,7 +534,16 @@ class Pipeline:
 
         # Rewrite before speaking, not before displaying: the transcript shown is
         # what was heard, so a wrong substitution is visible rather than mysterious.
+        #
+        # Source rules first: they fix what the recogniser misheard, and must be
+        # applied while the text is still in the language that was spoken.
         spoken = self.substituter.apply(text)
+
+        # Translation will go here, between the two rule sets.
+
+        # Target rules last: they fix what the VOICE says badly, which is a
+        # property of the output language.
+        spoken = self.target_substituter.apply(spoken)
         if spoken != text:
             self._emit("substituted", spoken)
 
