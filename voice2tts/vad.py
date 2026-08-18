@@ -225,6 +225,27 @@ class VadSegmenter:
         """End any in-progress utterance, e.g. when stopping or switching modes."""
         return self._finish() if self._triggered and self._buf else None
 
+    def suspend(self) -> np.ndarray | None:
+        """Stop listening without throwing away what was already captured.
+
+        Used while the app is speaking: those windows would be its own voice
+        coming back, so they must not be fed in -- but the speech captured
+        BEFORE playback started is real and was going to be said. reset() used
+        to be called here, which discarded exactly the tail that a mid-speech
+        split deliberately carries forward.
+
+        Returns anything worth speaking, so it is not merely dropped.
+        """
+        pending = self._finish() if self._triggered and self._buf else None
+        # The model's recurrent state is about the audio it has just heard, and
+        # what follows will be a different moment. That much IS worth clearing.
+        self.vad.reset()
+        self._preroll.clear()
+        self._triggered = False
+        self._speech_windows = 0
+        self._silence_windows = 0
+        return pending
+
     def _finish(self) -> np.ndarray | None:
         # Trim the detected trailing silence but leave speech_pad_ms of it, so the
         # final consonant is not chopped.

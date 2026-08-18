@@ -38,6 +38,11 @@ log = logging.getLogger(__name__)
 
 _STOP = object()  # queue sentinel
 
+# How long the pipeline may sit in a working state before it is treated as
+# stalled. Transcribing and speaking one utterance is seconds; a minute is not
+# slow, it is stuck.
+STALL_SECONDS = 60.0
+
 # Consecutive VAD errors before we stop trying and fall back to push-to-talk.
 _MAX_VAD_FAILURES = 5
 
@@ -104,7 +109,15 @@ class Pipeline:
         # to discard.
         self.review_hook: Callable[[str], str | None] | None = None
 
-        self._utterances: queue.Queue = queue.Queue(maxsize=8)
+        # Unbounded. Speaking N seconds of speech takes N seconds, so a talker
+        # who does not pause will always be ahead of playback -- dropping the
+        # overflow silently loses words that were actually said. Falling behind
+        # is visible and recoverable; a dropped sentence is neither.
+        self._utterances: queue.Queue = queue.Queue()
+        # Observer notices ARE droppable: they only drive the tray and the log.
+        self._notices: queue.Queue = queue.Queue(maxsize=256)
+        # Set when the VAD settings change; the segmenter thread rebuilds.
+        self._vad_dirty = threading.Event()
         self._threads: list[threading.Thread] = []
         self._running = threading.Event()
         # Set to abandon speech already in progress. Checked between synthesized
@@ -123,19 +136,45 @@ class Pipeline:
             return
         self.state = state
         log.debug("state -> %s", state.value)
-        if self._on_state:
+        self._notify(("state", state))
+
+    def _notify(self, notice) -> None:
+        """Hand an observer call to the notifier thread.
+
+        NEVER call an observer from the audio path. The tray and settings
+        window marshal onto the Tk thread with `root.after()`, and a
+        cross-thread Tkinter call serialises on the Tcl interpreter lock -- so
+        a busy interface can block whichever thread announced the change. When
+        that thread is the worker, it blocks inside _set_state(THINKING),
+        before it ever reaches speak(): the app falls silent, the tray sits on
+        "thinking", and nothing recovers it short of a restart.
+
+        Queueing means the worst a stalled interface can do is fall behind.
+        """
+        try:
+            self._notices.put_nowait(notice)
+        except queue.Full:
+            # Observers are cosmetic; audio is not. Drop the notice rather than
+            # block or grow without limit.
+            log.debug("observer queue full; dropped %r", notice[0])
+
+    def _notifier_loop(self) -> None:
+        while True:
+            notice = self._notices.get()
+            if notice is _STOP:
+                return
+            kind, payload = notice
             try:
-                self._on_state(state)
+                if kind == "state" and self._on_state:
+                    self._on_state(payload)
+                elif kind == "event" and self._on_event:
+                    self._on_event(*payload)
             except Exception:
-                log.exception("state observer failed")
+                log.exception("observer failed")
 
     def _emit(self, kind: str, message: str) -> None:
         log.info("[%s] %s", kind, message)
-        if self._on_event:
-            try:
-                self._on_event(kind, message)
-            except Exception:
-                log.exception("event observer failed")
+        self._notify(("event", (kind, message)))
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -155,8 +194,10 @@ class Pipeline:
                 raise
 
             self._running.set()
+            self._spawn(self._notifier_loop, "notifier")
             self._spawn(self._segmenter_loop, "segmenter")
             self._spawn(self._worker_loop, "worker")
+            self._spawn(self._watchdog_loop, "watchdog")
             self._start_hotkey()
             self._set_state(State.IDLE)
             self._emit("info", "Running")
@@ -243,10 +284,16 @@ class Pipeline:
             if not self._running.is_set():
                 return
             self._running.clear()
+            self._utterances.put(_STOP)
             try:
-                self._utterances.put_nowait(_STOP)
+                self._notices.put_nowait(_STOP)
             except queue.Full:
-                pass
+                # Full of stale notices; clear one out so the sentinel lands.
+                try:
+                    self._notices.get_nowait()
+                    self._notices.put_nowait(_STOP)
+                except (queue.Empty, queue.Full):
+                    pass
             self._teardown()
             for t in self._threads:
                 t.join(timeout=2.0)
@@ -324,12 +371,14 @@ class Pipeline:
         return active
 
     def apply_vad_changes(self) -> None:
+        """Ask the segmenter thread to rebuild, rather than swapping it here.
+
+        Replacing self.segmenter from another thread drops whatever is
+        mid-capture and races with the reader, which holds its own reference
+        across process()/active. The thread picks this up between windows.
+        """
         if self._running.is_set():
-            self.segmenter = VadSegmenter(
-                self.cfg.vad,
-                preroll_ms=self.cfg.trigger.preroll_ms,
-                max_utterance_s=self.cfg.trigger.max_utterance_s,
-            )
+            self._vad_dirty.set()
 
     def set_mode(self, mode: str) -> None:
         self.cfg.trigger.mode = mode
@@ -435,6 +484,18 @@ class Pipeline:
             if self.cfg.trigger.mode == "ptt" or self.segmenter is None:
                 continue
 
+            # Settings changed. Rebuild here, where nothing else is mid-window.
+            if self._vad_dirty.is_set():
+                self._vad_dirty.clear()
+                pending = self.segmenter.flush()
+                self.segmenter = VadSegmenter(
+                    self.cfg.vad,
+                    preroll_ms=self.cfg.trigger.preroll_ms,
+                    max_utterance_s=self.cfg.trigger.max_utterance_s,
+                )
+                if pending is not None:
+                    self._submit(pending)
+
             # Suppress VAD while speaking, or the synthesized voice leaking through
             # speakers gets transcribed and spoken again in a loop.
             if (
@@ -443,7 +504,11 @@ class Pipeline:
                 and self.sink.active
             ):
                 if self.segmenter.active:
-                    self.segmenter.reset()
+                    # Keep what was captured before playback began; only stop
+                    # listening. reset() here used to bin it.
+                    pending = self.segmenter.suspend()
+                    if pending is not None:
+                        self._submit(pending)
                 continue
 
             # An exception here used to kill this thread outright: automatic mode
@@ -476,6 +541,47 @@ class Pipeline:
                 self._set_state(State.IDLE)
             if utterance is not None:
                 self._submit(utterance)
+
+    def _watchdog_loop(self) -> None:
+        """Notice when the pipeline stops making progress, and say where.
+
+        An utterance is transcribed and spoken in seconds. Sitting in THINKING
+        or SPEAKING for far longer means something is blocked, and "it got
+        stuck" is not a report anybody can act on. This logs the stack of every
+        thread once per stall, which turns it into "it is blocked HERE".
+        """
+        stalled_since: float | None = None
+        reported = False
+        while self._running.is_set():
+            time.sleep(1.0)
+            busy = self.state in (State.THINKING, State.SPEAKING)
+            if not busy:
+                stalled_since, reported = None, False
+                continue
+            now = time.monotonic()
+            if stalled_since is None:
+                stalled_since, reported = now, False
+                continue
+            if reported or now - stalled_since < STALL_SECONDS:
+                continue
+
+            reported = True
+            from .perf import stacks
+
+            log.error(
+                "pipeline stalled in %s for %.0fs "
+                "(utterances queued: %d, notices queued: %d, segmenter active: %s)",
+                self.state.value, now - stalled_since,
+                self._utterances.qsize(), self._notices.qsize(),
+                self.segmenter.active if self.segmenter else "n/a",
+            )
+            for line in stacks():
+                log.error("%s", line)
+            self._emit(
+                "error",
+                f"Stopped responding while {self.state.value}. The log now holds "
+                "a stack dump -- please include it in a bug report.",
+            )
 
     def _try_recover_capture(self) -> bool:
         """Reopen the microphone if it is available again. Returns True on success."""

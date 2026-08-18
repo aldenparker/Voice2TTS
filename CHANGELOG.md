@@ -5,6 +5,46 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.2]
+
+### Fixed
+
+- **The app could fall silent and sit on "thinking" until restarted.** 0.6.1
+  made this common by splitting speech into several segments instead of one, so
+  the state changed roughly five times as often.
+
+  The cause was that the pipeline told the tray and the settings window about
+  every change *from the thread doing the work*. Those observers marshal onto
+  the interface thread with `root.after()`, and a cross-thread Tk call
+  serialises on the Tcl interpreter lock — so a busy interface blocked the
+  worker inside the "thinking" transition, before it ever reached synthesis.
+  Nothing downstream ran, so the app went quiet, and only a restart cleared it.
+
+  Observers now run on their own thread. A stalled interface can fall behind;
+  it can no longer stop audio. Verified by wedging an observer permanently: the
+  old code hung outright at the first state change, the new one carries on.
+
+- **Speech captured just before playback started was thrown away.** While the
+  app speaks it stops listening, so it does not transcribe its own voice — but
+  it did that by resetting the segmenter, which also discarded audio already
+  captured, including the tail that a mid-speech split deliberately carries
+  forward. It now hands that audio on to be spoken instead.
+
+- **Utterances are no longer dropped when the pipeline falls behind.** The queue
+  was capped at eight. Speaking sixty seconds of speech takes sixty seconds, so
+  anyone talking without pauses is always ahead of playback; the cap silently
+  lost words that had actually been said.
+
+- **Changing a detection setting mid-session** no longer discards what is being
+  captured or races with the thread reading it.
+
+### Added
+
+- **A stall watchdog.** If the pipeline sits in a working state for a minute it
+  logs a stack dump of every thread and says so in the interface, so "it got
+  stuck" becomes "it is stuck here".
+
+
 ## [0.6.1]
 
 ### Fixed
