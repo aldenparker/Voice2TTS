@@ -1,0 +1,144 @@
+name: Translation models
+
+# Converts Helsinki-NLP's OPUS-MT weights to CTranslate2 and attaches them to a
+# release of their own. Deliberately separate from release.yml: models change on
+# a different schedule than the app (a new language pair does not need a new
+# build), they take far longer to produce, and a failure converting Japanese
+# should not be able to hold up an application release.
+#
+# The tag the app reads is pinned in voice2tts/translate.py (MODELS_TAG), so
+# publishing a newer set does not change what an already-shipped build
+# downloads. Bump both together when the format changes.
+#
+# Run it from the Actions tab. It is never triggered by a push -- 800 MB of
+# model conversion is not something to do on every commit.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish the models under"
+        required: true
+        default: "models-1"
+      pairs:
+        description: >-
+          Pairs to convert, e.g. "en de fr". Blank converts every pair in
+          scripts/convert_mt.py.
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  convert:
+    # Ubuntu, not Windows: this job only rewrites weights, and the runner is
+    # faster and has more disk. Nothing produced here is platform-specific.
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # torch and transformers are build-time only -- they read the original
+      # weights so ct2 can rewrite them, and never reach a user's machine.
+      # The CPU wheel is a tenth the size of the CUDA one and conversion does
+      # not touch a GPU.
+      - name: Install the conversion tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ctranslate2==4.6.0 transformers==4.57.1 \
+                      huggingface_hub sentencepiece \
+                      --extra-index-url https://download.pytorch.org/whl/cpu torch
+
+      - name: Convert
+        id: convert
+        # Inputs go through the environment, never straight into the script.
+        # A `run:` block is textually substituted before the shell sees it, so
+        # an input inlined there is executed, not quoted.
+        env:
+          PAIRS: ${{ inputs.pairs }}
+        run: |
+          if [ -n "$PAIRS" ]; then
+            # A space-separated list of language codes, converted in both
+            # directions -- "en de fr" means en<->de and en<->fr, because a
+            # one-way pair is rarely what anyone wants.
+            set -- $PAIRS
+            for target in "$@"; do
+              [ "$target" = "en" ] && continue
+              python scripts/convert_mt.py en "$target" || true
+              python scripts/convert_mt.py "$target" en || true
+            done
+            python -c "from pathlib import Path; import sys; sys.path.insert(0, 'scripts'); \
+                       from convert_mt import write_manifest; write_manifest(Path('dist/mt'))"
+          else
+            python scripts/convert_mt.py --all
+          fi
+
+      # A manifest listing pairs whose archives failed to upload would send
+      # every user to a 404. Checked here rather than trusted.
+      - name: Check the manifest against what was produced
+        run: |
+          python - <<'EOF'
+          import json, sys
+          from pathlib import Path
+
+          out = Path("dist/mt")
+          manifest = json.loads((out / "manifest.json").read_text())
+          missing = [p["asset"] for p in manifest["pairs"]
+                     if not (out / p["asset"]).is_file()]
+          if missing:
+              sys.exit(f"manifest lists assets that were not produced: {missing}")
+          if not manifest["pairs"]:
+              sys.exit("no pairs converted; refusing to publish an empty catalogue")
+          for pair in manifest["pairs"]:
+              if not pair["sha256"]:
+                  sys.exit(f"{pair['asset']} has no checksum")
+              if not pair["licence"]:
+                  sys.exit(f"{pair['asset']} has no licence recorded")
+          total = sum(p["bytes"] for p in manifest["pairs"])
+          print(f"{len(manifest['pairs'])} pair(s), {total / 1e6:.0f} MB")
+          EOF
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          cat > notes.md <<'NOTES'
+          OPUS-MT models converted to CTranslate2 (int8).
+
+          Original weights by the Helsinki-NLP group, used under CC-BY-4.0.
+          Each archive carries a LICENSE file with the full attribution.
+
+          These are downloaded by the app from the Translate tab; there is
+          nothing to install by hand.
+          NOTES
+
+          # The manifest goes up LAST. Until it lands the release is invisible
+          # to the app, so a run that dies part way through leaves the previous
+          # catalogue intact rather than a half-published one.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/mt/*.zip dist/mt/*.zip.sha256 --clobber
+          else
+            gh release create "$TAG" dist/mt/*.zip dist/mt/*.zip.sha256               --title "Translation models" --notes-file notes.md
+          fi
+          gh release upload "$TAG" dist/mt/manifest.json --clobber
+
+      - name: Summary
+        run: |
+          echo "### Translation models" >> $GITHUB_STEP_SUMMARY
+          python - <<'EOF' >> $GITHUB_STEP_SUMMARY
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(Path("dist/mt/manifest.json").read_text())
+          print("| Direction | Size | Licence |")
+          print("|---|---|---|")
+          for pair in manifest["pairs"]:
+              print(f"| {pair['source']} → {pair['target']} "
+                    f"| {pair['bytes'] / 1e6:.0f} MB | {pair['licence']} |")
+          EOF

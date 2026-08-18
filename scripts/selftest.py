@@ -1638,6 +1638,70 @@ def test_studio_gate() -> None:
           "cu128" in studiopack.TORCH_SPEC, studiopack.TORCH_SPEC)
 
 
+def test_models_workflow() -> None:
+    """The job that publishes translation models.
+
+    The app reads a pinned tag, and CI writes to whatever tag it is given. If
+    those two ever disagree the download button 404s for everyone, and nothing
+    in either file would notice -- so it is asserted here.
+    """
+    print("\n[models workflow]")
+    import yaml
+
+    from voice2tts import translate
+
+    path = ROOT / ".github" / "workflows" / "models.yml"
+    check("the workflow exists", path.is_file())
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    # PyYAML reads the bare key `on:` as the boolean True.
+    triggers = data.get("on") or data.get(True) or {}
+    check("it is run by hand, never by a push",
+          list(triggers) == ["workflow_dispatch"], str(list(triggers)))
+
+    inputs = triggers["workflow_dispatch"]["inputs"]
+    check("the default tag is the one the app reads",
+          inputs["tag"]["default"] == translate.MODELS_TAG,
+          f"workflow {inputs['tag']['default']!r} vs "
+          f"translate.MODELS_TAG {translate.MODELS_TAG!r}")
+
+    job = data["jobs"]["convert"]
+    steps = job["steps"]
+    names = [s.get("name", s.get("uses", "")) for s in steps]
+    check("it verifies the manifest before publishing",
+          any("manifest" in n.lower() for n in names)
+          and next(i for i, n in enumerate(names) if "manifest" in n.lower())
+          < next(i for i, n in enumerate(names) if n == "Publish"),
+          str(names))
+
+    # A `run:` block is textually substituted before the shell sees it, so an
+    # input inlined there is executed rather than quoted.
+    for step in steps:
+        script = step.get("run", "")
+        check(f"{step.get('name', 'a step')} does not inline an input into the shell",
+              "${{ inputs." not in script,
+              "pass it through `env:` instead")
+
+    publish = next(s for s in steps if s.get("name") == "Publish")
+    script = publish["run"]
+    manifest_at = script.index("manifest.json")
+    zip_at = script.index("dist/mt/*.zip")
+    check("the manifest is uploaded after the archives", manifest_at > zip_at,
+          "until it lands the release is invisible, so a half-finished run "
+          "leaves the previous catalogue intact")
+
+    check("write permission is granted",
+          data.get("permissions", {}).get("contents") == "write",
+          str(data.get("permissions")))
+
+    # torch is enormous and only reads weights; the CPU wheel is a tenth the
+    # size and conversion never touches a GPU.
+    install = next(s for s in steps if "conversion tools" in s.get("name", ""))
+    check("torch comes from the CPU index",
+          "download.pytorch.org/whl/cpu" in install["run"],
+          "the CUDA wheel is ten times the size for no benefit here")
+
+
 def test_release_is_gated() -> None:
     """A tag must not be able to publish without the checks having run.
 
@@ -3691,6 +3755,7 @@ def main() -> int:
     test_training()
     test_studio_gate()
     test_release_is_gated()
+    test_models_workflow()
     test_release_powershell()
     test_winget_manifests()
     test_profiles()
