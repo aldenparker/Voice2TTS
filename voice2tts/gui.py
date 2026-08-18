@@ -1821,36 +1821,55 @@ class SettingsWindow(tk.Toplevel):
         tab = ttk.Frame(nb, padding=10)
         nb.add(tab, text="Recognition")
 
-        ttk.Label(tab, text="Whisper model").grid(row=0, column=0, sticky="w")
+        ttk.Label(tab, text="When to speak", font=("", 9, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w")
+        self.stt_mode_var = tk.StringVar(value="sentence")
+        ttk.Radiobutton(
+            tab, text="Wait for me to finish a sentence", value="sentence",
+            variable=self.stt_mode_var, command=self._refresh_stt_mode,
+        ).grid(row=1, column=0, columnspan=2, sticky="w")
+        ttk.Radiobutton(
+            tab, text="Speak while I am still talking", value="streaming",
+            variable=self.stt_mode_var, command=self._refresh_stt_mode,
+        ).grid(row=2, column=0, columnspan=2, sticky="w")
+        self.stt_mode_note = ttk.Label(tab, text="", foreground="#555",
+                                       justify="left", wraplength=560)
+        self.stt_mode_note.grid(row=3, column=0, columnspan=2, sticky="w",
+                                pady=(2, 10))
+
+        ttk.Separator(tab, orient="horizontal").grid(
+            row=4, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+
+        ttk.Label(tab, text="Whisper model").grid(row=5, column=0, sticky="w")
         self.model_var = tk.StringVar()
         ttk.Combobox(
             tab, textvariable=self.model_var, values=list(WHISPER_MODELS), width=24
-        ).grid(row=0, column=1, sticky="w", padx=6, pady=2)
+        ).grid(row=5, column=1, sticky="w", padx=6, pady=2)
 
-        ttk.Label(tab, text="Spoken language").grid(row=1, column=0, sticky="w")
+        ttk.Label(tab, text="Spoken language").grid(row=6, column=0, sticky="w")
         self.stt_lang_var = tk.StringVar()
         ttk.Combobox(
             tab, textvariable=self.stt_lang_var,
             values=["auto", *sorted(LANGUAGE_NAMES)], width=24,
-        ).grid(row=1, column=1, sticky="w", padx=6, pady=2)
+        ).grid(row=6, column=1, sticky="w", padx=6, pady=2)
         ttk.Label(
             tab,
             text="Only the models without \".en\" can hear anything but English. "
                  "\"auto\" detects\nper utterance, which costs a little accuracy.",
             foreground="#555", justify="left",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
-        ttk.Label(tab, text="Compute device").grid(row=3, column=0, sticky="w")
+        ttk.Label(tab, text="Compute device").grid(row=8, column=0, sticky="w")
         self.stt_device_var = tk.StringVar()
         ttk.Combobox(
             tab, textvariable=self.stt_device_var, values=["auto", "cuda", "cpu"],
             width=24, state="readonly",
-        ).grid(row=3, column=1, sticky="w", padx=6, pady=2)
+        ).grid(row=8, column=1, sticky="w", padx=6, pady=2)
 
-        ttk.Label(tab, text="Beam size").grid(row=4, column=0, sticky="w")
+        ttk.Label(tab, text="Beam size").grid(row=9, column=0, sticky="w")
         self.beam_var = tk.IntVar()
         ttk.Spinbox(tab, from_=1, to=5, textvariable=self.beam_var, width=6).grid(
-            row=4, column=1, sticky="w", padx=6, pady=2
+            row=9, column=1, sticky="w", padx=6, pady=2
         )
 
         ttk.Label(
@@ -1859,26 +1878,49 @@ class SettingsWindow(tk.Toplevel):
                  "(tray menu → Stop, then Start).",
             foreground="#555",
             justify="left",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        ).grid(row=10, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
         ttk.Separator(tab, orient="horizontal").grid(
-            row=6, column=0, columnspan=2, sticky="ew", pady=12
+            row=11, column=0, columnspan=2, sticky="ew", pady=12
         )
         ttk.Label(tab, text="GPU acceleration", font=("", 9, "bold")).grid(
-            row=7, column=0, columnspan=2, sticky="w"
+            row=12, column=0, columnspan=2, sticky="w"
         )
         self.gpu_label = ttk.Label(tab, text="", justify="left", foreground="#444")
-        self.gpu_label.grid(row=8, column=0, columnspan=2, sticky="w", pady=(2, 6))
+        self.gpu_label.grid(row=13, column=0, columnspan=2, sticky="w", pady=(2, 6))
         gpu_row = ttk.Frame(tab)
-        gpu_row.grid(row=9, column=0, columnspan=2, sticky="w")
+        gpu_row.grid(row=14, column=0, columnspan=2, sticky="w")
         self.gpu_btn = ttk.Button(gpu_row, text="", command=self._toggle_gpu_pack)
         self.gpu_btn.pack(side="left")
         self.gpu_progress = ttk.Progressbar(gpu_row, mode="indeterminate", length=200)
         self.gpu_note = ttk.Label(tab, text="", foreground="#666")
-        self.gpu_note.grid(row=10, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.gpu_note.grid(row=15, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         tab.columnconfigure(1, weight=1)
+        self._refresh_stt_mode()
         self._refresh_gpu()
+
+    def _refresh_stt_mode(self) -> None:
+        """Say what each mode costs, in the terms the choice actually turns on.
+
+        Both numbers here are measured (spike/09_streaming.py), not estimated,
+        and the CPU/GPU line is worth stating because the obvious assumption --
+        that streaming is a GPU feature -- is wrong.
+        """
+        if self.stt_mode_var.get() == "streaming":
+            text = ("Recognises as you talk and speaks each phrase once it "
+                    "settles, so a long sentence does not sit silent until you "
+                    "stop.\nCosts about half a processor core for as long as "
+                    "anyone is speaking — the same on CPU and GPU — "
+                    "and delivers speech a phrase at a time rather than a "
+                    "sentence at a time. Needs automatic detection; with "
+                    "push-to-talk it behaves as below.")
+        else:
+            text = ("Waits for a pause, then speaks the whole utterance. Best "
+                    "wording and natural intonation, and it costs nothing "
+                    "while you are quiet.\nThe delay is however long you keep "
+                    "talking.")
+        self.stt_mode_note.config(text=text)
 
     def _refresh_gpu(self) -> None:
         pack = gpupack.status()
@@ -2303,6 +2345,8 @@ class SettingsWindow(tk.Toplevel):
         self._render_subs()
 
         self.stt_lang_var.set(c.stt.language)
+        self.stt_mode_var.set(c.stt.mode)
+        self._refresh_stt_mode()
         self.trans_method.set(
             "whisper" if c.stt.task == "translate" else "models")
         self.trans_enabled.set(c.translation.enabled)
@@ -2366,6 +2410,7 @@ class SettingsWindow(tk.Toplevel):
         c.text.review_timeout_s = max(5.0, float(self.review_timeout_var.get()))
 
         c.stt.language = self.stt_lang_var.get().strip() or "en"
+        c.stt.mode = self.stt_mode_var.get()
         by_whisper = self.trans_method.get() == "whisper"
         c.stt.task = "translate" if (by_whisper and self.trans_enabled.get())             else "transcribe"
         # Exclusive: running both would translate the text twice, the second

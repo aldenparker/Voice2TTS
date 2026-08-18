@@ -454,6 +454,39 @@ def main() -> int:
           win.trans_voice_btn.winfo_manager() == "",
           "nothing is being translated, so nothing mismatches")
 
+    print("\n[recognition mode]")
+    check("sentence mode is the default", cfg.stt.mode == "sentence",
+          "streaming costs half a core the whole time you are talking")
+    win.stt_mode_var.set("sentence")
+    win._refresh_stt_mode()
+    sentence_note = win.stt_mode_note.cget("text")
+    check("the sentence note says what it costs you",
+          "however long you keep talking" in sentence_note, sentence_note)
+
+    win.stt_mode_var.set("streaming")
+    win._refresh_stt_mode()
+    streaming_note = win.stt_mode_note.cget("text")
+    check("the streaming note states the compute cost",
+          "half a processor core" in streaming_note, streaming_note)
+    check("and that a GPU does not make it cheaper",
+          "same on CPU and GPU" in streaming_note,
+          "measured -- the obvious assumption is wrong, so it is said out loud")
+    check("and that it needs automatic detection",
+          "automatic detection" in streaming_note, streaming_note)
+    check("the two notes differ", sentence_note != streaming_note)
+
+    win._collect()
+    check("the mode is collected", cfg.stt.mode == "streaming", cfg.stt.mode)
+    win.stt_mode_var.set("sentence")
+    win._collect()
+    check("and switches back", cfg.stt.mode == "sentence", cfg.stt.mode)
+    cfg.stt.mode = "streaming"
+    win._load_from_config()
+    check("and loads back into the radio buttons",
+          win.stt_mode_var.get() == "streaming", win.stt_mode_var.get())
+    cfg.stt.mode = "sentence"
+    win._load_from_config()
+
     print("\n[recognition language]")
     win.model_var.set("small")
     win.stt_lang_var.set("auto")
