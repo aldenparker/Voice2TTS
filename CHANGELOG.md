@@ -5,6 +5,46 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Live translation.** Speak one language, have the far end hear another,
+  entirely on this machine. Settings → **Translate** picks the pair, downloads
+  the models and says up front why a combination will not work.
+
+  Models are Helsinki-NLP's OPUS-MT, converted to CTranslate2 and published as
+  release assets. Converting them ourselves rather than using a pre-converted
+  third-party set settles the licence question — those state terms for their
+  software and nothing about the weights — and turned out smaller and faster
+  anyway: **63 MB against 151, and 19 ms against 37** on a short sentence.
+  Each download carries the CC-BY-4.0 attribution the licence requires.
+
+- **Whisper's own translation**, as a second method: one setting, no download,
+  English only. Measured on synthesized German — `base` is not good enough
+  (*"can you be nice to me?"* for *"kannst du mich hören?"*), `small` is, and
+  `medium` costs three times as much for nothing. The tab says so.
+
+- **Multilingual recognition.** The Whisper models without `.en` are now
+  offered, with a spoken-language picker and `auto` detection — what
+  translating *from* anything but English needs.
+
+- **Two pronunciation lists.** Settings → Words has a *Rules for* switch.
+  Source rules fix what the recogniser misheard and run before translation;
+  target rules fix what the voice says badly and run after it.
+
+- The Translate tab names a voice that speaks the target language and switches
+  to it with one button, rather than only warning about the mismatch.
+
+### Fixed
+
+- Target substitution rules were written to the config but loaded back as plain
+  dictionaries, so a saved rule would have broken the substituter.
+- Four modules announced themselves to servers as `Voice2TTS/0.2` long after
+  0.2 shipped. There is one User-Agent now, and it reports the real version.
+- A model whose tokenizer pair was half-downloaded was treated as usable, and
+  would have decoded output with the source tokenizer — producing text with raw
+  tokenizer marks in it rather than an error.
+
+
 ## [0.6.2]
 
 ### Fixed

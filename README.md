@@ -120,6 +120,48 @@ catalogue](https://huggingface.co/rhasspy/piper-voices) — 100+ voices across m
 languages — and downloads them into `%APPDATA%\Voice2TTS\voices`. Bundled voices
 can't be deleted; downloaded ones can.
 
+### Translating what you say
+
+Settings → **Translate**. Speak English, have the far end hear German. It runs on
+this machine like everything else — nothing is sent anywhere.
+
+Two ways to do it, and the tab explains which applies:
+
+| | Downloaded models | The recogniser |
+|---|---|---|
+| Languages | any pair, either direction | **to English only** |
+| Download | ~60 MB per direction | none |
+| Quality | good | usable from `small` up |
+| Cost | ~50–130 ms | ~1.1 s on CPU at `small` |
+
+**Downloaded models** are OPUS-MT, converted to CTranslate2 and published as
+release assets. Pick the pair, press Download, and it appears in the list. Pairs
+nobody publishes directly are routed through English automatically, at the cost
+of a second hop.
+
+**The recogniser** is Whisper translating as it listens — one setting and no
+download, but it only ever produces English. It needs a multilingual model
+(`small` or better; `base` returns *"can you be nice to me?"* for *"kannst du
+mich hören?"*).
+
+Three things have to line up, and the tab says so in plain words when they do
+not:
+
+- **The recognition model must hear the language you speak.** The models ending
+  in `.en` hear English only. Settings → Recognition has the multilingual ones
+  and a spoken-language picker.
+- **The voice must speak the target language.** A German sentence read by an
+  English voice is confident gibberish. The tab names a voice that fits and
+  switches to it with one button.
+- **Words rules come in two lists.** Settings → Words has a *Rules for* switch:
+  *What I said* fixes what the recogniser misheard and runs **before**
+  translation; *What is spoken* fixes what the voice pronounces badly and runs
+  **after** it. Applying an English pronunciation list to German output would be
+  nonsense, which is why they are separate.
+
+Models are Helsinki-NLP's work, used under CC-BY-4.0. Each download carries a
+`LICENSE` file with the attribution that licence requires.
+
 ## Making your own voice
 
 Settings → **Studio**. Two ways to get a voice nobody else has, with very
@@ -435,6 +477,7 @@ speakers and no microphone.
       vad.py          Silero VAD + endpointing state machine
       stt.py          faster-whisper wrapper
       tts.py          Piper wrapper
+      translate.py    OPUS-MT models: catalogue, install, translation
       output.py       multi-device fan-out
       hotkey.py       global hotkey with press/release
       cable.py        virtual cable detection and assisted install
@@ -450,6 +493,7 @@ speakers and no microphone.
       designer.py     speaker blending, projection, baking
       dsp.py          the designer's effects chain
       v2tvoice.py     the .v2tvoice recipe format
+      net.py          one User-Agent, resumable downloads, checksums
       updater.py      GitHub release checks and one-click install
       cuda.py         Windows CUDA DLL preloading
       config.py       TOML-backed settings
