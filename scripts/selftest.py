@@ -2140,6 +2140,147 @@ def test_net() -> None:
         server.server_close()
 
 
+def test_model_catalogue() -> None:
+    """Finding, fetching and installing translation models."""
+    print("\n[model catalogue]")
+    import hashlib
+    import http.server
+    import io
+    import json
+    import tempfile
+    import threading
+    import zipfile
+
+    from voice2tts import translate
+
+    check("known languages get a name",
+          translate.language_name("de") == "German")
+    check("unknown ones show the code rather than 'Unknown'",
+          translate.language_name("xx") == "xx",
+          "a code is at least something to look up")
+
+    entries = translate.parse_catalogue({"pairs": [
+        {"source": "fr", "target": "en", "asset": "fr_en.zip", "bytes": 5},
+        {"source": "en", "target": "de", "asset": "en_de.zip", "bytes": 3,
+         "sha256": "ab", "licence": "CC-BY-4.0"},
+        {"target": "en", "asset": "broken.zip"},
+    ]})
+    check("a catalogue parses", [e.code for e in entries] == ["en_de", "fr_en"],
+          str([e.code for e in entries]))
+    check("and is sorted", entries[0].source == "en")
+    check("an unreadable entry is skipped, not fatal", len(entries) == 2,
+          "one bad pair must not hide every good one")
+    check("the licence travels with the entry",
+          entries[0].licence == "CC-BY-4.0")
+
+    # A real package: the smallest thing install_package will accept.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("model/model.bin", b"weights")
+        zf.writestr("model/config.json", b"{}")
+        zf.writestr("source.spm", b"in")
+        zf.writestr("target.spm", b"out")
+        zf.writestr("LICENSE", b"CC-BY-4.0")
+    package = buf.getvalue()
+    package_sha = hashlib.sha256(package).hexdigest()
+
+    manifest = {"schema": 1, "pairs": [{
+        "source": "en", "target": "de", "asset": "en_de.zip",
+        "bytes": len(package), "sha256": package_sha,
+        "origin": "Helsinki-NLP/opus-mt-en-de", "licence": "CC-BY-4.0",
+        "licence_url": "https://creativecommons.org/licenses/by/4.0/",
+    }]}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path.endswith("manifest.json"):
+                body = json.dumps(manifest).encode()
+            elif self.path.endswith("en_de.zip"):
+                body = package
+            else:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+
+    real_dir = translate.models_dir
+    real_url = translate.ASSET_URL
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            translate.models_dir = lambda: root
+            translate.ASSET_URL = (
+                f"http://127.0.0.1:{port}/{{repo}}/{{tag}}/{{asset}}")
+
+            found = translate.fetch_catalogue("owner/repo")
+            check("the catalogue is fetched", [e.code for e in found] == ["en_de"],
+                  str([e.code for e in found]))
+            check("and cached to disk",
+                  (root / translate.CATALOGUE_CACHE).is_file(),
+                  "so the picker opens offline")
+            check("nothing is installed yet", not found[0].installed)
+
+            installed = translate.download_pair(found[0], "owner/repo")
+            check("a pair downloads and installs", found[0].installed)
+            check("the archive is not left behind",
+                  not (root / "en_de.zip").exists(),
+                  "63 MB of zip beside the 63 MB it unpacked to")
+            check("both tokenizers survive installation",
+                  translate.tokenizers_in(installed) is not None)
+            check("and so does the licence",
+                  (installed / "LICENSE").is_file(),
+                  "CC-BY requires the attribution travel with the model")
+
+            # Offline: the cache is what makes the picker usable.
+            server.shutdown()
+            offline = translate.fetch_catalogue("owner/repo", timeout=2.0)
+            check("an offline fetch falls back to the cache",
+                  [e.code for e in offline] == ["en_de"], str(offline))
+
+            (root / translate.CATALOGUE_CACHE).unlink()
+            check("with no cache it returns nothing rather than raising",
+                  translate.fetch_catalogue("owner/repo", timeout=2.0) == [])
+    finally:
+        translate.models_dir = real_dir
+        translate.ASSET_URL = real_url
+        server.server_close()
+
+    # A corrupt download must install nothing at all.
+    server2 = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server2.serve_forever, daemon=True).start()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            translate.models_dir = lambda: root
+            translate.ASSET_URL = (
+                f"http://127.0.0.1:{server2.server_address[1]}"
+                "/{repo}/{tag}/{asset}")
+            tampered = translate.Available(
+                source="en", target="de", asset="en_de.zip",
+                size=len(package), sha256="0" * 64)
+            try:
+                translate.download_pair(tampered, "owner/repo")
+                check("a tampered package is refused", False, "it installed")
+            except RuntimeError as exc:
+                check("a tampered package is refused", "checksum" in str(exc))
+            check("and leaves nothing installed",
+                  not (root / "en_de").exists() and not (root / "en_de.zip").exists())
+    finally:
+        translate.models_dir = real_dir
+        translate.ASSET_URL = real_url
+        server2.shutdown()
+        server2.server_close()
+
+
 def test_translate() -> None:
     """Managing translation models. Translating itself needs one installed."""
     print("\n[translation]")
@@ -3441,6 +3582,7 @@ def main() -> int:
     test_vad()
     test_net()
     test_translate()
+    test_model_catalogue()
     test_stt()
     test_device_lists()
     if not no_audio:

@@ -24,6 +24,7 @@ them.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -31,6 +32,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import net
 from .paths import cache_dir
 
 log = logging.getLogger(__name__)
@@ -234,6 +236,141 @@ def remove_pair(source: str, target: str) -> bool:
 
 
 # -- translating ------------------------------------------------------------
+
+
+# -- the published catalogue ------------------------------------------------
+
+# Models are attached to a release of their own rather than to an app release:
+# they change on a different schedule (a new pair does not need a new build),
+# and an 800 MB app release would be absurd. The tag is pinned rather than
+# "latest" so a shipped build keeps working when a newer set is published --
+# an old build should not start downloading models converted against a
+# CTranslate2 it does not have.
+MODELS_TAG = "models-1"
+ASSET_URL = "https://github.com/{repo}/releases/download/{tag}/{asset}"
+
+# A copy of the last catalogue fetched, so the picker can list what is
+# available without a round trip, and still show something useful offline.
+CATALOGUE_CACHE = "catalogue.json"
+
+LANGUAGE_NAMES = {
+    "en": "English", "de": "German", "fr": "French", "es": "Spanish",
+    "it": "Italian", "nl": "Dutch", "pt": "Portuguese", "ru": "Russian",
+    "pl": "Polish", "zh": "Chinese", "ja": "Japanese", "ko": "Korean",
+    "ar": "Arabic", "hi": "Hindi", "tr": "Turkish", "sv": "Swedish",
+    "da": "Danish", "fi": "Finnish", "cs": "Czech", "uk": "Ukrainian",
+}
+
+
+def language_name(code: str) -> str:
+    """A name for a language code, falling back to the code itself.
+
+    Unknown codes are shown as-is rather than as "Unknown": the code is at
+    least a true thing the user can look up.
+    """
+    return LANGUAGE_NAMES.get(code, code)
+
+
+@dataclass(frozen=True)
+class Available:
+    """One pair published in the catalogue, installed or not."""
+
+    source: str
+    target: str
+    asset: str
+    size: int = 0
+    sha256: str = ""
+    origin: str = ""
+    licence: str = ""
+    licence_url: str = ""
+
+    @property
+    def code(self) -> str:
+        return f"{self.source}_{self.target}"
+
+    @property
+    def label(self) -> str:
+        return f"{language_name(self.source)} → {language_name(self.target)}"
+
+    @property
+    def installed(self) -> bool:
+        return is_usable(models_dir() / self.code)
+
+    def url(self, repo: str, tag: str = MODELS_TAG) -> str:
+        return ASSET_URL.format(repo=repo, tag=tag, asset=self.asset)
+
+
+def parse_catalogue(data: dict) -> list[Available]:
+    """Turn manifest.json into entries. Pure, so it needs no network.
+
+    Skips entries it cannot use rather than failing the whole list: a future
+    manifest may carry pairs this build does not understand, and one of those
+    should not make every other pair unavailable.
+    """
+    entries = []
+    for item in data.get("pairs", []):
+        try:
+            entries.append(Available(
+                source=str(item["source"]), target=str(item["target"]),
+                asset=str(item["asset"]), size=int(item.get("bytes") or 0),
+                sha256=str(item.get("sha256") or ""),
+                origin=str(item.get("origin") or ""),
+                licence=str(item.get("licence") or ""),
+                licence_url=str(item.get("licence_url") or ""),
+            ))
+        except (KeyError, TypeError, ValueError) as exc:
+            log.warning("skipping an unreadable catalogue entry: %s", exc)
+    return sorted(entries, key=lambda e: (e.source, e.target))
+
+
+def fetch_catalogue(repo: str, tag: str = MODELS_TAG,
+                    timeout: float = 30.0) -> list[Available]:
+    """What is published, from the network, falling back to the last copy.
+
+    A failed fetch returns the cached list rather than raising: someone who
+    already downloaded a catalogue should still be able to see which models
+    they have, and telling them "no models exist" because the network blinked
+    would be worse than slightly stale.
+    """
+    url = ASSET_URL.format(repo=repo, tag=tag, asset="manifest.json")
+    cache = models_dir() / CATALOGUE_CACHE
+    try:
+        data = net.fetch_json(url, timeout)
+    except Exception as exc:  # noqa: BLE001 - offline is normal, not an error
+        log.warning("could not fetch the model catalogue: %s", exc)
+        if cache.is_file():
+            try:
+                return parse_catalogue(json.loads(cache.read_text(encoding="utf-8")))
+            except (OSError, ValueError) as bad:
+                log.warning("the cached catalogue is unreadable: %s", bad)
+        return []
+
+    entries = parse_catalogue(data)
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError as exc:
+        log.debug("could not cache the catalogue: %s", exc)
+    return entries
+
+
+def download_pair(entry: Available, repo: str, tag: str = MODELS_TAG,
+                  progress=None, timeout: float = 60.0) -> Path:
+    """Fetch and install one pair. Returns the installed directory.
+
+    The archive is kept in the models directory while it downloads so a
+    resumed download survives a restart, and removed once installed -- 63 MB
+    of zip is not worth keeping beside the 63 MB it unpacked to.
+    """
+    archive = models_dir() / entry.asset
+    net.download(entry.url(repo, tag), archive, expected_size=entry.size,
+                 sha256=entry.sha256, progress=progress, timeout=timeout)
+    try:
+        installed = install_package(archive, entry.source, entry.target)
+    finally:
+        archive.unlink(missing_ok=True)
+    log.info("installed %s", entry.label)
+    return installed
 
 
 def split_sentences(text: str) -> list[str]:
