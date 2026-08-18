@@ -294,14 +294,48 @@ has to split around it:
 That split is the first real work, and it is worth doing even if translation
 slipped: the current single stage is already doing two jobs.
 
-### Engine — OPUS-MT on CTranslate2
+### Engine — OPUS-MT on CTranslate2 ✅ spiked, and it is comfortable
 
-Recommended, and the reason is dependencies: **CTranslate2 is already here**,
-because faster-whisper runs on it. Helsinki-NLP's OPUS-MT models convert to its
-format, are roughly 75 MB per language pair, and are permissively licensed. A
-translation feature that adds no new runtime dependency, and 75 MB per language
-someone actually wants, is a very different proposition from one that adds a
-framework.
+`spike/08_translate.py` measured it end to end on en→de. **Viable with room to
+spare.**
+
+| | |
+|---|---|
+| Model load | 180 ms, once |
+| 5 words | 38 ms |
+| 13 words | 57 ms |
+| 25 words (a long utterance) | 98 ms |
+| Budget | 300 ms, and the pipeline is ~300 ms today |
+
+So a long sentence adds about a third to end-to-end latency, and a typical one
+adds a tenth. Beam size 4 costs 96 ms against beam 1's 78 ms for the same
+output on these sentences; 4 is affordable and stays the default.
+
+Quality is genuinely usable — *"The build finished, but two of the tests are
+still failing on Windows"* came back as *"Der Build ist abgeschlossen, aber zwei
+der Tests scheitern immer noch unter Windows."*
+
+The reason this is cheap is dependencies: **CTranslate2 is already here**,
+because faster-whisper runs on it.
+
+**Models come from Argos Translate, pre-converted.** Their `.argosmodel`
+packages are a zip holding a CTranslate2 model directory and the SentencePiece
+tokenizer that goes with it, so nothing has to be converted — which matters,
+because converting Helsinki-NLP's own weights needs `transformers` and `torch`
+purely to rewrite files we would never train. 49 pairs from English, 100 in
+total.
+
+Measured facts that correct the original plan:
+
+- **~150 MB per pair, not 75.** The Argos CT2 model is 162 MB; the earlier
+  figure was for raw OPUS-MT weights.
+- **`sentencepiece` is a new runtime dependency.** 1.2 MB wheel. Small enough
+  not to argue about.
+- The packages also carry a `stanza/` directory — Argos's own sentence splitter,
+  a torch model. **Ignorable**: this pipeline already works one utterance at a
+  time, and unpacking it would drag torch in for nothing.
+- **`argos-net.com` answers Python's default User-Agent with 403.** The
+  downloader must set one.
 
 Alternatives considered:
 
@@ -329,12 +363,13 @@ second hop and its compounding errors.
 
 ### Work
 
-- [ ] **Spike first.** Convert one OPUS-MT pair, measure latency for a typical
-      sentence on CPU, and listen to the result. The budget is the thing to
-      establish: the pipeline is ~300 ms from utterance to first audio today,
-      and translation has to fit inside a total that still feels live. If a
-      small model costs 150 ms this is easy; if it costs 800 ms the feature
-      needs sentence-level pipelining first.
+- [x] **Spike first** — `spike/08_translate.py`. Done; see the table above.
+- [ ] **Decide the model licence question.** The Argos index and the package
+      metadata both state no licence. Upstream OPUS-MT is CC-BY-4.0, which is
+      fine, but "probably inherits it" is not good enough to put a download
+      button on in a GPL application. Either establish the terms and record
+      them the way base-voice licences already are, or convert Helsinki-NLP's
+      weights ourselves at build time, where the licence is stated plainly.
 - [ ] Split the substitution stage into source-side and target-side lists
 - [ ] `translate.py` — model download, cache, and a `translate(text, src, dst)`
       that is a pure function over a loaded model
@@ -353,7 +388,7 @@ second hop and its compounding errors.
 | Latency makes it unusable in a live call | Measure in the spike, before building anything on top |
 | An ASR error becomes a fluent mistranslation | Review-before-speaking on by default; show both texts |
 | Pivoting compounds errors | Prefer direct pairs; mark pivoted ones in the UI |
-| Model licences | OPUS-MT is permissive; NLLB is not. Check per pair and record it, as base-voice licences already are |
+| Model licences | **Open — see below.** OPUS-MT itself is CC-BY-4.0, but the Argos packages state no licence at all |
 
 ---
 
