@@ -405,6 +405,55 @@ def main() -> int:
           not cfg.translation.enabled and cfg.stt.task == "transcribe",
           f"chain {cfg.translation.enabled}, task {cfg.stt.task}")
 
+    print("\n[matching the voice to the target]")
+    from voice2tts import voices as voices_mod
+
+    # This is the failure the whole guard exists for: German text spoken by an
+    # English voice is confident gibberish, not an error.
+    win.trans_method.set("models")
+    win.trans_enabled.set(True)
+    win.model_var.set("base.en")
+    win.trans_source.set("en")
+    win.trans_target.set("de")
+    english = next(k for k in voices_mod.installed_keys()
+                   if voices_mod.voice_language(k) == "en")
+    win.voice_var.set(english)
+    check("the voice language is actually readable",
+          win._voice_language() == "en", win._voice_language())
+
+    win._refresh_translate_route()
+    german = win._matching_voice("de")
+    if translate.find_pair("en", "de") is None:
+        print("  SKIP  voice mismatch note (no en->de model installed)")
+    else:
+        check("a mismatched voice is reported",
+              "mispronounce" in win.trans_route.cget("text"),
+              win.trans_route.cget("text"))
+        if german:
+            check("and the fix is named",
+                  f"use {german}" in win.trans_route.cget("text"),
+                  win.trans_route.cget("text"))
+
+    if german:
+        check("the button offers the matching voice",
+              win.trans_voice_btn.winfo_manager() != "",
+              "it should be visible while the voice does not match")
+        win._use_matching_voice()
+        check("and switching works", win.voice_var.get() == german,
+              win.voice_var.get())
+        check("the button hides once the voice matches",
+              win.trans_voice_btn.winfo_manager() == "",
+              "there is nothing left to fix")
+        win.voice_var.set(english)
+    else:
+        print("  SKIP  matching-voice button (no German voice installed)")
+
+    win.trans_enabled.set(False)
+    win._refresh_translate_route()
+    check("no voice prompt while translation is off",
+          win.trans_voice_btn.winfo_manager() == "",
+          "nothing is being translated, so nothing mismatches")
+
     print("\n[recognition language]")
     win.model_var.set("small")
     win.stt_lang_var.set("auto")

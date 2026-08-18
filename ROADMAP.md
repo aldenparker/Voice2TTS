@@ -471,11 +471,17 @@ translate the text twice, the second time from a language it is no longer in.
       config refuses the combinations that cannot work (translating *from* a
       language an English-only model cannot hear, or detecting the language of
       a model that only knows one).
-- [ ] **The voice must match the target language.** Piper voices are
+- [x] **The voice must match the target language.** Piper voices are
       language-specific, and speaking German text with an English voice produces
-      confident gibberish. The existing language guard already knows how to
-      detect this mismatch; here it has to *drive* the voice choice rather than
-      warn about it.
+      confident gibberish. The Translate tab now names the mismatch *and* the
+      voice that fixes it, with one button to switch; when nothing installed
+      speaks the target language it points at the Voice library.
+
+      Worth recording: the first version of that check silently never fired.
+      `voice_language()` takes a voice key and was being passed a `Path`, and a
+      broad `except Exception` around it turned the resulting error into "" --
+      "cannot tell", which reads exactly like "no mismatch". The catch is gone;
+      the function already returns "" for anything genuinely unknown.
 
 ### Work
 

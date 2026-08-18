@@ -36,7 +36,7 @@ from .config import (
 )
 from .diagnostics import diagnostics
 from .hotkey import describe
-from .paths import config_path, find_voice, is_frozen, list_voices, log_path
+from .paths import config_path, is_frozen, list_voices, log_path
 from .pipeline import Pipeline
 from .platform_win import run_at_login, set_run_at_login
 from .substitutions import STARTER_RULES, Rule
@@ -957,6 +957,13 @@ class SettingsWindow(tk.Toplevel):
         self.trans_route = ttk.Label(tab, text="", justify="left", foreground="#555")
         self.trans_route.grid(row=3, column=0, columnspan=5, sticky="w", pady=(8, 4))
 
+        # Warning about a mismatched voice is not much use if fixing it means
+        # working out which of the installed voices speaks German. When one
+        # does, this switches to it; when none does, it says where to get one.
+        self.trans_voice_btn = ttk.Button(tab, text="Use a matching voice",
+                                          command=self._use_matching_voice)
+        self.trans_voice_btn.grid(row=3, column=4, sticky="e", padx=(8, 0))
+
         top = ttk.Frame(tab)
         top.grid(row=4, column=0, columnspan=5, sticky="ew", pady=(4, 6))
         ttk.Button(top, text="Load catalogue",
@@ -1036,6 +1043,11 @@ class SettingsWindow(tk.Toplevel):
         # is built after this one, so during construction there is no widget yet.
         stt_model = (self.model_var.get() if hasattr(self, "model_var")
                      else self.cfg.stt.model)
+        # Whisper's own translation always produces English, so that is the
+        # language the voice has to speak in that mode.
+        self._update_voice_button(
+            "" if not self.trans_enabled.get()
+            else "en" if self.trans_method.get() == "whisper" else target)
         if not self.trans_enabled.get():
             self.trans_route.config(
                 text="Translation is off; your own words are spoken as recognised.",
@@ -1094,11 +1106,13 @@ class SettingsWindow(tk.Toplevel):
         # confident gibberish, which is worse than an error.
         spoken_by_voice = self._voice_language()
         if spoken_by_voice and spoken_by_voice != target:
+            fix = self._matching_voice(target)
             notes.append(
                 f"the selected voice speaks "
                 f"{translate.language_name(spoken_by_voice)}, not "
                 f"{translate.language_name(target)} -- it will mispronounce "
-                "the output")
+                "the output" + (f" (use {fix})" if fix else
+                                "; the Voice library tab can fetch one"))
 
         route_text = " → ".join(
             [translate.language_name(source)]
@@ -1109,13 +1123,49 @@ class SettingsWindow(tk.Toplevel):
         else:
             self.trans_route.config(text=route_text, foreground="#070")
 
+    def _matching_voice(self, language: str) -> str | None:
+        """An installed voice that speaks `language`, or None."""
+        if not language:
+            return None
+        return next((key for key in voices.installed_keys()
+                     if voices.voice_language(key) == language), None)
+
+    def _update_voice_button(self, wanted: str) -> None:
+        """Offer the fix only when there is one to offer."""
+        if not hasattr(self, "trans_voice_btn"):
+            return
+        match = self._matching_voice(wanted)
+        if match and self.voice_var.get().strip() != match:
+            self.trans_voice_btn.grid()
+            self.trans_voice_btn.config(text=f"Use {match}")
+        else:
+            self.trans_voice_btn.grid_remove()
+
+    def _use_matching_voice(self) -> None:
+        """Switch to a voice that speaks the target language."""
+        wanted = ("en" if self.trans_method.get() == "whisper"
+                  else self.trans_target.get())
+        match = self._matching_voice(wanted)
+        if match is None:
+            self.trans_status.config(
+                text=f"No installed voice speaks {wanted}. "
+                     "The Voice library tab can fetch one.")
+            return
+        self.voice_var.set(match)
+        self.cfg.tts.voice = match
+        self.pipeline.apply_tts_changes()
+        self.trans_status.config(text=f"Now speaking with {match}")
+        self._refresh_translate_route()
+        self._check_language()
+
     def _voice_language(self) -> str:
-        """The language of the selected voice, or "" if it cannot be told."""
-        try:
-            path = find_voice(self.voice_var.get())
-            return voices.voice_language(path) if path else ""
-        except Exception:  # noqa: BLE001 - a guess that fails is not an error
-            return ""
+        """The language of the selected voice, or "" if it cannot be told.
+
+        No try/except: voice_language already returns "" for anything it cannot
+        work out, and a broad catch here hid the fact that this was being passed
+        a Path when it wants a voice key -- so the mismatch was never reported.
+        """
+        return voices.voice_language(self.voice_var.get().strip())
 
     def _load_translate_catalogue(self) -> None:
         from . import translate
