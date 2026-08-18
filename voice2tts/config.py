@@ -37,6 +37,21 @@ WHISPER_MODELS = (
 # models are what any other target language needs.
 STT_TASKS = ("transcribe", "translate")
 
+# When recognition happens, which is a genuine choice rather than a tuning knob.
+#
+#   sentence  -- wait for the speaker to pause, then recognise the whole thing.
+#                Best words, whole sentences, natural intonation. The delay is
+#                however long they keep talking.
+#   streaming -- recognise while they are still speaking and say each phrase as
+#                it settles. Much lower typical delay, at the cost of ~0.5x
+#                realtime CPU for as long as anyone is talking, and speech
+#                delivered a phrase at a time.
+#
+# 0.6.1 tried to have both at once by cutting continuous speech into segments.
+# It cut mid-thought and the app talked over itself; it was reverted. The two
+# behaviours want different things, so they are offered as different modes.
+STT_MODES = ("sentence", "streaming")
+
 
 @dataclass
 class OutputTarget:
@@ -97,6 +112,9 @@ class SttConfig:
     # "auto" lets Whisper detect it per utterance, which costs a little accuracy
     # and is only meaningful on a multilingual model.
     language: str = "en"
+    # See STT_MODES above. "sentence" is the default because it is the one that
+    # costs nothing and never sounds chopped.
+    mode: str = "sentence"
     # "translate" makes Whisper emit English regardless of what was spoken.
     # Multilingual models only -- a .en model has no other language to translate
     # from, and validate() says so.
@@ -395,6 +413,16 @@ class Config:
         self.tts.length_scale = min(max(self.tts.length_scale, 0.4), 3.0)
         self.tts.volume = min(max(self.tts.volume, 0.0), 2.0)
         self.stt.beam_size = max(1, int(self.stt.beam_size))
+        if self.stt.mode not in STT_MODES:
+            log.warning("unknown recognition mode %r, waiting for sentences",
+                        self.stt.mode)
+            self.stt.mode = "sentence"
+        if self.stt.mode == "streaming" and self.trigger.mode == "ptt":
+            # Streaming needs to know when speech starts, which is what the VAD
+            # is for. Push-to-talk hands over one finished recording, so there
+            # is nothing to stream.
+            log.info("streaming needs automatic detection; push-to-talk "
+                     "recognises on release as usual")
         if self.stt.task not in STT_TASKS:
             log.warning("unknown recognition task %r, transcribing", self.stt.task)
             self.stt.task = "transcribe"

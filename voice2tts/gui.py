@@ -2225,15 +2225,31 @@ class SettingsWindow(tk.Toplevel):
     def append_log(self, kind: str, message: str) -> None:
         if self._closing or not self.winfo_exists():
             return
+        if kind == "partial":
+            # Streaming's unsettled text: it arrives several times a second and
+            # changes as Whisper makes up its mind, so it belongs in the
+            # transcript pane as a preview, not as log lines nobody can read.
+            self._show_partial(message)
+            return
         self.logbox.configure(state="normal")
         self.logbox.insert("end", f"[{kind}] {message}\n")
         self.logbox.see("end")
         self.logbox.configure(state="disabled")
         if kind == "transcript":
-            self.transcript.configure(state="normal")
-            self.transcript.delete("1.0", "end")
-            self.transcript.insert("1.0", message)
-            self.transcript.configure(state="disabled")
+            self._settled_transcript = message
+            self._show_transcript(message)
+
+    def _show_partial(self, message: str) -> None:
+        """Preview what is still being heard, after what has been settled."""
+        settled = getattr(self, "_settled_transcript", "")
+        self._show_transcript(f"{settled} {message}".strip() if settled
+                              else message)
+
+    def _show_transcript(self, message: str) -> None:
+        self.transcript.configure(state="normal")
+        self.transcript.delete("1.0", "end")
+        self.transcript.insert("1.0", message)
+        self.transcript.configure(state="disabled")
 
     # -- config binding -------------------------------------------------------
 

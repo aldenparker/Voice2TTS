@@ -100,6 +100,23 @@ class Pipeline:
         self.substituter = Substituter()          # what was misheard
         self.target_substituter = Substituter()   # what is said badly
         self.translator = None                    # a translate.Chain, when on
+        self.streamer = None                      # a StreamingRecognizer, when on
+        # Windows on their way to the streaming thread. Bounded: if that
+        # thread cannot keep up, dropping the oldest window is far better
+        # than growing without limit, and falling behind is already
+        # detected and reported by the recogniser itself.
+        self._stream_windows: queue.Queue = queue.Queue(maxsize=400)
+        self._stream_active = threading.Event()
+        self._streaming_degraded = False
+        # Snapshotted at start(), never read live: the segmenter thread
+        # decides per window whether to forward audio to the streaming
+        # thread, and that thread only exists if it was spawned. Reading
+        # the config live would let a settings change point audio at a
+        # thread that is not running.
+        self._streaming_started = False
+        # Set alongside _vad_dirty when the in-progress utterance must be
+        # thrown away rather than spoken -- see _degrade_streaming.
+        self._vad_drop_pending = False
         self.apply_text_changes()
         self.last_transcript = ""
         self.output_failures: list[tuple[str, str]] = []
@@ -174,7 +191,10 @@ class Pipeline:
                 log.exception("observer failed")
 
     def _emit(self, kind: str, message: str) -> None:
-        log.info("[%s] %s", kind, message)
+        # "partial" fires several times a second in streaming mode; at info it
+        # would bury everything else in the log.
+        log.log(logging.DEBUG if kind == "partial" else logging.INFO,
+                "[%s] %s", kind, message)
         self._notify(("event", (kind, message)))
 
     # -- lifecycle ------------------------------------------------------------
@@ -194,11 +214,15 @@ class Pipeline:
                 self._set_state(State.STOPPED)
                 raise
 
+            self._streaming_started = self.cfg.stt.mode == "streaming"
+            self._streaming_degraded = False
             self._running.set()
             self._spawn(self._notifier_loop, "notifier")
             self._spawn(self._segmenter_loop, "segmenter")
             self._spawn(self._worker_loop, "worker")
             self._spawn(self._watchdog_loop, "watchdog")
+            if self._streaming_started:
+                self._spawn(self._streaming_loop, "streaming")
             self._start_hotkey()
             self._set_state(State.IDLE)
             self._emit("info", "Running")
@@ -217,6 +241,19 @@ class Pipeline:
         self._emit("info", "Warming up models...")
         self.stt.warmup()
         self.tts.warmup()
+
+    @property
+    def streaming_mode(self) -> bool:
+        """Whether text should come out while someone is still speaking.
+
+        Push-to-talk hands over one finished recording, so there is nothing to
+        stream even when the mode is selected -- and `_streaming_degraded` turns
+        it off for the rest of the session once the machine has proved it cannot
+        keep up.
+        """
+        return (self._streaming_started
+                and self.cfg.trigger.mode != "ptt"
+                and not self._streaming_degraded)
 
     def _load_translator(self) -> None:
         """Build the translation chain, or leave it off and say why.
@@ -529,13 +566,15 @@ class Pipeline:
             # Settings changed. Rebuild here, where nothing else is mid-window.
             if self._vad_dirty.is_set():
                 self._vad_dirty.clear()
+                drop_pending = self._vad_drop_pending
+                self._vad_drop_pending = False
                 pending = self.segmenter.flush()
                 self.segmenter = VadSegmenter(
                     self.cfg.vad,
                     preroll_ms=self.cfg.trigger.preroll_ms,
                     max_utterance_s=self.cfg.trigger.max_utterance_s,
                 )
-                if pending is not None:
+                if pending is not None and not drop_pending:
                     self._submit(pending)
 
             # Suppress VAD while speaking, or the synthesized voice leaking through
@@ -545,7 +584,14 @@ class Pipeline:
                 and self.sink is not None
                 and self.sink.active
             ):
-                if self.segmenter.active:
+                if self.streaming_mode:
+                    # The streaming thread owns the buffer here, so ask it to
+                    # release what it has rather than reaching into the
+                    # segmenter's -- which in this mode is not the real one.
+                    self.segmenter.suspend()
+                    if self._stream_active.is_set():
+                        self._stream_windows.put(_STOP)
+                elif self.segmenter.active:
                     # Keep what was captured before playback began; only stop
                     # listening. reset() here used to bin it.
                     pending = self.segmenter.suspend()
@@ -581,8 +627,108 @@ class Pipeline:
                 self._set_state(State.LISTENING)
             elif not self.segmenter.active and self.state is State.LISTENING:
                 self._set_state(State.IDLE)
+
+            if self.streaming_mode:
+                # The VAD is only here to say when speech starts and stops. The
+                # audio itself goes to the streaming thread, and the utterance
+                # the segmenter builds is deliberately NOT submitted -- doing
+                # both would say every word twice.
+                if self.segmenter.active:
+                    self._stream_active.set()
+                    try:
+                        self._stream_windows.put_nowait(window)
+                    except queue.Full:
+                        log.debug("streaming queue full; dropping a window")
+                elif self._stream_active.is_set():
+                    self._stream_windows.put(_STOP)
+                continue
+
             if utterance is not None:
                 self._submit(utterance)
+
+    def _streaming_loop(self) -> None:
+        """Recognise while the speaker is still going, on a thread of its own.
+
+        A pass takes around half a second, so this cannot live on the segmenter
+        thread -- that thread has to keep draining the capture queue every 32 ms
+        or windows are lost. The segmenter forwards audio here and this thread
+        does nothing but read it.
+        """
+        from .streaming import StreamingRecognizer
+
+        assert self.stt is not None
+        self.streamer = StreamingRecognizer(self.stt)
+        log.info("streaming recognition started")
+
+        while self._running.is_set():
+            try:
+                window = self._stream_windows.get(timeout=0.2)
+            except queue.Empty:
+                window = None
+
+            if window is _STOP:
+                # The speaker paused. Whatever is still held has no later pass
+                # to agree with, so it goes out on the strength of the last one
+                # rather than being silently dropped.
+                tail = self.streamer.finish()
+                if tail:
+                    self._submit(tail)
+                self._stream_active.clear()
+                continue
+
+            if window is not None:
+                self.streamer.feed(window)
+
+            if not self.streamer.buffered_s:
+                continue
+
+            try:
+                result = self.streamer.poll()
+            except Exception:
+                log.exception("streaming pass failed")
+                self._emit("warning", "Streaming hiccup; recovering")
+                self.streamer.reset()
+                continue
+            if result is None:
+                continue
+
+            if result.speakable:
+                self._submit(result.speakable)
+            if result.unstable:
+                # Shown, never spoken: this is the text still moving about.
+                self._emit("partial", result.unstable)
+            if result.fell_behind:
+                self._degrade_streaming()
+                return
+
+    def _degrade_streaming(self) -> None:
+        """Give up on streaming for the rest of the session, and say so.
+
+        Not a silent downgrade: the user chose this mode, and a mode that
+        quietly stops being the mode is worse than one that admits it. Anything
+        still buffered is released first so nothing is lost in the handover.
+        """
+        if self._streaming_degraded:
+            return
+        self._streaming_degraded = True
+        if self.streamer is not None:
+            tail = self.streamer.finish()
+            if tail:
+                self._submit(tail)
+        self._stream_active.clear()
+
+        # The segmenter has been accumulating this whole utterance from the
+        # moment speech started, and most of it has already been spoken. Handing
+        # that buffer to sentence mode would say the lot a second time -- which
+        # is exactly the talking-over-itself the soft endpoint was reverted for.
+        self._vad_drop_pending = True
+        self._vad_dirty.set()
+        self._emit(
+            "warning",
+            "This machine cannot recognise fast enough to stream, so speech "
+            "will now wait for a pause instead. Recognition -> Mode explains "
+            "the trade-off; a smaller Whisper model may let streaming work.",
+        )
 
     def _watchdog_loop(self) -> None:
         """Notice when the pipeline stops making progress, and say where.
@@ -693,13 +839,28 @@ class Pipeline:
                    f"{translated}  [{(time.perf_counter() - started) * 1000:.0f} ms]")
         return translated
 
-    def _handle_utterance(self, audio: np.ndarray) -> None:
+    def _handle_utterance(self, item) -> None:
+        """One unit of work: audio to recognise, or text already recognised.
+
+        Streaming mode does its own recognition on its own thread, so what
+        arrives here is text. Everything after recognition is identical, which
+        is why the two share this path rather than growing a second copy of the
+        substitution, translation, review and history logic.
+        """
+        if isinstance(item, str):
+            self._deliver(item, time.perf_counter())
+            return
+
         assert self.stt is not None
         self._set_state(State.THINKING)
         t0 = time.perf_counter()
-        text = self.stt.transcribe(audio)
+        text = self.stt.transcribe(item)
         if not text:
             return
+        self._deliver(text, t0)
+
+    def _deliver(self, text: str, t0: float) -> None:
+        """Rewrite, translate, review and speak an already-recognised utterance."""
         self.last_transcript = text
         self._emit("transcript", text)
 

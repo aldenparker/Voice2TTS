@@ -11,10 +11,12 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import wave
 from pathlib import Path
@@ -2136,14 +2138,26 @@ def test_streaming() -> None:
           spoken and spoken[0].endswith("five,"), str(spoken))
 
     # -- falling behind ------------------------------------------------------
-    rec = StreamingRecognizer(FakeEngine(["hello there."] * 6, delay=0.05),
-                              interval_s=0.25)
-    rec.interval_s = 0.01          # every pass is now "slow"
+    # A pass slower than the ceiling: no room left to stretch the interval.
+    # 0.25 s is the floor the constructor enforces, so the delay has to clear it.
+    rec = StreamingRecognizer(FakeEngine(["hello there."] * 6, delay=0.30),
+                              interval_s=0.25, max_interval_s=0.25)
     results = drive(rec, 4)
     check("a machine that cannot keep up says so",
           any(r.fell_behind for r in results),
           "pretending otherwise makes the lag worse than sentence mode")
     check("and it latches, rather than flapping", rec.behind)
+
+    # Before giving up it stretches the interval, so passes stop overlapping.
+    rec = StreamingRecognizer(FakeEngine(["hello there."] * 8, delay=0.30),
+                              interval_s=0.1, max_interval_s=2.0)
+    drive(rec, 3)
+    check("a slow model spreads the passes out instead of piling them up",
+          rec._interval_now > 0.1, f"interval now {rec._interval_now:.2f}s")
+    check("and does not give up while stretching still works", not rec.behind)
+    check("the trim target shrinks with the measured cost",
+          rec.target_buffer_s <= streaming.TRIM_AFTER_S,
+          f"{rec.target_buffer_s:.1f}s vs ceiling {streaming.TRIM_AFTER_S}s")
 
     # One slow pass is a hiccup, not a verdict.
     rec = StreamingRecognizer(FakeEngine(["hello there."] * 6))
@@ -3616,6 +3630,126 @@ def test_pipeline_translation_live() -> None:
         pipeline.shutdown()
 
 
+class _FakeCapture:
+    """Stands in for the microphone so only injected audio reaches the VAD.
+
+    A real microphone feeds the same queue, so live room noise interleaves with
+    whatever is being injected and the segmenter sees nonsense -- which once
+    produced a convincing but entirely fictitious ten-second gap.
+    """
+
+    def __init__(self):
+        self.queue: queue.Queue = queue.Queue(maxsize=400)
+        self.peak = 0.0
+        self.dropped = 0
+        self.failed = False
+        self.failure_reason = ""
+        self.rate = 16000
+
+    def check_alive(self, silence_timeout: float = 5.0) -> bool:
+        return True
+
+    def stop(self):
+        pass
+
+    def drain(self):
+        pass
+
+
+def test_pipeline_streaming() -> None:
+    """Streaming mode through the real threads. Needs a microphone to start."""
+    print("\n[streaming in the pipeline]")
+    from voice2tts.pipeline import Pipeline, State
+    from voice2tts.vad import WINDOW
+
+    audio = load_sample_16k()
+    if audio is None:
+        check("speech sample available", False, "could not load or generate")
+        return
+
+    cfg = load_config()
+    cfg.trigger.mode = "vad"
+    cfg.stt.mode = "streaming"
+    for target in cfg.audio.outputs:
+        target.enabled = False
+    cfg.translation.enabled = False
+
+    spoken: list[str] = []
+    events: list[tuple[str, str]] = []
+    pipeline = Pipeline(cfg, on_event=lambda k, m: events.append((k, m)))
+    pipeline.start()
+    try:
+        check("streaming is on", pipeline.streaming_mode)
+        real_speak = pipeline.speak
+        pipeline.speak = lambda text, _t0=None: (spoken.append(text),
+                                                 real_speak(text, _t0=_t0))[1]
+        pipeline.capture.stop()
+        pipeline.capture = _FakeCapture()
+
+        # Real time, because "text comes out before the speaker stops" cannot be
+        # tested any other way.
+        index = 0
+        while index + WINDOW <= len(audio):
+            try:
+                pipeline.capture.queue.put_nowait(audio[index:index + WINDOW])
+            except queue.Full:
+                pass
+            index += WINDOW
+            time.sleep(WINDOW / 16000)
+
+        quiet = np.zeros(WINDOW, dtype=np.float32)
+        for _ in range(70):
+            try:
+                pipeline.capture.queue.put_nowait(quiet)
+            except queue.Full:
+                pass
+            time.sleep(0.032)
+
+        deadline = time.time() + 40
+        while (time.time() < deadline
+               and pipeline.state not in (State.IDLE, State.LISTENING)):
+            time.sleep(0.2)
+
+        check("it did not get stuck",
+              pipeline.state in (State.IDLE, State.LISTENING),
+              pipeline.state.value)
+        check("something was spoken", bool(spoken), str(events[-3:]))
+
+        # THE failure that matters. The segmenter accumulates the whole
+        # utterance in parallel; if that ever reaches the speech path as well,
+        # every word is said twice -- which is what got the soft endpoint
+        # reverted. Words must appear once across everything spoken.
+        words = " ".join(spoken).lower().split()
+        longest_repeat = 0
+        for size in range(3, min(12, len(words) // 2 + 1)):
+            for start in range(len(words) - 2 * size + 1):
+                if words[start:start + size] == words[start + size:start + 2 * size]:
+                    longest_repeat = max(longest_repeat, size)
+        check("nothing is spoken twice", longest_repeat == 0,
+              f"a {longest_repeat}-word phrase repeats back to back: "
+              f"{' '.join(spoken)[:90]}")
+
+        check("no errors", not [m for k, m in events if k == "error"],
+              str([m for k, m in events if k == "error"]))
+    finally:
+        pipeline.shutdown()
+
+    # Sentence mode must be unaffected by any of this.
+    cfg.stt.mode = "sentence"
+    quiet_pipeline = Pipeline(cfg)
+    quiet_pipeline.start()
+    try:
+        check("sentence mode does not start the streaming thread",
+              not quiet_pipeline.streaming_mode,
+              "the default must stay exactly as it was")
+        check("and no streaming thread is running",
+              not any(t.name == "streaming"
+                      for t in threading.enumerate()),
+              str([t.name for t in threading.enumerate()]))
+    finally:
+        quiet_pipeline.shutdown()
+
+
 def test_pipeline_end_to_end() -> None:
     """Drive the real Pipeline threads with a recorded utterance.
 
@@ -3988,6 +4122,7 @@ def main() -> int:
         test_pipeline_end_to_end()
         # Needs an input device too, because Pipeline.start() opens one.
         test_pipeline_translation_live()
+        test_pipeline_streaming()
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 

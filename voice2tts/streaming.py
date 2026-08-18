@@ -42,20 +42,35 @@ log = logging.getLogger(__name__)
 # interval itself.
 DEFAULT_INTERVAL_S = 1.0
 
-# Trim once the buffer passes this. Chosen from the measured crossover (29 s on
-# the faster of the two paths) with a wide margin, because the crossover moves
-# with the model and the machine and being wrong here is what makes the mode
-# fall apart rather than merely disappoint.
+# The longest buffer ever kept, whatever the timings say. A hard ceiling on top
+# of the adaptive target below, so a machine that reads a wildly optimistic cost
+# once cannot decide to keep a minute of audio.
 TRIM_AFTER_S = 15.0
+
+# Aim to finish each pass in this fraction of the interval. The slack absorbs
+# the variation between passes -- decode time depends on how much was SAID, not
+# only on how long the buffer is, so identical buffers differ by a third.
+COST_TARGET = 0.6
+
+# Cost per second of buffer is measured, not assumed, because it varies far more
+# than any constant could cover: base.en on this machine runs ~35 ms per second
+# of buffer, small.en ~100 ms. A fixed trim point that suits one starves the
+# other. Seeded pessimistically so the first few passes are cautious.
+INITIAL_COST_PER_S = 0.10
 
 # Never trim away the audio a pass is still working on: the tail is where the
 # unstable text lives, and cutting into it would throw away context Whisper
 # needs to settle the words just before it.
 KEEP_TAIL_S = 5.0
 
-# A pass slower than the interval means we are behind. One is a hiccup -- a
-# background process, a page fault. Several in a row means this machine cannot
-# do it, and pretending otherwise makes the lag worse than sentence mode.
+# When passes get slower the interval stretches rather than the passes piling
+# up. Updates arrive less often, which is a graceful loss; overlapping passes
+# are not a loss but a collapse.
+MAX_INTERVAL_S = 2.5
+
+# Past that ceiling, stretching further would make streaming slower than just
+# waiting for the pause -- so it stops pretending. One slow pass is a hiccup (a
+# page fault, another process); several in a row is a verdict about the machine.
 SLOW_PASSES_BEFORE_GIVING_UP = 3
 
 # Sentence-ending punctuation. Speaking word by word sounds robotic and loses
@@ -123,10 +138,14 @@ class StreamingRecognizer:
     """
 
     def __init__(self, engine, interval_s: float = DEFAULT_INTERVAL_S,
-                 max_sentence_words: int = 25):
+                 max_sentence_words: int = 25,
+                 max_interval_s: float = MAX_INTERVAL_S):
         self.engine = engine
         self.interval_s = max(0.25, interval_s)
+        self.max_interval_s = max(self.interval_s, max_interval_s)
         self.max_sentence_words = max_sentence_words
+        # Stretches towards max_interval_s on a slower model or machine.
+        self._interval_now = self.interval_s
 
         self._audio: list[np.ndarray] = []
         self._samples = 0
@@ -135,6 +154,7 @@ class StreamingRecognizer:
         self._spoken_words = 0              # how much of _settled has gone out
         self._last_pass = 0.0
         self._slow_passes = 0
+        self._cost_per_s = INITIAL_COST_PER_S
         self.behind = False
 
     # -- feeding -------------------------------------------------------------
@@ -148,9 +168,20 @@ class StreamingRecognizer:
         return self._samples / SAMPLE_RATE
 
     @property
+    def target_buffer_s(self) -> float:
+        """How much audio can be re-read inside the interval, as measured.
+
+        This is what keeps the mode working across a fourfold difference in
+        model cost. Clamped below so there is always enough context for the
+        recogniser to settle the recent words, and above by TRIM_AFTER_S.
+        """
+        affordable = (self._interval_now * COST_TARGET) / max(self._cost_per_s, 1e-3)
+        return max(KEEP_TAIL_S + 2.0, min(TRIM_AFTER_S, affordable))
+
+    @property
     def due(self) -> bool:
         """Whether it is time for another pass."""
-        return (time.monotonic() - self._last_pass) >= self.interval_s
+        return (time.monotonic() - self._last_pass) >= self._interval_now
 
     def reset(self) -> None:
         self._audio.clear()
@@ -160,6 +191,8 @@ class StreamingRecognizer:
         self._spoken_words = 0
         self._slow_passes = 0
         self.behind = False
+        # The measured cost is a property of the model and the machine, not of
+        # this utterance, so it deliberately survives a reset.
 
     # -- reading -------------------------------------------------------------
 
@@ -176,14 +209,26 @@ class StreamingRecognizer:
 
         result = StreamResult(elapsed=elapsed)
 
-        # Falling behind is measured, not assumed: a pass that takes longer than
-        # the gap between passes means the buffer is growing faster than it can
-        # be read, and no amount of waiting fixes that.
-        if elapsed > self.interval_s:
+        # Smooth rather than jump: one slow pass (a page fault, another process)
+        # should nudge the target, not halve it.
+        measured = elapsed / max(self.buffered_s, 0.5)
+        self._cost_per_s = 0.7 * self._cost_per_s + 0.3 * measured
+
+        # Adapt before giving up: spread the passes out so they stop overlapping.
+        # Updates then arrive less often, which is a worse experience but still
+        # a working one.
+        self._interval_now = min(self.max_interval_s,
+                                 max(self.interval_s, elapsed / COST_TARGET))
+
+        # Giving up is measured, not assumed. Past the ceiling there is no more
+        # room to stretch, and streaming would be delivering text less often
+        # than simply waiting for the speaker to pause.
+        if elapsed > self.max_interval_s:
             self._slow_passes += 1
             if self._slow_passes >= SLOW_PASSES_BEFORE_GIVING_UP:
                 log.warning("streaming cannot keep up (%d passes over %.1fs); "
-                            "falling back", self._slow_passes, self.interval_s)
+                            "falling back", self._slow_passes,
+                            self.max_interval_s)
                 self.behind = True
                 result.fell_behind = True
         else:
@@ -241,7 +286,7 @@ class StreamingRecognizer:
         lands mid-word and the next pass reads a fragment. Returns the seconds
         dropped, for the caller's bookkeeping.
         """
-        if self.buffered_s <= TRIM_AFTER_S or not timed:
+        if self.buffered_s <= self.target_buffer_s or not timed:
             return 0.0
 
         limit = self.buffered_s - KEEP_TAIL_S
