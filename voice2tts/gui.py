@@ -40,6 +40,7 @@ from .paths import config_path, find_voice, is_frozen, list_voices, log_path
 from .pipeline import Pipeline
 from .platform_win import run_at_login, set_run_at_login
 from .substitutions import STARTER_RULES, Rule
+from .translate import LANGUAGE_NAMES
 
 log = logging.getLogger(__name__)
 
@@ -918,6 +919,22 @@ class SettingsWindow(tk.Toplevel):
                         command=self._refresh_translate_route).grid(
             row=1, column=0, columnspan=5, sticky="w", pady=(6, 4))
 
+        method = ttk.Frame(tab)
+        method.grid(row=1, column=1, columnspan=4, sticky="e", pady=(6, 4))
+        # Whisper can translate to English itself, for free, as part of
+        # recognition. It is strictly worse than a dedicated model for quality,
+        # and cannot do anything but English -- but it needs no download, which
+        # makes it the right default for the one case it covers.
+        self.trans_method = tk.StringVar(value="models")
+        ttk.Label(method, text="Using:").pack(side="left", padx=(0, 6))
+        ttk.Radiobutton(method, text="Downloaded models", value="models",
+                        variable=self.trans_method,
+                        command=self._switch_translate_method).pack(side="left")
+        ttk.Radiobutton(method, text="The recogniser (English only)", value="whisper",
+                        variable=self.trans_method,
+                        command=self._switch_translate_method).pack(
+            side="left", padx=(8, 0))
+
         picker = ttk.Frame(tab)
         picker.grid(row=2, column=0, columnspan=5, sticky="w")
         ttk.Label(picker, text="I speak").pack(side="left")
@@ -1002,16 +1019,55 @@ class SettingsWindow(tk.Toplevel):
         self.trans_target_combo["values"] = listed
         self._refresh_translate_route()
 
+    def _switch_translate_method(self) -> None:
+        """Whisper's own translation only ever produces English, so say so by
+        moving the target rather than letting it sit on something unreachable."""
+        if self.trans_method.get() == "whisper":
+            self.trans_target.set("en")
+        self._refresh_translate_route()
+
     def _refresh_translate_route(self) -> None:
         """Say what will happen, including every reason it might not work."""
         from . import translate
 
         source, target = self.trans_source.get(), self.trans_target.get()
+        # The widget, not the config: this describes what is selected now, so it
+        # must not wait for Apply to catch up with the Recognition tab. That tab
+        # is built after this one, so during construction there is no widget yet.
+        stt_model = (self.model_var.get() if hasattr(self, "model_var")
+                     else self.cfg.stt.model)
         if not self.trans_enabled.get():
             self.trans_route.config(
                 text="Translation is off; your own words are spoken as recognised.",
                 foreground="#555")
             return
+        # The recogniser branch first: it always produces English, so the
+        # same-language check below would report "does nothing" and hide the
+        # reason that actually matters -- an English-only recognition model.
+        if self.trans_method.get() == "whisper":
+            notes = []
+            if stt_model.endswith(".en"):
+                notes.append(f"{stt_model} hears English only, so there "
+                             "is nothing to translate -- pick a multilingual "
+                             "model on the Recognition tab")
+            elif stt_model in ("tiny", "base"):
+                # Measured on synthesized German: base returns "can you be nice
+                # to me?" for "kannst du mich hoeren?". small gets it right, at
+                # about 1.1 s per utterance on this CPU against base's 0.36 s.
+                notes.append(f"{stt_model} is too small to translate well -- "
+                             "small or better is worth the extra second")
+            if target != "en":
+                notes.append("the recogniser can only produce English")
+            elif source == "en":
+                notes.append("you are already speaking English, so this changes "
+                             "nothing")
+            self.trans_route.config(
+                text=f"{translate.language_name(source)} → English, by the "
+                     "recogniser. No download, lower quality than a dedicated "
+                     "model." + ("\nNote: " + "; ".join(notes) if notes else ""),
+                foreground="#a60" if notes else "#070")
+            return
+
         if source == target:
             self.trans_route.config(
                 text="Speaking and hearing the same language does nothing.",
@@ -1031,8 +1087,8 @@ class SettingsWindow(tk.Toplevel):
         if len(hops) > 1:
             notes.append(f"goes through {translate.language_name(hops[0].target)}, "
                          "which compounds errors")
-        if self.cfg.stt.model.endswith(".en") and source != "en":
-            notes.append(f"the {self.cfg.stt.model} recogniser hears English only "
+        if stt_model.endswith(".en") and source != "en":
+            notes.append(f"the {stt_model} recogniser hears English only "
                          "-- pick a multilingual model on the Recognition tab")
         # A voice that speaks a different language than the text produces
         # confident gibberish, which is worse than an error.
@@ -1738,17 +1794,30 @@ class SettingsWindow(tk.Toplevel):
             tab, textvariable=self.model_var, values=list(WHISPER_MODELS), width=24
         ).grid(row=0, column=1, sticky="w", padx=6, pady=2)
 
-        ttk.Label(tab, text="Compute device").grid(row=1, column=0, sticky="w")
+        ttk.Label(tab, text="Spoken language").grid(row=1, column=0, sticky="w")
+        self.stt_lang_var = tk.StringVar()
+        ttk.Combobox(
+            tab, textvariable=self.stt_lang_var,
+            values=["auto", *sorted(LANGUAGE_NAMES)], width=24,
+        ).grid(row=1, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(
+            tab,
+            text="Only the models without \".en\" can hear anything but English. "
+                 "\"auto\" detects\nper utterance, which costs a little accuracy.",
+            foreground="#555", justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        ttk.Label(tab, text="Compute device").grid(row=3, column=0, sticky="w")
         self.stt_device_var = tk.StringVar()
         ttk.Combobox(
             tab, textvariable=self.stt_device_var, values=["auto", "cuda", "cpu"],
             width=24, state="readonly",
-        ).grid(row=1, column=1, sticky="w", padx=6, pady=2)
+        ).grid(row=3, column=1, sticky="w", padx=6, pady=2)
 
-        ttk.Label(tab, text="Beam size").grid(row=2, column=0, sticky="w")
+        ttk.Label(tab, text="Beam size").grid(row=4, column=0, sticky="w")
         self.beam_var = tk.IntVar()
         ttk.Spinbox(tab, from_=1, to=5, textvariable=self.beam_var, width=6).grid(
-            row=2, column=1, sticky="w", padx=6, pady=2
+            row=4, column=1, sticky="w", padx=6, pady=2
         )
 
         ttk.Label(
@@ -1757,23 +1826,23 @@ class SettingsWindow(tk.Toplevel):
                  "(tray menu → Stop, then Start).",
             foreground="#555",
             justify="left",
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
         ttk.Separator(tab, orient="horizontal").grid(
-            row=4, column=0, columnspan=2, sticky="ew", pady=12
+            row=6, column=0, columnspan=2, sticky="ew", pady=12
         )
         ttk.Label(tab, text="GPU acceleration", font=("", 9, "bold")).grid(
-            row=5, column=0, columnspan=2, sticky="w"
+            row=7, column=0, columnspan=2, sticky="w"
         )
         self.gpu_label = ttk.Label(tab, text="", justify="left", foreground="#444")
-        self.gpu_label.grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 6))
+        self.gpu_label.grid(row=8, column=0, columnspan=2, sticky="w", pady=(2, 6))
         gpu_row = ttk.Frame(tab)
-        gpu_row.grid(row=7, column=0, columnspan=2, sticky="w")
+        gpu_row.grid(row=9, column=0, columnspan=2, sticky="w")
         self.gpu_btn = ttk.Button(gpu_row, text="", command=self._toggle_gpu_pack)
         self.gpu_btn.pack(side="left")
         self.gpu_progress = ttk.Progressbar(gpu_row, mode="indeterminate", length=200)
         self.gpu_note = ttk.Label(tab, text="", foreground="#666")
-        self.gpu_note.grid(row=8, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.gpu_note.grid(row=10, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         tab.columnconfigure(1, weight=1)
         self._refresh_gpu()
@@ -2186,6 +2255,9 @@ class SettingsWindow(tk.Toplevel):
         self._target_subs = copied(c.text.target_substitutions)
         self._render_subs()
 
+        self.stt_lang_var.set(c.stt.language)
+        self.trans_method.set(
+            "whisper" if c.stt.task == "translate" else "models")
         self.trans_enabled.set(c.translation.enabled)
         self.trans_source.set(c.translation.source)
         self.trans_target.set(c.translation.target)
@@ -2251,7 +2323,12 @@ class SettingsWindow(tk.Toplevel):
         c.text.review_before_speaking = self.review_var.get()
         c.text.review_timeout_s = max(5.0, float(self.review_timeout_var.get()))
 
-        c.translation.enabled = self.trans_enabled.get()
+        c.stt.language = self.stt_lang_var.get().strip() or "en"
+        by_whisper = self.trans_method.get() == "whisper"
+        c.stt.task = "translate" if (by_whisper and self.trans_enabled.get())             else "transcribe"
+        # Exclusive: running both would translate the text twice, the second
+        # time from a language it is no longer in.
+        c.translation.enabled = self.trans_enabled.get() and not by_whisper
         c.translation.source = self.trans_source.get().strip()
         c.translation.target = self.trans_target.get().strip()
 
@@ -2276,7 +2353,12 @@ class SettingsWindow(tk.Toplevel):
         self.pipeline.apply_translation_changes()
         # validate() can switch translation off (a no-op pair), so the checkbox
         # has to be told rather than left claiming something else.
-        self.trans_enabled.set(self.cfg.translation.enabled)
+        if self.trans_method.get() != "whisper":
+            self.trans_enabled.set(self.cfg.translation.enabled)
+        elif self.cfg.stt.task != "translate":
+            # validate() refused it -- an English-only model has nothing to
+            # translate from. Say so rather than leaving the box ticked.
+            self.trans_enabled.set(False)
         self._refresh_translate_route()
         # set_mode rebinds every hotkey from the config, so the clipboard and stop
         # combos are picked up along with the push-to-talk one.

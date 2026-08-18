@@ -435,7 +435,7 @@ Alternatives considered:
 
 | Option | Why not |
 |---|---|
-| Whisper's own `task="translate"` | Free, but translates **to English only**. Covers "I speak X, they hear English" and nothing else. Worth wiring up anyway — it is one parameter. |
+| Whisper's own `task="translate"` | ✅ **Done** — see below. To English only, but free. |
 | NLLB-200 (distilled 600M) | 200 languages in one model, but **CC-BY-NC**. A non-commercial model inside a GPL application is a licence story we should not want. |
 | argos-translate | Wraps the same OPUS-MT/CTranslate2 stack, and adds a dependency to do it. |
 | A cloud API | Contradicts the entire premise. Nothing in this app leaves the machine. |
@@ -443,12 +443,34 @@ Alternatives considered:
 Pairs OPUS-MT does not publish directly pivot through English, at the cost of a
 second hop and its compounding errors.
 
+### The second method: Whisper translates it itself ✅ done
+
+Whisper can emit English instead of the spoken language for one extra
+parameter and no download. Measured against German synthesized by
+`de_DE-thorsten-medium` and fed back through our own `WhisperEngine`:
+
+| Model | "Hallo, kannst du mich hören?" | Per utterance, CPU |
+|---|---|---|
+| `base` | *"Hello, can you be nice to me?"* | 0.36 s |
+| `small` | *"Hello, can you hear me?"* | 1.1 s |
+| `medium` | *"Hello, can you hear me?"* | 3.1 s |
+
+So it works, but **`base` is not good enough and `medium` is not worth 3×**.
+`small` is the floor, and the Translate tab says so when a smaller one is
+selected. All three mistranslated "Build" as a German word, which a dedicated
+model working on correct English text does not.
+
+The two methods are mutually exclusive in the interface — running both would
+translate the text twice, the second time from a language it is no longer in.
+
 ### Prerequisites
 
-- [ ] **Multilingual recognition**, currently in the backlog, becomes a hard
-      dependency. The bundled `base.en` cannot hear anything but English, so
-      translating *from* another language is impossible until the recognition
-      model and a real language setting land.
+- [x] **Multilingual recognition.** The plain (non-`.en`) Whisper models are now
+      offered, along with a spoken-language picker and `auto` detection. The
+      `.en` models are still the default and still better at English; the
+      config refuses the combinations that cannot work (translating *from* a
+      language an English-only model cannot hear, or detecting the language of
+      a model that only knows one).
 - [ ] **The voice must match the target language.** Piper voices are
       language-specific, and speaking German text with an English voice produces
       confident gibberish. The existing language guard already knows how to
@@ -465,7 +487,12 @@ second hop and its compounding errors.
 - [ ] The download side: read the manifest, fetch, verify sha256, install
 - [ ] A CI job that runs `convert_mt.py --all` and attaches the assets to a
       `models-*` release tag
-- [ ] Split the substitution stage into source-side and target-side lists
+- [x] Split the substitution stage into source-side and target-side lists,
+      with the Words tab editing both
+- [x] Wire the chain into the pipeline, between the two rule sets
+- [x] The Translate tab: language pair, model downloads, and a route line that
+      says why a combination will not work
+- [ ] Streaming recognition as a third mode (below)
 - [ ] `translate.py` — model download, cache, and a `translate(text, src, dst)`
       that is a pure function over a loaded model
 - [ ] Language pair picker, with the download surfaced like the voice library's

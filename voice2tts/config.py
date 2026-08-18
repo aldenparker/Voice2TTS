@@ -23,7 +23,19 @@ MODES = ("ptt", "vad", "both")
 #   1 -> 2  update repository became prefilled rather than blank
 #   2 -> 3  theme default returned to the native Windows appearance
 CURRENT_SCHEMA = 3
-WHISPER_MODELS = ("tiny.en", "base.en", "small.en", "medium.en", "distil-small.en", "large-v3")
+# The .en models hear English and nothing else, and are noticeably better at it
+# than the multilingual ones of the same size. The plain names are multilingual:
+# needed to recognise anything but English, and so a prerequisite for
+# translating *from* another language.
+WHISPER_MODELS = (
+    "tiny.en", "base.en", "small.en", "medium.en", "distil-small.en",
+    "tiny", "base", "small", "medium", "large-v3",
+)
+
+# Whisper can translate to English itself, as part of recognition. It is one
+# parameter and no download, but it only ever produces English -- the OPUS-MT
+# models are what any other target language needs.
+STT_TASKS = ("transcribe", "translate")
 
 
 @dataclass
@@ -100,7 +112,13 @@ class SttConfig:
     model: str = "base.en"
     device: str = "auto"             # auto | cuda | cpu
     compute_type: str = "auto"       # auto -> float16 on cuda, int8 on cpu
+    # "auto" lets Whisper detect it per utterance, which costs a little accuracy
+    # and is only meaningful on a multilingual model.
     language: str = "en"
+    # "translate" makes Whisper emit English regardless of what was spoken.
+    # Multilingual models only -- a .en model has no other language to translate
+    # from, and validate() says so.
+    task: str = "transcribe"
     beam_size: int = 1
     # Whisper hallucinates stock phrases on near-silent input; drop exact matches.
     drop_phrases: list[str] = field(
@@ -395,6 +413,16 @@ class Config:
         self.tts.length_scale = min(max(self.tts.length_scale, 0.4), 3.0)
         self.tts.volume = min(max(self.tts.volume, 0.0), 2.0)
         self.stt.beam_size = max(1, int(self.stt.beam_size))
+        if self.stt.task not in STT_TASKS:
+            log.warning("unknown recognition task %r, transcribing", self.stt.task)
+            self.stt.task = "transcribe"
+        if self.stt.task == "translate" and self.stt.model.endswith(".en"):
+            log.warning("%s only hears English, so there is nothing for it to "
+                        "translate; transcribing instead", self.stt.model)
+            self.stt.task = "transcribe"
+        if self.stt.language == "auto" and self.stt.model.endswith(".en"):
+            # Detection on an English-only model can only ever answer "English".
+            self.stt.language = "en"
         for t in self.audio.outputs:
             t.gain = min(max(t.gain, 0.0), 4.0)
 

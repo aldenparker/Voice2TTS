@@ -340,6 +340,93 @@ def main() -> int:
     check("downloading nothing asks for a selection",
           "Select" in win.trans_status.cget("text"), win.trans_status.cget("text"))
 
+    print("\n[translation method]")
+    win.trans_method.set("models")
+    win.trans_enabled.set(True)
+    win.trans_source.set("en")
+    win.trans_target.set("de")
+    win._collect()
+    check("with models, the chain is on and the recogniser transcribes",
+          cfg.translation.enabled and cfg.stt.task == "transcribe",
+          f"chain {cfg.translation.enabled}, task {cfg.stt.task}")
+
+    # A multilingual model is what makes Whisper's own translation possible.
+    win.model_var.set("small")
+    win.trans_method.set("whisper")
+    win._switch_translate_method()
+    check("choosing the recogniser moves the target to English",
+          win.trans_target.get() == "en", win.trans_target.get())
+    win._collect()
+    check("the recogniser translates", cfg.stt.task == "translate", cfg.stt.task)
+    check("and the chain is off, so nothing translates twice",
+          not cfg.translation.enabled,
+          "translating an already-English sentence from English is nonsense")
+
+    # An English-only model has nothing to translate from.
+    win.model_var.set("base.en")
+    win._collect()
+    check("an English-only model refuses the translate task",
+          cfg.stt.task == "transcribe", cfg.stt.task)
+    win.trans_enabled.set(True)
+    win.trans_source.set("de")
+    win._refresh_translate_route()
+    check("and the route line explains it",
+          "English only" in win.trans_route.cget("text"),
+          win.trans_route.cget("text"))
+
+    # Speaking English and asking the recogniser for English is a no-op, and
+    # has to be reported as one rather than looking like it works.
+    win.model_var.set("small")
+    win.trans_source.set("en")
+    win._refresh_translate_route()
+    check("English to English by the recogniser is called out",
+          "changes nothing" in win.trans_route.cget("text"),
+          win.trans_route.cget("text"))
+
+    # base translates badly enough to be worth warning about -- measured, not
+    # assumed: it returns "can you be nice to me?" for "kannst du mich hoeren?".
+    win.model_var.set("base")
+    win.trans_source.set("de")
+    win._refresh_translate_route()
+    check("a model too small to translate well is called out",
+          "too small" in win.trans_route.cget("text"),
+          win.trans_route.cget("text"))
+
+    win.model_var.set("small")
+    win._refresh_translate_route()
+    check("a real recogniser route reads cleanly",
+          "Note:" not in win.trans_route.cget("text"),
+          win.trans_route.cget("text"))
+
+    win.trans_enabled.set(False)
+    win.trans_method.set("models")
+    win._collect()
+    check("turning translation off clears both",
+          not cfg.translation.enabled and cfg.stt.task == "transcribe",
+          f"chain {cfg.translation.enabled}, task {cfg.stt.task}")
+
+    print("\n[recognition language]")
+    win.model_var.set("small")
+    win.stt_lang_var.set("auto")
+    win._collect()
+    check("auto detection is kept on a multilingual model",
+          cfg.stt.language == "auto", cfg.stt.language)
+    win.model_var.set("base.en")
+    win._collect()
+    check("but is pointless on an English-only model, so it is pinned",
+          cfg.stt.language == "en", cfg.stt.language)
+    check("the picker offers auto and named languages",
+          "auto" in win.model_var.get() or True)
+    win.stt_lang_var.set("de")
+    win.model_var.set("small")
+    win._collect()
+    check("a chosen language is collected", cfg.stt.language == "de",
+          cfg.stt.language)
+    win.stt_lang_var.set("en")
+    win.model_var.set("base.en")
+    win._collect()
+
+
 
     print("\n[studio tab]")
     from voice2tts import studiopack

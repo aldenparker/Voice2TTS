@@ -80,12 +80,18 @@ class WhisperEngine:
         t0 = time.perf_counter()
         dummy = (np.random.randn(SAMPLE_RATE) * 0.01).astype(np.float32)
         try:
-            list(self.model.transcribe(dummy, language=self.cfg.language, beam_size=1)[0])
+            list(self.model.transcribe(dummy, language=self._language,
+                                       task=self.cfg.task, beam_size=1)[0])
         except Exception as exc:  # noqa: BLE001 - warmup failure is not fatal
             log.warning("warmup failed: %s", exc)
         elapsed = time.perf_counter() - t0
         log.info("whisper warmup %.2f s", elapsed)
         return elapsed
+
+    @property
+    def _language(self) -> str | None:
+        """None asks Whisper to detect it, which is what "auto" means here."""
+        return None if self.cfg.language == "auto" else self.cfg.language
 
     def transcribe(self, audio: np.ndarray) -> str:
         """Transcribe 16 kHz mono float32 audio. Returns "" if nothing usable."""
@@ -94,7 +100,10 @@ class WhisperEngine:
         t0 = time.perf_counter()
         segments, _ = self.model.transcribe(
             audio.astype(np.float32, copy=False),
-            language=self.cfg.language,
+            language=self._language,
+            # "translate" makes Whisper emit English whatever was spoken. It
+            # costs nothing extra -- the same forward pass, a different token.
+            task=self.cfg.task,
             beam_size=self.cfg.beam_size,
             # We already segmented with Silero; Whisper's own VAD would double-trim.
             vad_filter=False,
