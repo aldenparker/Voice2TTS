@@ -2206,12 +2206,24 @@ def test_unspeakable_voices() -> None:
             needed = voices.required_phonemizer(fake.stem)
             check("a japanese-phoneme voice names what it needs",
                   needed is not None and needed[0] == "pyopenjtalk", str(needed))
-            problem = voices.missing_phonemizer(fake.stem)
-            check("and is reported as unspeakable when it is absent",
-                  bool(problem), problem)
-            check("the message names the module and the language",
-                  "pyopenjtalk" in problem and "Japanese" in problem, problem)
-            check("is_speakable agrees", not voices.is_speakable(fake.stem))
+
+            # Against a module that can never be present, so this says the same
+            # thing on a machine with the pack installed and one without.
+            real_map = voices._PHONEMIZERS
+            voices._PHONEMIZERS = dict(real_map)
+            voices._PHONEMIZERS["japanese"] = ("no_such_phonemizer", "Klingon")
+            try:
+                problem = voices.missing_phonemizer(fake.stem)
+                check("a voice whose phonemizer is absent is reported",
+                      bool(problem), problem)
+                check("the message names the module and the language",
+                      "no_such_phonemizer" in problem and "Klingon" in problem,
+                      problem)
+                check("and points at where to get it",
+                      "Add-ons" in problem, problem)
+                check("is_speakable agrees", not voices.is_speakable(fake.stem))
+            finally:
+                voices._PHONEMIZERS = real_map
         finally:
             voices.installed_path = real_installed
 
@@ -2220,15 +2232,25 @@ def test_unspeakable_voices() -> None:
     japanese = next((k for k in voices.installed_keys()
                      if voices.required_phonemizer(k)), None)
     if japanese is None:
-        print("  SKIP  refusing a real voice (none installed that needs one)")
+        print("  SKIP  a real voice needing a phonemizer (none installed)")
+    elif voices.is_speakable(japanese):
+        # The add-on IS installed here, so the interesting assertion flips: it
+        # has to load. Testing only the absent case would pass on one machine
+        # and quietly test nothing on the other.
+        engine = PiperEngine(TtsConfig(voice=japanese))
+        check("with the add-on installed, the voice loads",
+              engine.voice_path.stem == japanese, engine.voice_path.stem)
+        audio = engine.synth("こんにちは")
+        check("and actually speaks", len(audio) > engine.rate * 0.1,
+              f"{len(audio) / engine.rate:.1f}s")
     else:
         try:
             PiperEngine(TtsConfig(voice=japanese))
-            check("loading an unspeakable voice raises", False, "it loaded")
+            check("without it, loading raises", False, "it loaded")
         except UnspeakableVoice as exc:
-            check("loading an unspeakable voice raises", True, str(exc)[:60])
+            check("without it, loading raises", True, str(exc)[:60])
         except Exception as exc:  # noqa: BLE001
-            check("loading an unspeakable voice raises UnspeakableVoice",
+            check("without it, loading raises UnspeakableVoice",
                   False, f"{type(exc).__name__}: {exc}")
 
     # The guard must follow the OUTPUT language. Translating to Japanese means a
