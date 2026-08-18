@@ -883,6 +883,9 @@ class DesignPanel(ttk.Frame):
         self._marker: int | None = None
         self._drawn: set[int] = set()
         self._activated = False
+        self._zoom = 1.0
+        self._centre = (0.0, 0.0)      # speaker-space point at the canvas middle
+        self._pan_from: tuple[int, int] | None = None
 
         self._build()
         self.refresh()
@@ -923,8 +926,20 @@ class DesignPanel(ttk.Frame):
         self.canvas.pack()
         self.canvas.bind("<Button-1>", self._on_click)
         self.canvas.bind("<B1-Motion>", self._on_click)
+        # Right button pans, because the left one is already selecting.
+        self.canvas.bind("<Button-3>", self._on_pan_start)
+        self.canvas.bind("<B3-Motion>", self._on_pan)
+        self.canvas.bind("<MouseWheel>", self._on_wheel)
+
         ttk.Label(left, text="Each dot is a speaker. Nearby dots sound alike.",
                   foreground=self.palette.muted).pack(anchor="w", pady=(4, 0))
+        zoom_row = ttk.Frame(left)
+        zoom_row.pack(anchor="w", fill="x", pady=(2, 0))
+        self.zoom_label = ttk.Label(zoom_row, text="Scroll to zoom, right-drag to pan",
+                                    foreground=self.palette.muted)
+        self.zoom_label.pack(side="left")
+        ttk.Button(zoom_row, text="Reset view", width=11,
+                   command=self._reset_view).pack(side="right")
 
         # -- macros ----------------------------------------------------------
         right = ttk.Frame(self)
@@ -1059,15 +1074,94 @@ class DesignPanel(ttk.Frame):
 
     # -- the map -------------------------------------------------------------
 
+    MARGIN = 14
+    MAX_ZOOM = 40.0
+
     def _to_canvas(self, x: float, y: float) -> tuple[float, float]:
-        margin = 14
-        span = self.SIZE - 2 * margin
-        return (margin + (x + 1) / 2 * span, margin + (1 - (y + 1) / 2) * span)
+        """Speaker space to pixels, through the current zoom and pan."""
+        span = self.SIZE - 2 * self.MARGIN
+        zx = (x - self._centre[0]) * self._zoom
+        zy = (y - self._centre[1]) * self._zoom
+        return (self.MARGIN + (zx + 1) / 2 * span,
+                self.MARGIN + (1 - (zy + 1) / 2) * span)
 
     def _from_canvas(self, cx: float, cy: float) -> tuple[float, float]:
-        margin = 14
-        span = self.SIZE - 2 * margin
-        return ((cx - margin) / span * 2 - 1, 1 - (cy - margin) / span * 2)
+        span = self.SIZE - 2 * self.MARGIN
+        zx = (cx - self.MARGIN) / span * 2 - 1
+        zy = 1 - (cy - self.MARGIN) / span * 2
+        return (zx / self._zoom + self._centre[0],
+                zy / self._zoom + self._centre[1])
+
+    def _zoom_at(self, factor: float, cx: float, cy: float) -> None:
+        """Zoom about a pixel, keeping whatever is under it in place.
+
+        904 speakers in a 320-pixel square overlap badly, and zooming to the
+        middle instead of to the pointer means the region you were looking at
+        slides away exactly when you try to look closer.
+        """
+        anchor = self._from_canvas(cx, cy)
+        self._zoom = float(np.clip(self._zoom * factor, 1.0, self.MAX_ZOOM))
+        if self._zoom <= 1.0:
+            self._centre = (0.0, 0.0)       # fully out: nothing to be off-centre
+        else:
+            after = self._from_canvas(cx, cy)
+            self._centre = (self._centre[0] + anchor[0] - after[0],
+                            self._centre[1] + anchor[1] - after[1])
+        self._reposition()
+
+    def _on_wheel(self, event) -> None:
+        if self.coords is None:
+            return
+        # Windows reports +-120 per notch; other platforms use event.num.
+        step = getattr(event, "delta", 0)
+        factor = 1.25 if step > 0 else 1 / 1.25
+        self._zoom_at(factor, event.x, event.y)
+
+    def _on_pan_start(self, event) -> None:
+        self._pan_from = (event.x, event.y)
+
+    def _on_pan(self, event) -> None:
+        """Drag the view. A pan is a pure translation, so Tk moves everything
+        in one call rather than this recomputing 904 positions per event --
+        the same trap the selection redraw fell into."""
+        if self.coords is None or self._pan_from is None or self._zoom <= 1.0:
+            return
+        dx, dy = event.x - self._pan_from[0], event.y - self._pan_from[1]
+        if not dx and not dy:
+            return
+        before = self._from_canvas(*self._pan_from)
+        after = self._from_canvas(event.x, event.y)
+        self._centre = (self._centre[0] - (after[0] - before[0]),
+                        self._centre[1] - (after[1] - before[1]))
+        self._pan_from = (event.x, event.y)
+        self.canvas.move("all", dx, dy)
+
+    def _reset_view(self) -> None:
+        self._zoom, self._centre = 1.0, (0.0, 0.0)
+        self._reposition()
+
+    def _reposition(self) -> None:
+        """Move the existing dots. Never recreates them -- see _draw_map."""
+        if self.coords is None or not self._dots:
+            self._update_zoom_label()
+            return
+        chosen = set(self.weights)
+        for index, (x, y) in enumerate(self.coords):
+            cx, cy = self._to_canvas(float(x), float(y))
+            size = 5 if index in chosen else 2
+            self.canvas.coords(self._dots[index],
+                               cx - size, cy - size, cx + size, cy + size)
+        if self._marker is not None and chosen:
+            centre = np.average([self.coords[i] for i in chosen], axis=0,
+                                weights=[self.weights[i] for i in chosen])
+            cx, cy = self._to_canvas(float(centre[0]), float(centre[1]))
+            self.canvas.coords(self._marker, cx - 7, cy - 7, cx + 7, cy + 7)
+        self._update_zoom_label()
+
+    def _update_zoom_label(self) -> None:
+        self.zoom_label.config(
+            text="Scroll to zoom, right-drag to pan" if self._zoom <= 1.0
+            else f"{self._zoom:.1f}x — right-drag to pan")
 
     def _draw_map(self) -> None:
         """Lay the speakers out once. Selection changes do NOT come back here.

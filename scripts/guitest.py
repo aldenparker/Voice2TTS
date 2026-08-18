@@ -561,6 +561,76 @@ def main() -> int:
           dp._blend_key() != key_before)
     dp.base_key = "en_GB-test-medium"
 
+    # -- zoom and pan --------------------------------------------------------
+    # 904 speakers in a 320-pixel square sit about 2.6 px apart, which is not
+    # something anyone can click accurately. Zoom is what makes the big models
+    # usable, so it has to anchor where the pointer is rather than the middle.
+    class Wheel:
+        pass
+
+    dp._reset_view()
+    check("the view starts fully out", dp._zoom == 1.0 and dp._centre == (0.0, 0.0))
+
+    for zoom, point in ((1.0, (0.3, 0.4)), (6.0, (-0.9, 0.05))):
+        dp._zoom = zoom
+        dp._centre = (0.1, -0.2) if zoom > 1 else (0.0, 0.0)
+        back = dp._from_canvas(*dp._to_canvas(*point))
+        check(f"coordinates round-trip at {zoom:.0f}x",
+              max(abs(a - b) for a, b in zip(back, point, strict=True)) < 1e-5, str(back))
+
+    dp._reset_view()
+    cursor = (70, 240)
+    before = dp._from_canvas(*cursor)
+    for _ in range(4):
+        dp._zoom_at(1.25, *cursor)
+    after = dp._from_canvas(*cursor)
+    check("zooming keeps the point under the cursor still",
+          max(abs(a - b) for a, b in zip(before, after, strict=True)) < 1e-5,
+          f"moved {max(abs(a - b) for a, b in zip(before, after, strict=True)):.1e}")
+    check("and actually zoomed", dp._zoom > 2.0, f"{dp._zoom:.2f}x")
+
+    wheel = Wheel()
+    wheel.x, wheel.y, wheel.delta = 160, 160, 120
+    was = dp._zoom
+    dp._on_wheel(wheel)
+    check("the wheel zooms in", dp._zoom > was, f"{was:.2f} -> {dp._zoom:.2f}")
+    wheel.delta = -120
+    dp._on_wheel(wheel)
+    check("and back out", abs(dp._zoom - was) < 1e-6, f"{dp._zoom:.2f}")
+
+    for _ in range(60):
+        dp._zoom_at(1.25, 160, 160)
+    check("zoom is capped", dp._zoom == dp.MAX_ZOOM, f"{dp._zoom}")
+    for _ in range(80):
+        dp._zoom_at(1 / 1.25, 160, 160)
+    check("zooming fully out recentres", dp._zoom == 1.0 and dp._centre == (0.0, 0.0),
+          f"{dp._zoom} {dp._centre}")
+
+    # Panning moves the canvas with one Tk call rather than repositioning every
+    # dot, so the transform and what is drawn must not drift apart.
+    dp._reset_view()
+    for _ in range(6):
+        dp._zoom_at(1.25, 160, 160)
+    pan = Wheel()
+    pan.x, pan.y = 160, 160
+    dp._on_pan_start(pan)
+    centre_before = dp._centre
+    pan.x, pan.y = 200, 180
+    dp._on_pan(pan)
+    check("panning moves the view", dp._centre != centre_before, str(dp._centre))
+    sample = 3
+    expected = dp._to_canvas(float(dp.coords[sample][0]), float(dp.coords[sample][1]))
+    drawn = dp.canvas.coords(dp._dots[sample])
+    middle = ((drawn[0] + drawn[2]) / 2, (drawn[1] + drawn[3]) / 2)
+    check("what is drawn still matches the transform",
+          max(abs(a - b) for a, b in zip(expected, middle, strict=True)) < 0.01,
+          f"{expected} vs {middle}")
+
+    dp._reset_view()
+    check("reset view returns to the start",
+          dp._zoom == 1.0 and dp._centre == (0.0, 0.0))
+    check("panning while fully out does nothing", (dp._on_pan(pan), dp._zoom)[1] == 1.0)
+
     dp._reset_macros()
     check("reset returns every macro to neutral",
           all(abs(v.get()) < 1e-9 for v in dp.macro_vars.values()))

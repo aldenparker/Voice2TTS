@@ -34,6 +34,9 @@ versioning follows [Semantic Versioning](https://semver.org/).
   the speakers of a multi-speaker voice out on a map by similarity; click
   anywhere to blend the speakers around that point, listen, and adjust.
   `en_GB-vctk-medium` has 109 speakers, `en_US-libritts-high` has 904.
+- **A zoomable map.** Scroll to zoom, right-drag to pan. `en_US-libritts-high`
+  puts 904 speakers in a small square, roughly 2.6 pixels apart; at 12x they are
+  21 pixels apart and individually selectable.
 - **Six shape controls** — Size, Warmth, Brightness, Breathiness, Dynamics and
   Space — over a fixed effects chain. Size shifts pitch and formants together
   and puts the timing back, so a larger voice is deeper without being slower.

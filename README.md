@@ -132,7 +132,9 @@ different costs.
 those speakers is also a voice, and the Design tab lets you go there.
 
 The speakers are laid out on a map by similarity. Click anywhere to blend the
-ones around that point, press **Listen**, and adjust. Six controls shape the
+ones around that point, press **Listen**, and adjust. Scroll to zoom and
+right-drag to pan — with 904 speakers the dots sit about 2.6 pixels apart, so
+zooming is how you pick one out rather than a nearby crowd. Six controls shape the
 result — Size, Warmth, Brightness, Breathiness, Dynamics and Space. Size moves
 pitch and formants together, so a larger voice is deeper without being slower.
 

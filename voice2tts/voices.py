@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import urllib.request
 from dataclasses import dataclass
@@ -34,8 +35,49 @@ QUALITY_ORDER = {"x_low": 0, "low": 1, "medium": 2, "high": 3}
 ENGLISH_PREFIX = "en"
 
 
+# A catalogue key looks like "en_US-lessac-medium" or "en_GB-alba-medium".
+_LANGUAGE_KEY = re.compile(r"^([a-z]{2,3})(?:_[A-Za-z]{2,4})?-")
+
+
+def voice_language(voice_key: str) -> str:
+    """The voice's language family ("en", "de"), or "" if it cannot be told.
+
+    The config is asked first and the name only as a fallback. Voices made in
+    the Studio are named by their author -- "narator", "my voice" -- and carry
+    no language in the filename at all, so reading the name was telling people
+    their own English voice was not English.
+
+    Returning "" for genuinely unknown matters: callers must be able to say
+    nothing rather than guess, and a wrong warning is worse than none.
+    """
+    if not voice_key:
+        return ""
+
+    path = installed_path(voice_key)
+    if path is not None:
+        try:
+            config = json.loads(
+                path.with_suffix(".onnx.json").read_text(encoding="utf-8"))
+            language = config.get("language") or {}
+            family = str(language.get("family") or "").strip().lower()
+            if family:
+                return family
+            code = str(language.get("code") or "").strip().lower()
+            if code:
+                return code.split("_")[0]
+            # Older configs carry only the espeak voice, e.g. "en-us".
+            espeak = str((config.get("espeak") or {}).get("voice") or "").lower()
+            if espeak:
+                return espeak.split("-")[0]
+        except (OSError, ValueError, AttributeError) as exc:
+            log.debug("no language in the config for %s: %s", voice_key, exc)
+
+    match = _LANGUAGE_KEY.match(voice_key.strip())
+    return match.group(1).lower() if match else ""
+
+
 def is_english(voice_key: str) -> bool:
-    return voice_key.lower().startswith(ENGLISH_PREFIX)
+    return voice_language(voice_key) == ENGLISH_PREFIX
 
 
 def language_mismatch(voice_key: str, whisper_model: str) -> str:
@@ -46,7 +88,10 @@ def language_mismatch(voice_key: str, whisper_model: str) -> str:
     if not voice_key or not whisper_model:
         return ""
     english_model = whisper_model.endswith(".en")
-    if english_model and not is_english(voice_key):
+    family = voice_language(voice_key)
+    # Unknown language: say nothing. Warning on a guess is how a voice built in
+    # the Studio ended up being called foreign.
+    if english_model and family and family != ENGLISH_PREFIX:
         return (
             f"{voice_key} is not an English voice, but the {whisper_model} "
             "recognition model only understands English. Speech will be "
