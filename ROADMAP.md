@@ -499,11 +499,11 @@ translate the text twice, the second time from a language it is no longer in.
 - [x] The Translate tab: language pair, model downloads, and a route line that
       says why a combination will not work
 - [ ] Streaming recognition as a third mode (below)
-- [ ] `translate.py` — model download, cache, and a `translate(text, src, dst)`
-      that is a pure function over a loaded model
-- [ ] Language pair picker, with the download surfaced like the voice library's
-- [ ] Pivot through English where a direct pair does not exist, and say so
-- [ ] Wire `task="translate"` as the zero-download path to English
+- [x] `translate.py` — model download, cache, and translation over a loaded
+      model, with `net.py` doing the resumable, checksum-verified fetching
+- [x] Language pair picker, with the download surfaced like the voice library's
+- [x] Pivot through English where a direct pair does not exist, and say so
+- [x] Wire `task="translate"` as the zero-download path to English
 - [ ] Review-before-speaking becomes far more valuable here and should probably
       default to on when translating: an ASR error feeds a translator that will
       produce something fluent and wrong
