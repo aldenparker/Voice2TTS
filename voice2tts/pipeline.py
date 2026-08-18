@@ -31,7 +31,7 @@ from .hotkey import HotkeyManager
 from .output import OutputSink
 from .stt import WhisperEngine
 from .substitutions import Rule, Substituter
-from .tts import PiperEngine
+from .tts import PiperEngine, UnspeakableVoice
 from .vad import SAMPLE_RATE, WINDOW, VadSegmenter
 
 log = logging.getLogger(__name__)
@@ -242,12 +242,32 @@ class Pipeline:
             self._set_state(State.IDLE)
             self._emit("info", "Running")
 
+    @staticmethod
+    def _first_speakable_voice() -> str | None:
+        """Any installed voice this build can actually pronounce."""
+        from . import voices
+
+        return next((key for key in voices.installed_keys()
+                     if voices.is_speakable(key)), None)
+
     def _load_engines(self) -> None:
         if self.stt is None:
             self.stt = WhisperEngine(self.cfg.stt)
             self._emit("info", f"Whisper on {self.stt.device}/{self.stt.compute_type}")
         if self.tts is None:
-            self.tts = PiperEngine(self.cfg.tts)
+            try:
+                self.tts = PiperEngine(self.cfg.tts)
+            except UnspeakableVoice as exc:
+                # Starting is better than not starting. The saved voice needs a
+                # phonemizer this build does not carry, so fall back to one that
+                # works and say so -- refusing to open at all would leave no way
+                # to change the setting.
+                fallback = self._first_speakable_voice()
+                if fallback is None:
+                    raise
+                self._emit("error", f"{exc} Using {fallback} instead.")
+                self.cfg.tts.voice = fallback
+                self.tts = PiperEngine(self.cfg.tts)
             self._emit("info", f"Voice {self.tts.voice_path.stem}")
 
         self._load_translator()

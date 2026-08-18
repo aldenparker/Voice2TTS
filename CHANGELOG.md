@@ -69,6 +69,29 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A Japanese voice crashed on every utterance.** Piper imports `pyopenjtalk`
+  from inside synthesis for Japanese voices and does not declare it as a
+  dependency, so each utterance raised `ModuleNotFoundError` deep in the call
+  stack and surfaced as "Failed to process utterance". Voices needing a
+  phonemizer this build does not carry are now refused when the voice is
+  loaded, with a message naming what is missing, and the app falls back to a
+  voice it can actually speak rather than failing to start.
+
+  Not shipped because of the size: the phonemizer plus its dictionaries measure
+  **341 MB installed**, for one language. An on-demand pack, like the GPU and
+  Studio ones, is the way to add it.
+
+- **The voice/language warning was measured against the wrong language.** It
+  compared the voice with the *recognition* model, so translating English to
+  Japanese with a Japanese voice — exactly right — was reported as a mismatch.
+  It now compares the voice with the language the text will actually be in.
+
+- **The settings window opened too small to show Save, Apply and Close.** The
+  notebook was packed before the button bar, so it claimed the whole window and
+  left the bar nothing. The bar is packed first now, and the window opens at the
+  size its content asks for rather than a hardcoded one that went stale every
+  time a tab was added.
+
 - **Two things kept the machine busy doing nothing.** Both showed up as the fans
   spinning up with the app apparently idle:
 

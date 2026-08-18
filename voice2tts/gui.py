@@ -54,6 +54,12 @@ _TK_MODIFIERS = {
 }
 
 
+_DEFAULT_WIDTH = 640
+_DEFAULT_HEIGHT = 620
+_MIN_WIDTH = 560
+_MIN_HEIGHT = 520
+
+
 class SettingsWindow(tk.Toplevel):
     def __init__(
         self,
@@ -78,8 +84,7 @@ class SettingsWindow(tk.Toplevel):
         self.palette = theme.resolve(cfg.theme)
 
         self.title("Voice2TTS Settings")
-        self.geometry("640x620")
-        self.minsize(560, 520)
+        # Size is set from the built content in _size_to_content().
         self.protocol("WM_DELETE_WINDOW", self.close)
 
         self._build()
@@ -94,7 +99,12 @@ class SettingsWindow(tk.Toplevel):
 
     def _build(self) -> None:
         nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+        # NOT packed yet. Pack gives space in packing order, so a notebook
+        # packed first with expand=True claims the whole window and squeezes
+        # out whatever comes after it -- which is how Save/Apply/Close ended up
+        # off the bottom edge until the window was dragged bigger. The bar is
+        # packed first, against the bottom; the notebook then takes what is
+        # left, however little that is.
         self._build_audio(nb)
         self._build_trigger(nb)
         self._build_voice(nb)
@@ -108,7 +118,8 @@ class SettingsWindow(tk.Toplevel):
         self._build_status(nb)
 
         bar = ttk.Frame(self)
-        bar.pack(fill="x", padx=8, pady=8)
+        bar.pack(side="bottom", fill="x", padx=8, pady=8)
+        nb.pack(side="top", fill="both", expand=True, padx=8, pady=(8, 0))
         self.state_label = ttk.Label(bar, text="stopped")
         self.state_label.pack(side="left")
 
@@ -126,6 +137,23 @@ class SettingsWindow(tk.Toplevel):
         ttk.Button(bar, text="Close", command=self.close).pack(side="right")
         ttk.Button(bar, text="Save", command=self._save).pack(side="right", padx=4)
         ttk.Button(bar, text="Apply", command=self._apply).pack(side="right")
+
+        # Open big enough for whatever the tabs actually need. Hardcoding a size
+        # goes stale every time a tab grows, which is what happened here.
+        self._size_to_content()
+
+    def _size_to_content(self) -> None:
+        """Open at the size the content asks for, within the screen."""
+        self.update_idletasks()
+        # Never smaller than the old default, never bigger than the screen.
+        width = min(max(_DEFAULT_WIDTH, self.winfo_reqwidth()),
+                    self.winfo_screenwidth() - 80)
+        height = min(max(_DEFAULT_HEIGHT, self.winfo_reqheight()),
+                     self.winfo_screenheight() - 120)
+        self.geometry(f"{width}x{height}")
+        # The bar is packed against the bottom now, so it survives any size --
+        # but there is no reason to allow one so small nothing is readable.
+        self.minsize(min(_MIN_WIDTH, width), min(_MIN_HEIGHT, height))
 
     # -- audio tab ------------------------------------------------------------
 
@@ -899,7 +927,8 @@ class SettingsWindow(tk.Toplevel):
 
         self.trans_enabled = tk.BooleanVar(value=False)
         ttk.Checkbutton(tab, text="Translate what I say", variable=self.trans_enabled,
-                        command=self._refresh_translate_route).grid(
+                        command=lambda: (self._refresh_translate_route(),
+                                         self._check_language())).grid(
             row=1, column=0, columnspan=5, sticky="w", pady=(6, 4))
 
         method = ttk.Frame(tab)
@@ -932,7 +961,8 @@ class SettingsWindow(tk.Toplevel):
         self.trans_target_combo.pack(side="left", padx=4)
         for combo in (self.trans_source_combo, self.trans_target_combo):
             combo.bind("<<ComboboxSelected>>",
-                       lambda _e: self._refresh_translate_route())
+                       lambda _e: (self._refresh_translate_route(),
+                                   self._check_language()))
 
         # The route line is where every reason this will not work gets said: no
         # model, a pivot that will compound errors, an English-only recogniser,
@@ -1045,6 +1075,7 @@ class SettingsWindow(tk.Toplevel):
         left exactly as the user set it.
         """
         self._refresh_translate_route()
+        self._check_language()
 
     def _refresh_translate_route(self) -> None:
         """Say what will happen, including every reason it might not work."""

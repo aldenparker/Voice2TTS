@@ -21,12 +21,27 @@ from .paths import find_voice, list_voices
 log = logging.getLogger(__name__)
 
 
+class UnspeakableVoice(RuntimeError):
+    """A voice this build cannot pronounce -- its phonemizer is not here."""
+
+
 class PiperEngine:
     def __init__(self, cfg: TtsConfig):
         from piper import PiperVoice, SynthesisConfig
 
         self._SynthesisConfig = SynthesisConfig
         path = self._resolve_voice(cfg.voice)
+
+        # Refuse here rather than inside synthesis. A voice whose phonemizer is
+        # missing raises ModuleNotFoundError once per utterance, from deep
+        # inside Piper, which reaches the user as "Failed to process utterance"
+        # and a traceback in the log -- with the app apparently running fine.
+        from .voices import missing_phonemizer
+
+        problem = missing_phonemizer(path.stem)
+        if problem:
+            raise UnspeakableVoice(problem)
+
         log.info("loading piper voice %s", path)
         t0 = time.perf_counter()
         self.voice = PiperVoice.load(path, use_cuda=False)

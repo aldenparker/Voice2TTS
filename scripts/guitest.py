@@ -119,6 +119,44 @@ def main() -> int:
     root.update()
     check("tick ran without engines", True)
 
+    print("\n[window sizing]")
+    # The bar holding Save/Apply/Close sat off the bottom edge until the window
+    # was dragged bigger: the notebook was packed first with expand=True, so it
+    # claimed the whole window and the bar packed after it got nothing.
+    bar = [c for c in win.winfo_children() if c.winfo_class() == "TFrame"][-1]
+    root.update()
+    check("the window opens big enough for its content",
+          win.winfo_height() >= win.winfo_reqheight() - 1,
+          f"{win.winfo_width()}x{win.winfo_height()} for "
+          f"{win.winfo_reqwidth()}x{win.winfo_reqheight()}")
+    check("and the button bar is inside it",
+          bar.winfo_y() + bar.winfo_height() <= win.winfo_height(),
+          f"bar ends at {bar.winfo_y() + bar.winfo_height()}, "
+          f"window is {win.winfo_height()}")
+
+    # And it stays inside however small the window gets, because the bar now
+    # takes its space before the notebook does.
+    original = win.winfo_geometry()
+    squeezed = []
+    for size in ("500x400", "400x300"):
+        win.geometry(size)
+        root.update()
+        squeezed.append((size, bar.winfo_y() + bar.winfo_height()
+                         <= win.winfo_height()))
+    check("the bar survives being squeezed", all(ok for _, ok in squeezed),
+          str(squeezed))
+
+    # The reason it survives, asserted directly: pack hands out space in packing
+    # order, so the bar has to be packed BEFORE the notebook. Sizing the window
+    # to its content hides this on a roomy screen and it comes back on a small
+    # one, so the order is what gets checked.
+    packed = win.pack_slaves()
+    check("the button bar takes its space before the notebook",
+          packed and packed[0] is bar,
+          f"packing order: {[w.winfo_class() for w in packed]}")
+    win.geometry(original)
+    root.update()
+
     print("\n[voice library tab]")
     rows = win.lib_tree.get_children()
     check("library lists installed voices", len(rows) >= 3, f"{len(rows)} rows")

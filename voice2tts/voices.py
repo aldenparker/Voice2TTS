@@ -7,6 +7,7 @@ precedence over the bundled folder so a downloaded voice can shadow a bundled on
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import re
@@ -37,6 +38,62 @@ ENGLISH_PREFIX = "en"
 
 # A catalogue key looks like "en_US-lessac-medium" or "en_GB-alba-medium".
 _LANGUAGE_KEY = re.compile(r"^([a-z]{2,3})(?:_[A-Za-z]{2,4})?-")
+
+
+# Some voices need a phonemizer beyond the espeak data that ships with Piper.
+# Japanese voices are trained on OpenJTalk phonemes and Piper imports
+# `pyopenjtalk` to produce them; Korean voices do the same with their own.
+# Neither is declared as a dependency of piper-tts -- the import simply fails at
+# synthesis time, once per utterance, with a traceback and no speech.
+#
+# Not shipped because of what they cost: pyopenjtalk-plus plus the dictionaries
+# it needs measured 341 MB installed, against an installer that is currently a
+# fraction of that. Japanese is one language; the download is not.
+_PHONEMIZERS = {
+    "japanese": ("pyopenjtalk", "Japanese"),
+    "korean": ("g2pk", "Korean"),
+}
+
+
+def required_phonemizer(voice_key: str) -> tuple[str, str] | None:
+    """The (module, language) a voice needs beyond Piper's own, or None.
+
+    Read from the voice's own config rather than guessed from its name: the
+    `phoneme_type` field is what Piper dispatches on, so it is the same thing
+    that decides whether the import happens.
+    """
+    path = installed_path(voice_key)
+    if path is None:
+        return None
+    try:
+        config = json.loads(
+            path.with_suffix(".onnx.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.debug("no config for %s: %s", voice_key, exc)
+        return None
+    return _PHONEMIZERS.get(str(config.get("phoneme_type") or "").lower())
+
+
+def missing_phonemizer(voice_key: str) -> str:
+    """Why this voice cannot be spoken here, or "" if it can.
+
+    Checked before a voice is used rather than discovered inside synthesis: the
+    failure there is a ModuleNotFoundError raised once per utterance, which
+    reaches the user as "Failed to process utterance" and nothing else.
+    """
+    needed = required_phonemizer(voice_key)
+    if needed is None:
+        return ""
+    module, language = needed
+    if importlib.util.find_spec(module) is not None:
+        return ""
+    return (f"{voice_key} is a {language} voice, and speaking {language} needs "
+            f"the {module} phonemizer, which this build does not include. "
+            "Choose a different voice.")
+
+
+def is_speakable(voice_key: str) -> bool:
+    return not missing_phonemizer(voice_key)
 
 
 def voice_language(voice_key: str) -> str:
@@ -80,18 +137,38 @@ def is_english(voice_key: str) -> bool:
     return voice_language(voice_key) == ENGLISH_PREFIX
 
 
-def language_mismatch(voice_key: str, whisper_model: str) -> str:
-    """Return a warning if this voice cannot work with this recognition model.
+def language_mismatch(voice_key: str, whisper_model: str,
+                      output_language: str = "") -> str:
+    """Return a warning if this voice cannot say what it is going to be given.
+
+    `output_language` is the language the TEXT will be in when it reaches the
+    voice. With translation on that is the target, not the language being
+    recognised -- so a Japanese voice is exactly right for English-to-Japanese,
+    and warning about it because the recogniser is English-only is nonsense.
 
     Empty string means the pairing is fine.
     """
-    if not voice_key or not whisper_model:
+    if not voice_key:
         return ""
-    english_model = whisper_model.endswith(".en")
     family = voice_language(voice_key)
     # Unknown language: say nothing. Warning on a guess is how a voice built in
     # the Studio ended up being called foreign.
-    if english_model and family and family != ENGLISH_PREFIX:
+    if not family:
+        return ""
+
+    if output_language:
+        if family == output_language:
+            return ""
+        return (
+            f"{voice_key} speaks {family}, but the text reaching it will be in "
+            f"{output_language}. It will mispronounce every word.\n\n"
+            f"Pick a {output_language} voice, or change the target language."
+        )
+
+    if not whisper_model:
+        return ""
+    english_model = whisper_model.endswith(".en")
+    if english_model and family != ENGLISH_PREFIX:
         return (
             f"{voice_key} is not an English voice, but the {whisper_model} "
             "recognition model only understands English. Speech will be "

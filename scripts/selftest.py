@@ -2101,6 +2101,81 @@ def _fake_model(root: Path, code: str) -> Path:
     return directory
 
 
+def test_unspeakable_voices() -> None:
+    """Voices this build has no phonemizer for must be refused, not crash.
+
+    Piper imports pyopenjtalk from inside synthesis for a Japanese voice, and
+    piper-tts does not declare it. The failure was a ModuleNotFoundError raised
+    once per utterance, deep in the call stack, which reached the user as
+    "Failed to process utterance" with the app otherwise looking healthy.
+    """
+    print("\n[voices we cannot speak]")
+    import json
+    import tempfile
+
+    from voice2tts import voices
+    from voice2tts.config import TtsConfig
+    from voice2tts.tts import PiperEngine, UnspeakableVoice
+
+    check("an ordinary voice needs nothing extra",
+          voices.required_phonemizer("en_US-amy-medium") is None)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        fake = root / "xx_XX-test-medium.onnx"
+        fake.write_bytes(b"not a real model")
+        fake.with_suffix(".onnx.json").write_text(json.dumps({
+            "phoneme_type": "japanese",
+            "language": {"family": "ja"},
+        }), encoding="utf-8")
+
+        real_installed = voices.installed_path
+        voices.installed_path = lambda key: fake if key == fake.stem else None
+        try:
+            needed = voices.required_phonemizer(fake.stem)
+            check("a japanese-phoneme voice names what it needs",
+                  needed is not None and needed[0] == "pyopenjtalk", str(needed))
+            problem = voices.missing_phonemizer(fake.stem)
+            check("and is reported as unspeakable when it is absent",
+                  bool(problem), problem)
+            check("the message names the module and the language",
+                  "pyopenjtalk" in problem and "Japanese" in problem, problem)
+            check("is_speakable agrees", not voices.is_speakable(fake.stem))
+        finally:
+            voices.installed_path = real_installed
+
+    # Refused at load, not at synthesis: the point is that it fails once, in a
+    # place the caller can report, rather than on every utterance forever.
+    japanese = next((k for k in voices.installed_keys()
+                     if voices.required_phonemizer(k)), None)
+    if japanese is None:
+        print("  SKIP  refusing a real voice (none installed that needs one)")
+    else:
+        try:
+            PiperEngine(TtsConfig(voice=japanese))
+            check("loading an unspeakable voice raises", False, "it loaded")
+        except UnspeakableVoice as exc:
+            check("loading an unspeakable voice raises", True, str(exc)[:60])
+        except Exception as exc:  # noqa: BLE001
+            check("loading an unspeakable voice raises UnspeakableVoice",
+                  False, f"{type(exc).__name__}: {exc}")
+
+    # The guard must follow the OUTPUT language. Translating to Japanese means a
+    # Japanese voice is correct, and warning about it because the recogniser is
+    # English-only is backwards.
+    check("a foreign voice is flagged when nothing is translating",
+          bool(voices.language_mismatch("ja_JA-x-medium", "base.en")))
+    check("but not when the output really is that language",
+          not voices.language_mismatch("ja_JA-x-medium", "base.en", "ja"),
+          "the recogniser hears English; the voice speaks the translation")
+    check("and the wrong voice for the target still is",
+          bool(voices.language_mismatch("en_US-amy-medium", "base.en", "ja")))
+    check("the warning says which way round it is",
+          "will be in ja" in voices.language_mismatch(
+              "en_US-amy-medium", "base.en", "ja"),
+          voices.language_mismatch("en_US-amy-medium", "base.en", "ja")[:70])
+
+
 def test_streaming() -> None:
     """Recognising while someone is still talking. No model needed."""
     print("\n[streaming]")
@@ -4381,6 +4456,7 @@ def main() -> int:
     test_profiles()
     test_history_and_review()
     test_vad()
+    test_unspeakable_voices()
     test_streaming()
     test_streaming_faults()
     test_net()
