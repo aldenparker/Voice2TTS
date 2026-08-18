@@ -1658,8 +1658,17 @@ def test_models_workflow() -> None:
 
     # PyYAML reads the bare key `on:` as the boolean True.
     triggers = data.get("on") or data.get(True) or {}
-    check("it is run by hand, never by a push",
-          list(triggers) == ["workflow_dispatch"], str(list(triggers)))
+    # A tag OR the Actions tab, but never an ordinary push. The tag trigger is
+    # there because the first build shipped a download button with nothing
+    # behind it -- the workflow existed and had simply never been run.
+    check("it can be started by a tag as well as by hand",
+          set(triggers) == {"push", "workflow_dispatch"}, str(list(triggers)))
+    check("and only by a models-* tag",
+          triggers["push"]["tags"] == ["models-*"],
+          str(triggers["push"].get("tags")))
+    check("a tag push still knows which tag to publish under",
+          "github.ref_name" in yaml.safe_dump(data),
+          "workflow_dispatch inputs are empty on a tag push")
 
     inputs = triggers["workflow_dispatch"]["inputs"]
     check("the default tag is the one the app reads",
@@ -2555,8 +2564,13 @@ def test_pipeline_translation() -> None:
     pipe._load_translator()
     check("a missing model leaves translation off", pipe.translator is None)
     events = drain()
-    check("and explains why", any(k == "warning" and "Translation off" in m
-                                  for k, m in events), str(events))
+    # An error, not a warning: with translation on and no model the far end
+    # hears a language nobody asked for, and if a voice for the target language
+    # is selected it reads the untranslated text in that accent -- which sounds
+    # like a broken translator rather than a missing one.
+    check("and explains why, loudly",
+          any(k == "error" and "spoken untranslated" in m for k, m in events),
+          str(events))
     check("the app is still usable", pipe.state is not None)
 
     # Same language both ways is a no-op the config refuses to enable.

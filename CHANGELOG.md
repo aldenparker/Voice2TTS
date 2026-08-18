@@ -69,6 +69,23 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The language pickers only offered languages you already had models for**, so
+  you could not choose German until you had German and could not get German
+  without choosing it. They now list every language, with names.
+- **Trying the recogniser method overwrote the saved target language.** An
+  "English to German" pair became "English to English", which validation treats
+  as a no-op and switches translation off — so ticking the box afterwards
+  appeared to do nothing. The method no longer touches the language pair, and a
+  pair that would do nothing now says so instead of silently unticking.
+- **With no model for the pair, the tab still offered to switch to a voice for
+  the target language.** The text stays in the source language when there is
+  nothing to translate it, so that produced English read in a German accent. The
+  voice now follows what will actually be spoken.
+- **Translation being unavailable was a quiet warning**; it is an error now,
+  because the far end hears a language nobody asked for.
+- **The models release can be published by pushing a `models-*` tag**, not only
+  from the Actions tab. The first build shipped a download button with nothing
+  behind it because the workflow had simply never been run.
 - Target substitution rules were written to the config but loaded back as plain
   dictionaries, so a saved rule would have broken the substituter.
 - Four modules announced themselves to servers as `Voice2TTS/0.2` long after

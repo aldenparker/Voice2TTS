@@ -279,8 +279,14 @@ class Pipeline:
             self.translator = translate.chain_for(
                 cfg.source, cfg.target, pivot=cfg.pivot, beam_size=cfg.beam_size)
         except translate.TranslationUnavailable as exc:
-            self._emit("warning",
-                       f"Translation off: {exc}. Speech will not be translated.")
+            # An error rather than a warning: the far end is about to hear a
+            # language nobody asked for, and if a voice for the target language
+            # is selected it will read the untranslated text in that accent --
+            # which sounds like a broken translator rather than a missing one.
+            self._emit(
+                "error",
+                f"Translation is ON but {exc}. Your own words will be spoken "
+                "untranslated. Download the model on the Translate tab.")
             return
         hops = " via ".join(p.label for p in self.translator.pairs)
         self._emit("info", f"Translating {hops}")

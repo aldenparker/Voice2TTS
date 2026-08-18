@@ -10,9 +10,18 @@ name: Translation models
 # publishing a newer set does not change what an already-shipped build
 # downloads. Bump both together when the format changes.
 #
-# Run it from the Actions tab. It is never triggered by a push -- 800 MB of
-# model conversion is not something to do on every commit.
+# Two ways to start it, and never on an ordinary push -- 800 MB of model
+# conversion is not a per-commit job:
+#
+#   git tag models-1 && git push origin models-1     <- same as an app release
+#   or the "Translation models" action, run by hand
+#
+# The tag trigger exists because the Actions tab is easy to miss: the first
+# build shipped with a download button and nothing behind it, because the
+# workflow had simply never been run.
 on:
+  push:
+    tags: ["models-*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -106,7 +115,8 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
+          # A tag push carries no inputs; the tag name is the tag.
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           cat > notes.md <<'NOTES'
           OPUS-MT models converted to CTranslate2 (int8).

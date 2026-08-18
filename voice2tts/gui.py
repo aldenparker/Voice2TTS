@@ -1002,35 +1002,61 @@ class SettingsWindow(tk.Toplevel):
         for code in sorted(rows):
             self.trans_tree.insert("", "end", iid=code, values=rows[code])
 
-        codes = {part for code in rows for part in code.split("_")}
-        codes |= {self.trans_source.get(), self.trans_target.get(), "en"}
-        listed = sorted(codes)
+        # Every language we can name, not only the installed ones. Offering
+        # just what is installed made the pickers a chicken and egg: you could
+        # not choose German until you had the German model, and you could not
+        # get the German model without choosing German.
+        codes = set(translate.LANGUAGE_NAMES)
+        codes |= {part for code in rows for part in code.split("_")}
+        codes |= {self._source_code(), self._target_code(), "en"}
+        listed = [self._language_label(c) for c in sorted(codes)]
         self.trans_source_combo["values"] = listed
         self.trans_target_combo["values"] = listed
         self._refresh_translate_route()
 
+    @staticmethod
+    def _language_label(code: str) -> str:
+        from . import translate
+
+        name = translate.language_name(code)
+        return code if name == code else f"{code} ({name})"
+
+    @staticmethod
+    def _language_code(display: str) -> str:
+        """The code out of a "de (German)" entry, or whatever was typed."""
+        return (display or "").strip().split(" ", 1)[0].strip().lower()
+
+    def _source_code(self) -> str:
+        return self._language_code(self.trans_source.get())
+
+    def _target_code(self) -> str:
+        return self._language_code(self.trans_target.get())
+
     def _switch_translate_method(self) -> None:
-        """Whisper's own translation only ever produces English, so say so by
-        moving the target rather than letting it sit on something unreachable."""
-        if self.trans_method.get() == "whisper":
-            self.trans_target.set("en")
+        """Switch method WITHOUT touching the language pair.
+
+        This used to move the target to English, on the reasoning that the
+        recogniser can only produce English. It also saved that -- so trying the
+        recogniser once turned a saved "English to German" into "English to
+        English", which validate() then treats as a no-op and switches
+        translation off. Ticking the box afterwards appeared to do nothing.
+
+        The route line says the output will be English; the stored target is
+        left exactly as the user set it.
+        """
         self._refresh_translate_route()
 
     def _refresh_translate_route(self) -> None:
         """Say what will happen, including every reason it might not work."""
         from . import translate
 
-        source, target = self.trans_source.get(), self.trans_target.get()
+        source, target = self._source_code(), self._target_code()
         # The widget, not the config: this describes what is selected now, so it
         # must not wait for Apply to catch up with the Recognition tab. That tab
         # is built after this one, so during construction there is no widget yet.
         stt_model = (self.model_var.get() if hasattr(self, "model_var")
                      else self.cfg.stt.model)
-        # Whisper's own translation always produces English, so that is the
-        # language the voice has to speak in that mode.
-        self._update_voice_button(
-            "" if not self.trans_enabled.get()
-            else "en" if self.trans_method.get() == "whisper" else target)
+        self._update_voice_button(self._voice_should_speak(source, target))
         if not self.trans_enabled.get():
             self.trans_route.config(
                 text="Translation is off; your own words are spoken as recognised.",
@@ -1113,6 +1139,24 @@ class SettingsWindow(tk.Toplevel):
         return next((key for key in voices.installed_keys()
                      if voices.voice_language(key) == language), None)
 
+    def _voice_should_speak(self, source: str, target: str) -> str:
+        """The language the voice will actually be reading, or "" if unchanged.
+
+        Not simply the target. With translation on but no model for the pair,
+        the text stays in the SOURCE language -- so offering a German voice
+        there produced exactly what it sounds like: English read with a German
+        accent. The voice should only follow the target once something can
+        actually produce that language.
+        """
+        from . import translate
+
+        if not self.trans_enabled.get():
+            return ""
+        if self.trans_method.get() == "whisper":
+            # The recogniser only ever emits English.
+            return "en"
+        return target if translate.route(source, target) else source
+
     def _update_voice_button(self, wanted: str) -> None:
         """Offer the fix only when there is one to offer."""
         if not hasattr(self, "trans_voice_btn"):
@@ -1127,7 +1171,7 @@ class SettingsWindow(tk.Toplevel):
     def _use_matching_voice(self) -> None:
         """Switch to a voice that speaks the target language."""
         wanted = ("en" if self.trans_method.get() == "whisper"
-                  else self.trans_target.get())
+                  else self._target_code())
         match = self._matching_voice(wanted)
         if match is None:
             self.trans_status.config(
@@ -1162,9 +1206,19 @@ class SettingsWindow(tk.Toplevel):
             def apply() -> None:
                 self._translate_catalogue = entries
                 self._refresh_translate_list()
-                self.trans_status.config(
-                    text=f"{len(entries)} direction(s) available" if entries
-                    else "Could not reach the catalogue.")
+                if entries:
+                    self.trans_status.config(
+                        text=f"{len(entries)} direction(s) available")
+                else:
+                    # "Could not reach the catalogue" blamed the network for
+                    # what is usually a repository that has never published
+                    # any, which sends people looking in the wrong place.
+                    self.trans_status.config(
+                        text=f"No models published at {repo} "
+                             f"({translate.MODELS_TAG}), or no connection. "
+                             "Publishing needs the 'Translation models' action "
+                             f"-- or a {translate.MODELS_TAG} tag -- to be run "
+                             "once on that repository.")
 
             self.after(0, apply)
 
@@ -2359,8 +2413,8 @@ class SettingsWindow(tk.Toplevel):
         self.trans_method.set(
             "whisper" if c.stt.task == "translate" else "models")
         self.trans_enabled.set(c.translation.enabled)
-        self.trans_source.set(c.translation.source)
-        self.trans_target.set(c.translation.target)
+        self.trans_source.set(self._language_label(c.translation.source))
+        self.trans_target.set(self._language_label(c.translation.target))
         self._refresh_translate_list()
 
         self.studio_override_var.set(c.studio.ignore_hardware_check)
@@ -2425,8 +2479,8 @@ class SettingsWindow(tk.Toplevel):
         # Exclusive: running both would translate the text twice, the second
         # time from a language it is no longer in.
         c.translation.enabled = self.trans_enabled.get() and not by_whisper
-        c.translation.source = self.trans_source.get().strip()
-        c.translation.target = self.trans_target.get().strip()
+        c.translation.source = self._source_code()
+        c.translation.target = self._target_code()
 
         c.updates.repo = self.repo_var.get().strip()
         c.updates.check_on_start = self.check_start_var.get()
@@ -2450,7 +2504,16 @@ class SettingsWindow(tk.Toplevel):
         # validate() can switch translation off (a no-op pair), so the checkbox
         # has to be told rather than left claiming something else.
         if self.trans_method.get() != "whisper":
+            wanted = self.trans_enabled.get()
             self.trans_enabled.set(self.cfg.translation.enabled)
+            if wanted and not self.cfg.translation.enabled:
+                # validate() refuses a pair that cannot do anything. Unticking
+                # the box without a word looks like the button is broken.
+                self.trans_status.config(
+                    text="Translation stays off: "
+                         f"{self._language_label(self._source_code())} to "
+                         f"{self._language_label(self._target_code())} would "
+                         "not change anything. Pick a different target.")
         elif self.cfg.stt.task != "translate":
             # validate() refused it -- an English-only model has nothing to
             # translate from. Say so rather than leaving the box ticked.

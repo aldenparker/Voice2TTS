@@ -331,9 +331,16 @@ def main() -> int:
     row = win.trans_tree.item("en_pt", "values")
     check("with its size and licence", row[1] == "63 MB" and row[3] == "CC-BY-4.0",
           str(row))
-    check("and the language pickers offer it",
-          "pt" in win.trans_source_combo["values"],
-          str(win.trans_source_combo["values"]))
+    offered = [win._language_code(v) for v in win.trans_source_combo["values"]]
+    check("and the language pickers offer it", "pt" in offered, str(offered))
+    # Every language we can name, not only the ones already downloaded: the
+    # picker used to list only installed pairs, so you could not choose German
+    # until you had German, and could not get German without choosing it.
+    check("along with every language we can name",
+          {"de", "fr", "ja"} <= set(offered), str(offered))
+    check("shown with their names, not bare codes",
+          any(v.startswith("de (") for v in win.trans_source_combo["values"]),
+          str(win.trans_source_combo["values"][:4]))
 
     win.trans_tree.selection_remove(*win.trans_tree.get_children())
     win._download_pair()
@@ -354,8 +361,14 @@ def main() -> int:
     win.model_var.set("small")
     win.trans_method.set("whisper")
     win._switch_translate_method()
-    check("choosing the recogniser moves the target to English",
-          win.trans_target.get() == "en", win.trans_target.get())
+    check("choosing the recogniser leaves the language pair alone",
+          win._target_code() == "de", win.trans_target.get())
+    win.trans_method.set("models")
+    win._switch_translate_method()
+    check("and switching back still has it", win._target_code() == "de",
+          win.trans_target.get())
+    win.trans_method.set("whisper")
+    win._switch_translate_method()
     win._collect()
     check("the recogniser translates", cfg.stt.task == "translate", cfg.stt.task)
     check("and the chain is off, so nothing translates twice",
@@ -378,6 +391,7 @@ def main() -> int:
     # has to be reported as one rather than looking like it works.
     win.model_var.set("small")
     win.trans_source.set("en")
+    win.trans_target.set("en")
     win._refresh_translate_route()
     check("English to English by the recogniser is called out",
           "changes nothing" in win.trans_route.cget("text"),
@@ -393,6 +407,7 @@ def main() -> int:
           win.trans_route.cget("text"))
 
     win.model_var.set("small")
+    win.trans_target.set("en")
     win._refresh_translate_route()
     check("a real recogniser route reads cleanly",
           "Note:" not in win.trans_route.cget("text"),
@@ -453,6 +468,60 @@ def main() -> int:
     check("no voice prompt while translation is off",
           win.trans_voice_btn.winfo_manager() == "",
           "nothing is being translated, so nothing mismatches")
+
+    print("\n[translate: the reported faults]")
+    # 1. Trying the recogniser once used to rewrite a saved en->de as en->en.
+    #    validate() then treats that as a no-op and switches translation off, so
+    #    ticking the box afterwards appeared to do nothing at all.
+    win.trans_method.set("models")
+    win.trans_enabled.set(True)
+    win.trans_source.set("en (English)")
+    win.trans_target.set("de (German)")
+    win._collect()
+    check("a pair is stored as codes, not display text",
+          (cfg.translation.source, cfg.translation.target) == ("en", "de"),
+          f"{cfg.translation.source} -> {cfg.translation.target}")
+
+    win.trans_method.set("whisper")
+    win._switch_translate_method()
+    win._collect()
+    win.trans_method.set("models")
+    win._switch_translate_method()
+    win._collect()
+    check("trying the recogniser does not destroy the target",
+          cfg.translation.target == "de", cfg.translation.target)
+    check("and translation is still on afterwards", cfg.translation.enabled,
+          "a target of 'en' would make validate() silently switch it off")
+
+    # 2. A no-op pair unticks the box. Doing that silently looks like the
+    #    checkbox is broken, so it has to say why.
+    win.trans_enabled.set(True)
+    win.trans_source.set("en (English)")
+    win.trans_target.set("en (English)")
+    win._apply()
+    check("a no-op pair switches translation off", not cfg.translation.enabled)
+    check("and says why rather than just unticking",
+          "not change anything" in win.trans_status.cget("text"),
+          win.trans_status.cget("text"))
+    win.trans_target.set("de (German)")
+
+    # 3. With no model for the pair the text stays in the SOURCE language, so
+    #    offering a target-language voice produced English read with a German
+    #    accent. The voice must follow what will actually be spoken.
+    win.trans_enabled.set(True)
+    win.trans_source.set("en (English)")
+    check("with a model, the voice should speak the target",
+          win._voice_should_speak("en", "de") == "de"
+          if translate.find_pair("en", "de") else True)
+    check("with no model, the voice should stay on the source",
+          win._voice_should_speak("en", "xx") == "en",
+          "otherwise it reads English in a foreign accent")
+    check("and with the recogniser it is always English",
+          (win.trans_method.set("whisper"),
+           win._voice_should_speak("de", "fr"))[1] == "en")
+    win.trans_method.set("models")
+    win.trans_enabled.set(False)
+    win._refresh_translate_route()
 
     print("\n[recognition mode]")
     check("sentence mode is the default", cfg.stt.mode == "sentence",

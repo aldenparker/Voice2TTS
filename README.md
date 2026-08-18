@@ -189,6 +189,18 @@ release assets. Pick the pair, press Download, and it appears in the list. Pairs
 nobody publishes directly are routed through English automatically, at the cost
 of a second hop.
 
+> **The models have to be published once per repository.** They are not built by
+> the app release, because converting sixteen pairs takes about an hour and a
+> new language does not need a new build. If the Translate tab says no models
+> are published, someone with write access runs it once:
+>
+> ```
+> git tag models-1 && git push origin models-1
+> ```
+>
+> or starts the **Translation models** action from the Actions tab. The tag has
+> to match `MODELS_TAG` in `voice2tts/translate.py`, which a test enforces.
+
 **The recogniser** is Whisper translating as it listens — one setting and no
 download, but it only ever produces English. It needs a multilingual model
 (`small` or better; `base` returns *"can you be nice to me?"* for *"kannst du
