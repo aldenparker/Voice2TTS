@@ -54,6 +54,15 @@ _MAX_VAD_FAILURES = 5
 # PortAudio, short enough that replugging feels like it just works.
 _RECOVERY_INTERVAL_S = 3.0
 
+# How long a reopened microphone has to keep working before it counts as
+# recovered. PortAudio reports failure from its callback, not from start().
+_RECONNECT_SETTLE_S = 0.75
+
+# Retries back off to here. A microphone that is gone for good must not keep
+# the machine busy: every attempt re-enumerates the audio devices, which is not
+# cheap, and at a flat three seconds that ran for as long as the app was open.
+_RECOVERY_MAX_INTERVAL_S = 60.0
+
 
 @dataclass
 class HistoryEntry:
@@ -555,6 +564,7 @@ class Pipeline:
         vad_failures = 0
         capture_reported = False
         next_recovery = 0.0
+        recovery_wait = _RECOVERY_INTERVAL_S
 
         while self._running.is_set():
             # The capture stream can die under us -- unplugging a USB microphone is
@@ -570,11 +580,21 @@ class Pipeline:
                     )
                     self._set_state(State.IDLE)
                 # Unplugging a USB microphone should not mean restarting the app.
-                # Retry on a timer rather than only when something else pokes us.
+                # Retry on a timer rather than only when something else pokes us,
+                # and back off: a device that is not coming back must not keep
+                # re-enumerating every audio interface for as long as the app is
+                # open. Reported from the field as constant CPU load.
                 if time.monotonic() >= next_recovery:
-                    next_recovery = time.monotonic() + _RECOVERY_INTERVAL_S
+                    next_recovery = time.monotonic() + recovery_wait
                     if self._try_recover_capture():
                         capture_reported = False
+                        recovery_wait = _RECOVERY_INTERVAL_S
+                    else:
+                        recovery_wait = min(recovery_wait * 2,
+                                            _RECOVERY_MAX_INTERVAL_S)
+                        if recovery_wait >= _RECOVERY_MAX_INTERVAL_S:
+                            log.info("microphone still unavailable; retrying "
+                                     "every %.0fs", _RECOVERY_MAX_INTERVAL_S)
                 continue
             try:
                 window = self.capture.queue.get(timeout=0.2)
@@ -848,6 +868,21 @@ class Pipeline:
         except Exception as exc:  # noqa: BLE001 - the device may still be settling
             log.debug("microphone not ready yet: %s", exc)
             return False
+
+        # start() only means PortAudio accepted the request. A device that is
+        # present but unusable fails a moment later, from its own callback --
+        # and reporting success on the strength of start() alone produced an
+        # endless three-second cycle of "reconnected" and "stopped again", each
+        # round re-enumerating every audio device on the machine. That loop is
+        # what users saw as the fans spinning up.
+        settle = time.monotonic() + _RECONNECT_SETTLE_S
+        while time.monotonic() < settle:
+            if fresh.failed:
+                log.debug("microphone failed immediately after opening: %s",
+                          fresh.failure_reason)
+                fresh.stop()
+                return False
+            time.sleep(0.05)
 
         # Swap in one assignment and only then close the old one. Nulling
         # self.capture first would make the segmenter loop see None and treat it as

@@ -450,6 +450,67 @@ def test_device_recovery() -> None:
     check("recovered capture reports alive", p.capture.check_alive())
     p.capture.stop()
 
+    # A device that opens and then dies from its own callback must NOT count as
+    # recovered. Reporting success on the strength of start() alone produced an
+    # endless three-second cycle of "reconnected" then "stopped again", each
+    # round re-enumerating every audio device -- which is what users saw as the
+    # fans spinning up.
+    import voice2tts.pipeline as pipeline_mod
+
+    class DiesImmediately:
+        """Opens fine, then fails the way PortAudio actually reports it."""
+
+        def __init__(self, device):
+            self.device = device
+            self.failed = False
+            self.failure_reason = ""
+            self.stopped = False
+
+        def start(self):
+            self.failed = True          # the callback fails right after start
+            self.failure_reason = "audio stream closed unexpectedly"
+
+        def stop(self):
+            self.stopped = True
+
+    real_capture = pipeline_mod.MicCapture
+    pipeline_mod.MicCapture = DiesImmediately
+    try:
+        dead = MicCapture(device)
+        dead._mark_failed("gone")
+        p2 = Pipeline(Config())
+        p2.capture = dead
+        started = time.monotonic()
+        check("a device that dies straight away is not counted as recovered",
+              not p2._try_recover_capture(),
+              "otherwise it reconnects and drops in a loop, forever")
+        check("and the check does not take long",
+              time.monotonic() - started < 3.0,
+              f"{time.monotonic() - started:.1f}s")
+        check("the dead capture is left in place to retry",
+              p2.capture is dead)
+    finally:
+        pipeline_mod.MicCapture = real_capture
+
+    # Retries back off. At a flat three seconds a microphone that never returns
+    # kept the machine enumerating devices for as long as the app was open.
+    check("retries start promptly", pipeline_mod._RECOVERY_INTERVAL_S <= 5.0,
+          f"{pipeline_mod._RECOVERY_INTERVAL_S}s")
+    check("and back off to something occasional",
+          pipeline_mod._RECOVERY_MAX_INTERVAL_S >= 30.0,
+          f"{pipeline_mod._RECOVERY_MAX_INTERVAL_S}s")
+    wait, elapsed, attempts = pipeline_mod._RECOVERY_INTERVAL_S, 0.0, 0
+    while elapsed < 300:
+        elapsed += wait
+        attempts += 1
+        wait = min(wait * 2, pipeline_mod._RECOVERY_MAX_INTERVAL_S)
+    check("a microphone that never returns is retried rarely, not constantly",
+          attempts <= 15,
+          f"{attempts} attempts in five minutes "
+          f"(a flat {pipeline_mod._RECOVERY_INTERVAL_S:.0f}s would be "
+          f"{int(300 / pipeline_mod._RECOVERY_INTERVAL_S)})")
+
+
 
 def test_theme() -> None:
     print("\n[theme]")
@@ -2155,6 +2216,30 @@ def test_streaming() -> None:
           str(spoken))
     tail = rec.finish()
     check("and released when the speaker stops", bool(tail), tail[:40])
+
+    # A microphone that drops out mid-utterance stops delivering windows while
+    # the buffer still holds audio. Re-reading it cannot produce a different
+    # answer, and doing so every interval pins whatever model is loaded --
+    # reported from the field as fans spinning up with nobody speaking.
+    engine = FakeEngine(["hello there."] * 40)
+    rec = StreamingRecognizer(engine)
+    rec.feed(second)
+    rec._last_pass = 0.0
+    rec.poll()
+    after_first = engine.calls
+    for _ in range(10):
+        rec._last_pass = 0.0          # the interval has elapsed, repeatedly
+        check_none = rec.poll()
+        if check_none is not None:
+            break
+    check("an unchanged buffer is not read again",
+          engine.calls == after_first,
+          f"{engine.calls - after_first} wasted pass(es) with no new audio")
+    rec.feed(second)
+    rec._last_pass = 0.0
+    rec.poll()
+    check("but new audio is", engine.calls == after_first + 1,
+          f"{engine.calls} calls")
 
     # -- falling behind ------------------------------------------------------
     # A pass slower than the ceiling: no room left to stretch the interval.

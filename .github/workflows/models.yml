@@ -13,7 +13,7 @@ name: Translation models
 # Two ways to start it, and never on an ordinary push -- 800 MB of model
 # conversion is not a per-commit job:
 #
-#   git tag models-1 && git push origin models-1     <- same as an app release
+#   git tag models-2 && git push origin models-2     <- same as an app release
 #   or the "Translation models" action, run by hand
 #
 # The tag trigger exists because the Actions tab is easy to miss: the first
@@ -27,7 +27,7 @@ on:
       tag:
         description: "Release tag to publish the models under"
         required: true
-        default: "models-1"
+        default: "models-2"
       pairs:
         description: >-
           Pairs to convert, e.g. "en de fr". Blank converts every pair in

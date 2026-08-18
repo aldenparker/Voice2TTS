@@ -163,6 +163,7 @@ class StreamingRecognizer:
         self._settled: list[str] = []       # agreed but not yet spoken
         self._spoken_words = 0              # how much of _settled has gone out
         self._last_pass = 0.0
+        self._samples_at_last_pass = -1
         self._slow_passes = 0
         self._cost_per_s = INITIAL_COST_PER_S
         self.behind = False
@@ -190,7 +191,17 @@ class StreamingRecognizer:
 
     @property
     def due(self) -> bool:
-        """Whether it is time for another pass."""
+        """Whether it is time for another pass, and there is anything new to read.
+
+        The second half matters more than it looks. Re-reading a buffer that has
+        not changed cannot produce a different answer, and if audio stops
+        arriving mid-utterance -- a microphone dropping out is the usual way --
+        this otherwise re-transcribes the same seconds forever, at whatever the
+        chosen model costs. On `medium.en` that is a GPU pinned at full load
+        with nobody speaking.
+        """
+        if self._samples <= self._samples_at_last_pass:
+            return False
         return (time.monotonic() - self._last_pass) >= self._interval_now
 
     def reset(self) -> None:
@@ -199,6 +210,7 @@ class StreamingRecognizer:
         self._previous.clear()
         self._settled.clear()
         self._spoken_words = 0
+        self._samples_at_last_pass = -1
         self._slow_passes = 0
         self.behind = False
         # The measured cost is a property of the model and the machine, not of
@@ -211,6 +223,7 @@ class StreamingRecognizer:
         if not self._audio or not self.due:
             return None
         self._last_pass = time.monotonic()
+        self._samples_at_last_pass = self._samples
 
         audio = np.concatenate(self._audio)
         started = time.perf_counter()
@@ -333,8 +346,12 @@ class StreamingRecognizer:
 
         keep_from = int(cut_at * SAMPLE_RATE)
         audio = np.concatenate(self._audio)[keep_from:]
+        dropped = self._samples - len(audio)
         self._audio = [audio]
         self._samples = len(audio)
+        # Trimming shrinks the buffer; without this the "is there new audio"
+        # test above would never be true again.
+        self._samples_at_last_pass -= dropped
 
         # The transcript restarts from the new beginning of the buffer, so the
         # counters that index into it have to move back by the same amount.

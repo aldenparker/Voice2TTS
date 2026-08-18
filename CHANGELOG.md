@@ -69,6 +69,26 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Two things kept the machine busy doing nothing.** Both showed up as the fans
+  spinning up with the app apparently idle:
+
+  Streaming re-read its buffer on a timer whether or not any new audio had
+  arrived. When a microphone dropped out mid-utterance the buffer stayed put and
+  the same few seconds were transcribed over and over, forever, at whatever the
+  selected model costs — on `medium.en` that is a GPU at full load with nobody
+  speaking. A pass now needs new audio as well as an elapsed interval.
+
+  Microphone recovery treated `start()` succeeding as recovery. A device that
+  opens and then fails from its own callback — which is how PortAudio reports
+  most of them — produced an endless three-second cycle of "reconnected" and
+  "stopped again", re-enumerating every audio device each time. Recovery now
+  waits to see the stream survive, and retries back off from 3 s to 60 s: nine
+  attempts in five minutes rather than a hundred.
+
+- **The app looked for a models release that did not exist.** `MODELS_TAG` still
+  said `models-1` after `models-2` was published, so fetching the catalogue
+  returned a 404.
+
 - **Update checking was dead on the stable channel, and the beta checkbox did
   nothing until you pressed Apply.** Two separate faults with the same symptom:
 

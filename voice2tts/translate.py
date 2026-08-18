@@ -246,7 +246,7 @@ def remove_pair(source: str, target: str) -> bool:
 # "latest" so a shipped build keeps working when a newer set is published --
 # an old build should not start downloading models converted against a
 # CTranslate2 it does not have.
-MODELS_TAG = "models-1"
+MODELS_TAG = "models-2"
 ASSET_URL = "https://github.com/{repo}/releases/download/{tag}/{asset}"
 
 # A copy of the last catalogue fetched, so the picker can list what is
