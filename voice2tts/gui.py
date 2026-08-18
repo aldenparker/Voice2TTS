@@ -36,7 +36,7 @@ from .config import (
 )
 from .diagnostics import diagnostics
 from .hotkey import describe
-from .paths import config_path, is_frozen, list_voices, log_path
+from .paths import config_path, find_voice, is_frozen, list_voices, log_path
 from .pipeline import Pipeline
 from .platform_win import run_at_login, set_run_at_login
 from .substitutions import STARTER_RULES, Rule
@@ -99,6 +99,7 @@ class SettingsWindow(tk.Toplevel):
         self._build_voice(nb)
         self._build_voice_library(nb)
         self._build_words(nb)
+        self._build_translate(nb)
         self._build_history(nb)
         self._build_studio(nb)
         self._build_recognition(nb)
@@ -898,6 +899,261 @@ class SettingsWindow(tk.Toplevel):
             self._show_installed_only()
         self.lib_status.config(text=message)
 
+    # -- translate tab --------------------------------------------------------
+
+    def _build_translate(self, nb: ttk.Notebook) -> None:
+        tab = ttk.Frame(nb, padding=10)
+        nb.add(tab, text="Translate")
+
+        ttk.Label(
+            tab,
+            text="Speak one language, have the far end hear another. Runs on this "
+                 "machine;\nnothing is sent anywhere. Models are downloaded once, "
+                 "about 60 MB per direction.",
+            foreground="#555", justify="left",
+        ).grid(row=0, column=0, columnspan=5, sticky="w")
+
+        self.trans_enabled = tk.BooleanVar(value=False)
+        ttk.Checkbutton(tab, text="Translate what I say", variable=self.trans_enabled,
+                        command=self._refresh_translate_route).grid(
+            row=1, column=0, columnspan=5, sticky="w", pady=(6, 4))
+
+        picker = ttk.Frame(tab)
+        picker.grid(row=2, column=0, columnspan=5, sticky="w")
+        ttk.Label(picker, text="I speak").pack(side="left")
+        self.trans_source = tk.StringVar(value="en")
+        self.trans_source_combo = ttk.Combobox(picker, textvariable=self.trans_source,
+                                               width=14, state="readonly")
+        self.trans_source_combo.pack(side="left", padx=4)
+        ttk.Label(picker, text="they hear").pack(side="left", padx=(10, 0))
+        self.trans_target = tk.StringVar(value="de")
+        self.trans_target_combo = ttk.Combobox(picker, textvariable=self.trans_target,
+                                               width=14, state="readonly")
+        self.trans_target_combo.pack(side="left", padx=4)
+        for combo in (self.trans_source_combo, self.trans_target_combo):
+            combo.bind("<<ComboboxSelected>>",
+                       lambda _e: self._refresh_translate_route())
+
+        # The route line is where every reason this will not work gets said: no
+        # model, a pivot that will compound errors, an English-only recogniser,
+        # or a voice that speaks a different language than the output.
+        self.trans_route = ttk.Label(tab, text="", justify="left", foreground="#555")
+        self.trans_route.grid(row=3, column=0, columnspan=5, sticky="w", pady=(8, 4))
+
+        top = ttk.Frame(tab)
+        top.grid(row=4, column=0, columnspan=5, sticky="ew", pady=(4, 6))
+        ttk.Button(top, text="Load catalogue",
+                   command=self._load_translate_catalogue).pack(side="left")
+        ttk.Button(top, text="Download", command=self._download_pair).pack(
+            side="left", padx=6)
+        ttk.Button(top, text="Remove", command=self._remove_pair).pack(side="left")
+        self.trans_status = ttk.Label(top, text="", foreground="#666")
+        self.trans_status.pack(side="left", padx=12)
+
+        cols = ("pair", "size", "state", "licence")
+        self.trans_tree = ttk.Treeview(tab, columns=cols, show="headings", height=9)
+        for col, width, heading in zip(cols, (220, 80, 90, 110),
+                                       ("Direction", "Size", "State", "Licence"),
+                                       strict=True):
+            self.trans_tree.heading(col, text=heading)
+            self.trans_tree.column(col, width=width, anchor="w")
+        self.trans_tree.grid(row=5, column=0, columnspan=5, sticky="nsew")
+        sb = ttk.Scrollbar(tab, orient="vertical", command=self.trans_tree.yview)
+        sb.grid(row=5, column=5, sticky="ns")
+        self.trans_tree.configure(yscrollcommand=sb.set)
+
+        ttk.Label(
+            tab,
+            text="Models are converted from Helsinki-NLP's OPUS-MT and used under "
+                 "CC-BY-4.0.\nThe attribution travels with each one, in a LICENSE "
+                 "file beside it.",
+            foreground="#777", justify="left",
+        ).grid(row=6, column=0, columnspan=5, sticky="w", pady=(6, 0))
+
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(5, weight=1)
+        self._translate_catalogue: list = []
+        self._refresh_translate_list()
+
+    def _refresh_translate_list(self) -> None:
+        """Show what is installed, merged with the catalogue if it was fetched."""
+        from . import translate
+
+        self.trans_tree.delete(*self.trans_tree.get_children())
+        rows: dict[str, tuple] = {}
+        # Installed first, so a model that is here but not in the catalogue --
+        # an older release, or one the network cannot confirm -- still shows.
+        for pair in translate.installed_pairs():
+            label = (f"{translate.language_name(pair.source)} → "
+                     f"{translate.language_name(pair.target)}")
+            rows[pair.code] = (label, "-", "installed", "CC-BY-4.0")
+        for entry in self._translate_catalogue:
+            size = f"{entry.size / 1e6:.0f} MB" if entry.size else "-"
+            rows[entry.code] = (entry.label, size,
+                                "installed" if entry.installed else "available",
+                                entry.licence or "unknown")
+        for code in sorted(rows):
+            self.trans_tree.insert("", "end", iid=code, values=rows[code])
+
+        codes = {part for code in rows for part in code.split("_")}
+        codes |= {self.trans_source.get(), self.trans_target.get(), "en"}
+        listed = sorted(codes)
+        self.trans_source_combo["values"] = listed
+        self.trans_target_combo["values"] = listed
+        self._refresh_translate_route()
+
+    def _refresh_translate_route(self) -> None:
+        """Say what will happen, including every reason it might not work."""
+        from . import translate
+
+        source, target = self.trans_source.get(), self.trans_target.get()
+        if not self.trans_enabled.get():
+            self.trans_route.config(
+                text="Translation is off; your own words are spoken as recognised.",
+                foreground="#555")
+            return
+        if source == target:
+            self.trans_route.config(
+                text="Speaking and hearing the same language does nothing.",
+                foreground="#a00")
+            return
+
+        hops = translate.route(source, target)
+        if not hops:
+            self.trans_route.config(
+                text=f"No model for {translate.language_name(source)} to "
+                     f"{translate.language_name(target)}. Load the catalogue and "
+                     "download one below.",
+                foreground="#a00")
+            return
+
+        notes = []
+        if len(hops) > 1:
+            notes.append(f"goes through {translate.language_name(hops[0].target)}, "
+                         "which compounds errors")
+        if self.cfg.stt.model.endswith(".en") and source != "en":
+            notes.append(f"the {self.cfg.stt.model} recogniser hears English only "
+                         "-- pick a multilingual model on the Recognition tab")
+        # A voice that speaks a different language than the text produces
+        # confident gibberish, which is worse than an error.
+        spoken_by_voice = self._voice_language()
+        if spoken_by_voice and spoken_by_voice != target:
+            notes.append(
+                f"the selected voice speaks "
+                f"{translate.language_name(spoken_by_voice)}, not "
+                f"{translate.language_name(target)} -- it will mispronounce "
+                "the output")
+
+        route_text = " → ".join(
+            [translate.language_name(source)]
+            + [translate.language_name(hop.target) for hop in hops])
+        if notes:
+            self.trans_route.config(text=route_text + "\nNote: " + "; ".join(notes),
+                                    foreground="#a60")
+        else:
+            self.trans_route.config(text=route_text, foreground="#070")
+
+    def _voice_language(self) -> str:
+        """The language of the selected voice, or "" if it cannot be told."""
+        try:
+            path = find_voice(self.voice_var.get())
+            return voices.voice_language(path) if path else ""
+        except Exception:  # noqa: BLE001 - a guess that fails is not an error
+            return ""
+
+    def _load_translate_catalogue(self) -> None:
+        from . import translate
+
+        self.trans_status.config(text="Fetching catalogue...")
+        repo = self.cfg.updates.repo
+
+        def work() -> None:
+            entries = translate.fetch_catalogue(repo)
+
+            def apply() -> None:
+                self._translate_catalogue = entries
+                self._refresh_translate_list()
+                self.trans_status.config(
+                    text=f"{len(entries)} direction(s) available" if entries
+                    else "Could not reach the catalogue.")
+
+            self.after(0, apply)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _selected_pair_code(self) -> str | None:
+        selection = self.trans_tree.selection()
+        if not selection:
+            self.trans_status.config(text="Select a direction first.")
+            return None
+        return selection[0]
+
+    def _download_pair(self) -> None:
+        code = self._selected_pair_code()
+        if code is None:
+            return
+        entry = next((e for e in self._translate_catalogue if e.code == code), None)
+        if entry is None:
+            self.trans_status.config(text="Load the catalogue first.")
+            return
+        if entry.installed:
+            self.trans_status.config(text=f"{entry.label} is already installed.")
+            return
+
+        from . import translate
+
+        repo = self.cfg.updates.repo
+        label = entry.label
+
+        def report(done: int, total: int) -> None:
+            share = f"{done / max(total, 1) * 100:.0f}%"
+            self.after(0, lambda: self.trans_status.config(
+                text=f"Downloading {label}... {share}"))
+
+        def work() -> None:
+            try:
+                translate.download_pair(entry, repo, progress=report)
+            except Exception as exc:  # noqa: BLE001
+                failure = str(exc)  # `exc` is deleted when this block ends
+                self.after(0, lambda: self.trans_status.config(
+                    text=f"Failed: {failure}"))
+                return
+
+            def done() -> None:
+                self._refresh_translate_list()
+                self.trans_status.config(text=f"Installed {label}")
+                # A model that arrives while translation is already on should
+                # start working without a restart.
+                if self.cfg.translation.enabled:
+                    self.pipeline.apply_translation_changes()
+
+            self.after(0, done)
+
+        self.trans_status.config(text=f"Downloading {label}...")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _remove_pair(self) -> None:
+        code = self._selected_pair_code()
+        if code is None:
+            return
+        source, _, target = code.partition("_")
+
+        from . import translate
+
+        label = (f"{translate.language_name(source)} to "
+                 f"{translate.language_name(target)}")
+        if not messagebox.askyesno("Remove model", f"Delete the {label} model?",
+                                   parent=self):
+            return
+        if translate.remove_pair(source, target):
+            self.trans_status.config(text=f"Removed {label}")
+            # If the running chain was using it, it has to let go.
+            if self.cfg.translation.enabled:
+                self.pipeline.apply_translation_changes()
+        else:
+            self.trans_status.config(text="It was not installed.")
+        self._refresh_translate_list()
+
     # -- words tab ------------------------------------------------------------
 
     def _build_words(self, nb: ttk.Notebook) -> None:
@@ -916,6 +1172,17 @@ class SettingsWindow(tk.Toplevel):
         ttk.Checkbutton(tab, text="Apply these rules", variable=self.subs_enabled_var,
                         command=self._refresh_subs_preview).grid(
             row=1, column=0, columnspan=4, sticky="w", pady=(6, 4))
+
+        which = ttk.Frame(tab)
+        which.grid(row=1, column=1, columnspan=3, sticky="e", pady=(6, 4))
+        self.subs_which = tk.StringVar(value="source")
+        ttk.Label(which, text="Rules for:").pack(side="left", padx=(0, 6))
+        ttk.Radiobutton(which, text="What I said", value="source",
+                        variable=self.subs_which,
+                        command=self._switch_sub_list).pack(side="left")
+        ttk.Radiobutton(which, text="What is spoken", value="target",
+                        variable=self.subs_which,
+                        command=self._switch_sub_list).pack(side="left", padx=(8, 0))
 
         cols = ("pattern", "replacement", "opts")
         self.subs_tree = ttk.Treeview(tab, columns=cols, show="headings", height=10)
@@ -978,10 +1245,32 @@ class SettingsWindow(tk.Toplevel):
         tab.columnconfigure(1, weight=1)
         tab.rowconfigure(2, weight=1)
         self._subs: list[SubstitutionRule] = []
+        self._target_subs: list[SubstitutionRule] = []
+
+    def _active_subs(self) -> list[SubstitutionRule]:
+        """Whichever list the radio buttons are pointing at.
+
+        Two lists rather than one because translation sits between them: source
+        rules fix what the recogniser misheard and have to run before the text
+        is translated, target rules fix what the voice says badly and are a
+        property of the output language.
+        """
+        return (self._target_subs if self.subs_which.get() == "target"
+                else self._subs)
+
+    def _switch_sub_list(self) -> None:
+        """Show the other list. The editor is cleared, because leaving a rule
+        from the source list in the fields makes it far too easy to add it to
+        the target list by accident."""
+        self.sub_pattern.set("")
+        self.sub_replacement.set("")
+        self._render_subs()
+        self._refresh_subs_preview()
 
     def _render_subs(self) -> None:
+        rules = self._active_subs()
         self.subs_tree.delete(*self.subs_tree.get_children())
-        for i, rule in enumerate(self._subs):
+        for i, rule in enumerate(rules):
             opts = []
             if not rule.enabled:
                 opts.append("off")
@@ -1001,10 +1290,11 @@ class SettingsWindow(tk.Toplevel):
         return int(sel[0]) if sel else None
 
     def _load_sub_row(self) -> None:
+        rules = self._active_subs()
         index = self._selected_sub()
-        if index is None or index >= len(self._subs):
+        if index is None or index >= len(rules):
             return
-        rule = self._subs[index]
+        rule = rules[index]
         self.sub_pattern.set(rule.pattern)
         self.sub_replacement.set(rule.replacement)
         self.sub_whole.set(rule.whole_word)
@@ -1012,13 +1302,15 @@ class SettingsWindow(tk.Toplevel):
         self.sub_case.set(rule.case_sensitive)
 
     def _toggle_sub_row(self) -> None:
+        rules = self._active_subs()
         index = self._selected_sub()
-        if index is None or index >= len(self._subs):
+        if index is None or index >= len(rules):
             return
-        self._subs[index].enabled = not self._subs[index].enabled
+        rules[index].enabled = not rules[index].enabled
         self._render_subs()
 
     def _add_sub(self) -> None:
+        rules = self._active_subs()
         pattern = self.sub_pattern.get().strip()
         if not pattern:
             self.subs_status.config(text="Enter what is heard first.")
@@ -1034,33 +1326,35 @@ class SettingsWindow(tk.Toplevel):
         if error:
             self.subs_status.config(text=error)
             return
-        existing = next((i for i, r in enumerate(self._subs)
+        existing = next((i for i, r in enumerate(rules)
                          if r.pattern.lower() == pattern.lower()), None)
         if existing is None:
-            self._subs.append(rule)
+            rules.append(rule)
             self.subs_status.config(text=f"Added {pattern}")
         else:
-            rule.enabled = self._subs[existing].enabled
-            self._subs[existing] = rule
+            rule.enabled = rules[existing].enabled
+            rules[existing] = rule
             self.subs_status.config(text=f"Updated {pattern}")
         self._render_subs()
 
     def _remove_sub(self) -> None:
+        rules = self._active_subs()
         index = self._selected_sub()
-        if index is None or index >= len(self._subs):
+        if index is None or index >= len(rules):
             self.subs_status.config(text="Select a rule first.")
             return
-        removed = self._subs.pop(index)
+        removed = rules.pop(index)
         self.subs_status.config(text=f"Removed {removed.pattern}")
         self._render_subs()
 
     def _add_starter_subs(self) -> None:
-        have = {r.pattern.lower() for r in self._subs}
+        rules = self._active_subs()
+        have = {r.pattern.lower() for r in rules}
         added = 0
         for starter in STARTER_RULES:
             if starter.pattern.lower() in have:
                 continue
-            self._subs.append(SubstitutionRule(
+            rules.append(SubstitutionRule(
                 pattern=starter.pattern, replacement=starter.replacement))
             added += 1
         self.subs_status.config(text=f"Added {added}" if added else "Already present")
@@ -1069,13 +1363,14 @@ class SettingsWindow(tk.Toplevel):
     def _refresh_subs_preview(self) -> None:
         if not hasattr(self, "subs_preview"):
             return
+        rules = self._active_subs()
         sample = self.subs_sample.get()
         if not self.subs_enabled_var.get():
             self.subs_preview.config(text="(rules are switched off)",
                                      foreground="#666")
             return
         rules = [Rule(r.pattern, r.replacement, r.enabled, r.whole_word,
-                      r.regex, r.case_sensitive) for r in self._subs]
+                      r.regex, r.case_sensitive) for r in rules]
         result = substitutions.preview(rules, sample)
         changed = result != sample
         self.subs_preview.config(
@@ -1879,12 +2174,22 @@ class SettingsWindow(tk.Toplevel):
         self.review_var.set(c.text.review_before_speaking)
         self.review_timeout_var.set(c.text.review_timeout_s)
         self.subs_enabled_var.set(c.text.substitutions_enabled)
-        self._subs = [
-            SubstitutionRule(r.pattern, r.replacement, r.enabled, r.whole_word,
-                             r.regex, r.case_sensitive)
-            for r in c.text.substitutions
-        ]
+        def copied(entries):
+            return [
+                SubstitutionRule(r.pattern, r.replacement, r.enabled, r.whole_word,
+                                 r.regex, r.case_sensitive)
+                for r in entries
+            ]
+
+        # Copies, so Cancel really does discard the edits.
+        self._subs = copied(c.text.substitutions)
+        self._target_subs = copied(c.text.target_substitutions)
         self._render_subs()
+
+        self.trans_enabled.set(c.translation.enabled)
+        self.trans_source.set(c.translation.source)
+        self.trans_target.set(c.translation.target)
+        self._refresh_translate_list()
 
         self.studio_override_var.set(c.studio.ignore_hardware_check)
         self._refresh_studio()
@@ -1942,8 +2247,13 @@ class SettingsWindow(tk.Toplevel):
 
         c.text.substitutions_enabled = self.subs_enabled_var.get()
         c.text.substitutions = list(self._subs)
+        c.text.target_substitutions = list(self._target_subs)
         c.text.review_before_speaking = self.review_var.get()
         c.text.review_timeout_s = max(5.0, float(self.review_timeout_var.get()))
+
+        c.translation.enabled = self.trans_enabled.get()
+        c.translation.source = self.trans_source.get().strip()
+        c.translation.target = self.trans_target.get().strip()
 
         c.updates.repo = self.repo_var.get().strip()
         c.updates.check_on_start = self.check_start_var.get()
@@ -1963,6 +2273,11 @@ class SettingsWindow(tk.Toplevel):
         self.pipeline.apply_vad_changes()
         active = self.pipeline.apply_text_changes()
         self.subs_status.config(text=f"{active} rule(s) active")
+        self.pipeline.apply_translation_changes()
+        # validate() can switch translation off (a no-op pair), so the checkbox
+        # has to be told rather than left claiming something else.
+        self.trans_enabled.set(self.cfg.translation.enabled)
+        self._refresh_translate_route()
         # set_mode rebinds every hotkey from the config, so the clipboard and stop
         # combos are picked up along with the push-to-talk one.
         self.pipeline.set_mode(self.cfg.trigger.mode)

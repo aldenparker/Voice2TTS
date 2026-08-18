@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from voice2tts import devices as devices_mod  # noqa: E402
+from voice2tts import translate  # noqa: E402
 from voice2tts.config import OutputTarget, load_config  # noqa: E402
 from voice2tts.gui import SettingsWindow  # noqa: E402
 from voice2tts.icon import make_icon  # noqa: E402
@@ -31,6 +32,16 @@ def devices_cable_present() -> bool:
     from voice2tts import cable
 
     return cable.detect() is not None
+
+
+# The console on Windows is cp1252, and this suite prints text it does not
+# control: route arrows, voice names, translated text. A character the console
+# cannot represent must degrade to "?", not kill the run half way through.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, OSError):  # redirected to something simpler
+        pass
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -213,6 +224,122 @@ def main() -> int:
           "switched off" in win.subs_preview.cget("text"),
           win.subs_preview.cget("text"))
     win.subs_enabled_var.set(True)
+
+    print("\n[words tab: two rule lists]")
+    win.subs_which.set("source")
+    win._switch_sub_list()
+    win._subs = []
+    win._target_subs = []
+    win.sub_pattern.set("aiden")
+    win.sub_replacement.set("Aidan")
+    win._add_sub()
+    check("a rule lands in the source list",
+          len(win._subs) == 1 and not win._target_subs,
+          f"{len(win._subs)} source, {len(win._target_subs)} target")
+
+    win.subs_which.set("target")
+    win._switch_sub_list()
+    check("switching clears the editor", win.sub_pattern.get() == "",
+          "otherwise the source rule is one click from joining the target list")
+    check("and shows the other list", not win.subs_tree.get_children(),
+          "the target list is empty")
+
+    win.sub_pattern.set("Strasse")
+    win.sub_replacement.set("Straße")
+    win._add_sub()
+    check("a rule lands in the target list",
+          len(win._target_subs) == 1 and len(win._subs) == 1,
+          f"{len(win._subs)} source, {len(win._target_subs)} target")
+
+    win.subs_which.set("source")
+    win._switch_sub_list()
+    check("the source list is unchanged by target edits",
+          [r.pattern for r in win._subs] == ["aiden"],
+          str([r.pattern for r in win._subs]))
+
+    win._collect()
+    check("both lists are saved",
+          len(cfg.text.substitutions) == 1 and len(cfg.text.target_substitutions) == 1,
+          f"{len(cfg.text.substitutions)} / {len(cfg.text.target_substitutions)}")
+    win._load_from_config()
+    check("and both come back",
+          len(win._subs) == 1 and len(win._target_subs) == 1,
+          f"{len(win._subs)} / {len(win._target_subs)}")
+    check("as rule objects, not dicts",
+          hasattr(cfg.text.target_substitutions[0], "pattern"),
+          type(cfg.text.target_substitutions[0]).__name__)
+
+    print("\n[translate tab]")
+    check("tab built", win.trans_tree.winfo_exists() == 1)
+    check("translation is off by default", not win.trans_enabled.get(),
+          "a download and a second model should never appear by surprise")
+    check("the route line says so",
+          "off" in win.trans_route.cget("text").lower(),
+          win.trans_route.cget("text"))
+
+    # A pair with no model must say so rather than silently doing nothing.
+    win.trans_enabled.set(True)
+    win.trans_source.set("en")
+    win.trans_target.set("xx")
+    win._refresh_translate_route()
+    check("an unavailable pair is called out",
+          "No model" in win.trans_route.cget("text"), win.trans_route.cget("text"))
+
+    win.trans_target.set("en")
+    win._refresh_translate_route()
+    check("translating a language into itself is called out",
+          "does nothing" in win.trans_route.cget("text"),
+          win.trans_route.cget("text"))
+
+    # The interesting case: a real installed model, if there is one.
+    installed = translate.installed_pairs()
+    if installed:
+        pair = installed[0]
+        win.trans_source.set(pair.source)
+        win.trans_target.set(pair.target)
+        win._refresh_translate_route()
+        text = win.trans_route.cget("text")
+        check("an installed pair shows its route",
+              translate.language_name(pair.target) in text, text)
+        # base.en cannot hear anything but English, and the bundled voice speaks
+        # English -- both are worth saying before someone joins a call.
+        if cfg.stt.model.endswith(".en") and pair.source != "en":
+            check("an English-only recogniser is called out",
+                  "English only" in text, text)
+    else:
+        print("  SKIP  installed-pair route (no model installed)")
+
+    win.trans_enabled.set(False)
+    win._refresh_translate_route()
+
+    # The list merges installed models with the catalogue, so it must show what
+    # is installed even when the catalogue was never fetched.
+    win._translate_catalogue = []
+    win._refresh_translate_list()
+    check("the model list shows what is installed",
+          len(win.trans_tree.get_children()) == len(installed),
+          f"{len(win.trans_tree.get_children())} rows for {len(installed)} models")
+
+    win._translate_catalogue = [
+        translate.Available(source="en", target="pt", asset="en_pt.zip",
+                            size=63_000_000, licence="CC-BY-4.0"),
+    ]
+    win._refresh_translate_list()
+    check("a catalogue entry appears as available",
+          "en_pt" in win.trans_tree.get_children(),
+          str(win.trans_tree.get_children()))
+    row = win.trans_tree.item("en_pt", "values")
+    check("with its size and licence", row[1] == "63 MB" and row[3] == "CC-BY-4.0",
+          str(row))
+    check("and the language pickers offer it",
+          "pt" in win.trans_source_combo["values"],
+          str(win.trans_source_combo["values"]))
+
+    win.trans_tree.selection_remove(*win.trans_tree.get_children())
+    win._download_pair()
+    check("downloading nothing asks for a selection",
+          "Select" in win.trans_status.cget("text"), win.trans_status.cget("text"))
+
 
     print("\n[studio tab]")
     from voice2tts import studiopack
