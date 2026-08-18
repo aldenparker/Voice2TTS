@@ -37,10 +37,14 @@ from .vad import SAMPLE_RATE
 
 log = logging.getLogger(__name__)
 
-# How often to re-read the buffer. Below this the passes overlap and the cost
-# climbs for text that has not had time to settle; above it the lag is the
-# interval itself.
-DEFAULT_INTERVAL_S = 1.0
+# How often to re-read the buffer. A word needs two agreeing passes before it
+# can be spoken, so this interval is paid twice on every phrase -- it is the
+# single biggest lever on how far behind the speaker we run.
+#
+# Measured end to end: at 1.0 s the text was ready 0.9 s after the sentence
+# ended; at 0.5 s, 0.5 s after. The cost is 27% of one core rather than 13%,
+# and the adaptive stretch below protects any machine that cannot afford it.
+DEFAULT_INTERVAL_S = 0.5
 
 # The longest buffer ever kept, whatever the timings say. A hard ceiling on top
 # of the adaptive target below, so a machine that reads a wildly optimistic cost
@@ -256,12 +260,28 @@ class StreamingRecognizer:
     def finish(self) -> str:
         """Everything still held, for when the speaker stops.
 
-        The tail never gets a second agreeing pass -- there is no later pass to
-        agree with -- so at the end of an utterance it is released on the
-        strength of the last read. Holding it back would silently drop the end
-        of every sentence.
+        Reads the buffer one final time first. Using the last scheduled pass
+        instead loses whatever was said after it -- up to a full interval of
+        speech, which is how "Let me know whether..." came out as "know
+        whether...". This last read also has the whole utterance for context,
+        so it is the most accurate one of the lot.
+
+        The tail never gets a second agreeing pass, because there is no later
+        pass to agree with. At the end of speech that is fine: nothing more is
+        coming that could change it.
         """
         remaining = self._previous[self._spoken_words:]
+        if self._audio:
+            try:
+                text, _ = self.engine.transcribe_timed(
+                    np.concatenate(self._audio))
+                words = text.split()
+                # Only trust it if it still covers what has already gone out;
+                # a shorter read would mean re-speaking or skipping words.
+                if len(words) >= self._spoken_words:
+                    remaining = words[self._spoken_words:]
+            except Exception:
+                log.exception("final streaming pass failed; using the last one")
         text = " ".join(remaining).strip()
         self.reset()
         return text

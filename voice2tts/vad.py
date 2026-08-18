@@ -105,6 +105,16 @@ class VadSegmenter:
     def active(self) -> bool:
         return self._triggered
 
+    def captured(self) -> list[np.ndarray]:
+        """The windows held so far, including the pre-roll before the trigger.
+
+        Detection needs a moment of sustained speech before it fires, so by the
+        time `active` goes true the first syllables are already in here. A
+        caller that starts collecting only from the next window loses the start
+        of every utterance -- "I can reproduce it" arrives as "reproduce it".
+        """
+        return list(self._buf)
+
     def process(self, window: np.ndarray) -> np.ndarray | None:
         """Feed one window; returns a complete utterance when one ends."""
         prob = self.vad(window)

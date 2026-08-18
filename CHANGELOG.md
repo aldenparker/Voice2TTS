@@ -28,6 +28,11 @@ versioning follows [Semantic Versioning](https://semver.org/).
   keep up, the readings are spread further apart first, and past the point where
   that beats simply waiting, it switches to sentence mode and says so.
 
+  Streaming keeps listening while it speaks, so *Mute microphone while speaking*
+  does not apply to it — the interface says so when both are set. And because
+  speaking a sentence takes about as long as saying it did, it warns rather than
+  drifting silently further behind.
+
 - **Live translation.** Speak one language, have the far end hear another,
   entirely on this machine. Settings → **Translate** picks the pair, downloads
   the models and says up front why a combination will not work.

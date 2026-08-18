@@ -38,6 +38,10 @@ log = logging.getLogger(__name__)
 
 _STOP = object()  # queue sentinel
 
+# Phrases waiting to be spoken before streaming admits it is behind.
+# Two is normal jitter; three means the gap is not closing.
+_BACKLOG_WARN_DEPTH = 3
+
 # How long the pipeline may sit in a working state before it is treated as
 # stalled. Transcribing and speaking one utterance is seconds; a minute is not
 # slow, it is stuck.
@@ -108,6 +112,7 @@ class Pipeline:
         self._stream_windows: queue.Queue = queue.Queue(maxsize=400)
         self._stream_active = threading.Event()
         self._streaming_degraded = False
+        self._backlog_reported = False
         # Snapshotted at start(), never read live: the segmenter thread
         # decides per window whether to forward audio to the streaming
         # thread, and that thread only exists if it was spawned. Reading
@@ -216,6 +221,7 @@ class Pipeline:
 
             self._streaming_started = self.cfg.stt.mode == "streaming"
             self._streaming_degraded = False
+            self._backlog_reported = False
             self._running.set()
             self._spawn(self._notifier_loop, "notifier")
             self._spawn(self._segmenter_loop, "segmenter")
@@ -505,12 +511,35 @@ class Pipeline:
             return
         self._submit(audio)
 
-    def _submit(self, audio: np.ndarray) -> None:
+    def _submit(self, item) -> None:
         try:
-            self._utterances.put_nowait(audio)
+            self._utterances.put_nowait(item)
             self._set_state(State.THINKING)
         except queue.Full:
             self._emit("warning", "Busy -- utterance dropped")
+        self._check_backlog()
+
+    def _check_backlog(self) -> None:
+        """Notice when the voice cannot keep up with the speaker.
+
+        Speaking takes about as long as saying it did, so in streaming mode the
+        pipeline runs at roughly its own capacity: any delay it picks up it
+        keeps, and if the voice is slower than the speaker the gap grows without
+        limit. Nothing is dropped -- falling behind is the right trade -- but
+        silently drifting further behind looks like a fault, so it is said once
+        with the setting that actually fixes it.
+        """
+        if not self.streaming_mode or self._backlog_reported:
+            return
+        if self._utterances.qsize() < _BACKLOG_WARN_DEPTH:
+            return
+        self._backlog_reported = True
+        self._emit(
+            "warning",
+            f"Speech is running behind ({self._utterances.qsize()} phrases "
+            "waiting). The voice cannot speak faster than you are talking -- "
+            "raise the speed on the Voice tab, or pause a little more.",
+        )
 
     # -- threads --------------------------------------------------------------
 
@@ -579,19 +608,29 @@ class Pipeline:
 
             # Suppress VAD while speaking, or the synthesized voice leaking through
             # speakers gets transcribed and spoken again in a loop.
+            #
+            # NOT in streaming mode. There the app is speaking for much of the
+            # time someone is talking, and both ways of suppressing are worse
+            # than the feedback they prevent -- measured, not assumed:
+            #
+            #   Ending the stream flushed whatever the last pass happened to
+            #   say, text no second pass had agreed with, which is how "The
+            #   build finished" was spoken as "It still finished".
+            #
+            #   Merely skipping the windows leaves a splice in the buffer, and
+            #   Whisper reads straight across it: "the audio device enumeration
+            #   is p-unplugged the interface".
+            #
+            # So streaming keeps listening, and the interface says plainly that
+            # it needs headphones or a virtual-cable-only output. See
+            # _refresh_stt_mode.
             if (
                 self.cfg.audio.mute_mic_during_playback
+                and not self.streaming_mode
                 and self.sink is not None
                 and self.sink.active
             ):
-                if self.streaming_mode:
-                    # The streaming thread owns the buffer here, so ask it to
-                    # release what it has rather than reaching into the
-                    # segmenter's -- which in this mode is not the real one.
-                    self.segmenter.suspend()
-                    if self._stream_active.is_set():
-                        self._stream_windows.put(_STOP)
-                elif self.segmenter.active:
+                if self.segmenter.active:
                     # Keep what was captured before playback began; only stop
                     # listening. reset() here used to bin it.
                     pending = self.segmenter.suspend()
@@ -634,12 +673,26 @@ class Pipeline:
                 # the segmenter builds is deliberately NOT submitted -- doing
                 # both would say every word twice.
                 if self.segmenter.active:
-                    self._stream_active.set()
-                    try:
-                        self._stream_windows.put_nowait(window)
-                    except queue.Full:
-                        log.debug("streaming queue full; dropping a window")
+                    if not self._stream_active.is_set():
+                        self._stream_active.set()
+                        # Hand over the onset too, or every utterance loses its
+                        # first word or so to the detection delay.
+                        for held in self.segmenter.captured():
+                            try:
+                                self._stream_windows.put_nowait(held)
+                            except queue.Full:
+                                break
+                    else:
+                        try:
+                            self._stream_windows.put_nowait(window)
+                        except queue.Full:
+                            log.debug("streaming queue full; dropping a window")
                 elif self._stream_active.is_set():
+                    # Cleared HERE, by the thread that sends it. Leaving that to
+                    # the streaming thread meant this branch fired again on
+                    # every 32 ms window until it caught up -- thirteen
+                    # teardowns for five utterances.
+                    self._stream_active.clear()
                     self._stream_windows.put(_STOP)
                 continue
 
@@ -676,7 +729,6 @@ class Pipeline:
                 tail = self.streamer.finish()
                 if tail:
                     self._submit(tail)
-                self._stream_active.clear()
                 continue
 
             if window is not None:

@@ -2215,6 +2215,105 @@ def test_streaming() -> None:
           and rec.finish() == "")
 
 
+def test_streaming_faults() -> None:
+    """The four faults found by running streaming with a working output.
+
+    Every one of them was invisible until the output was enabled: with outputs
+    off, sink.active is never true and the suppression branch never runs. That
+    is why they shipped, and why these tests exist.
+    """
+    print("\n[streaming: the faults]")
+    import inspect
+
+    from voice2tts import pipeline as pipeline_mod
+    from voice2tts.config import VadConfig
+    from voice2tts.streaming import StreamingRecognizer
+    from voice2tts.vad import WINDOW, VadSegmenter
+
+    audio = load_sample_16k()
+    if audio is None:
+        check("speech sample available", False, "could not load or generate")
+        return
+
+    # 1. The onset. Detection needs sustained speech before it fires, so by the
+    #    time `active` goes true the first syllables are already buffered.
+    #    Collecting only from the next window loses the start of every
+    #    utterance: "I can reproduce it" arrived as "reproduce it".
+    seg = VadSegmenter(VadConfig(), preroll_ms=300, max_utterance_s=30)
+    index, became_active_at = 0, None
+    while index + WINDOW <= len(audio) and became_active_at is None:
+        seg.process(audio[index:index + WINDOW])
+        if seg.active:
+            became_active_at = index
+        index += WINDOW
+    check("detection fires only after speech is underway",
+          became_active_at is not None and became_active_at > 0,
+          str(became_active_at))
+    held = seg.captured()
+    check("and what it already captured is available",
+          len(held) > 1, f"{len(held)} windows")
+    check("covering the onset it would otherwise lose",
+          len(held) * WINDOW >= became_active_at * 0.5,
+          f"{len(held) * WINDOW} samples for an onset at {became_active_at}")
+
+    # 2. Suppression must not touch the stream. Both ways of doing it were
+    #    measured to be worse than the feedback they prevent: ending the stream
+    #    flushed text no second pass had agreed with ("The build finished" was
+    #    spoken as "It still finished"), and skipping windows spliced the
+    #    buffer ("the audio device enumeration is p-unplugged the interface").
+    source = inspect.getsource(pipeline_mod.Pipeline._segmenter_loop)
+    suppression = source[source.index("mute_mic_during_playback"):]
+    suppression = suppression[:suppression.index("# An exception here")]
+    check("streaming is exempt from mic suppression",
+          "not self.streaming_mode" in source[:source.index("mute_mic_during_playback") + 400],
+          "otherwise the buffer is spliced or the stream is torn down")
+    check("and suppression no longer ends the stream",
+          "_STOP" not in suppression,
+          "ending it flushes text nothing has agreed with")
+
+    # 3. The stop signal is cleared by the thread that sends it. Leaving that to
+    #    the streaming thread meant the branch fired again every 32 ms until it
+    #    caught up: thirteen teardowns for five utterances.
+    loop = inspect.getsource(pipeline_mod.Pipeline._segmenter_loop)
+    at = loop.index("elif self._stream_active.is_set():")
+    branch = loop[at:loop.index("continue", at)]
+    check("the sender clears the stop flag",
+          "_stream_active.clear()" in branch
+          and branch.index("_stream_active.clear()") < branch.index("put(_STOP)"),
+          "or one pause produces a burst of teardowns")
+
+    # 4. Finishing re-reads the buffer. Using the last scheduled pass loses
+    #    whatever was said after it -- up to a whole interval, which turned
+    #    "Let me know whether..." into "know whether...".
+    class LateEngine:
+        """Says more each time, like a recogniser hearing more audio."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def transcribe_timed(self, audio):
+            self.calls += 1
+            words = ["one", "two", "three", "four", "five", "six"]
+            return " ".join(words[:min(len(words), 2 + self.calls)]), []
+
+    engine = LateEngine()
+    rec = StreamingRecognizer(engine)
+    second = np.zeros(16000, dtype=np.float32)
+    for _ in range(2):
+        rec.feed(second)
+        rec._last_pass = 0.0
+        rec.poll()
+    before = engine.calls
+    tail = rec.finish()
+    check("finishing reads the buffer once more", engine.calls == before + 1,
+          f"{engine.calls} calls, was {before}")
+    # The last scheduled pass saw four words; the final read sees five. That
+    # fifth word is the one that used to be dropped.
+    check("so the last words said are not lost", "five" in tail, tail)
+    check("and the words already spoken are not repeated",
+          tail.split().count("one") <= 1, tail)
+
+
 def test_net() -> None:
     """Downloading: resume, checksums, and refusing to keep a bad file.
 
@@ -4111,6 +4210,7 @@ def main() -> int:
     test_history_and_review()
     test_vad()
     test_streaming()
+    test_streaming_faults()
     test_net()
     test_translate()
     test_model_catalogue()

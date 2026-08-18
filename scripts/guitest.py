@@ -473,6 +473,20 @@ def main() -> int:
           "measured -- the obvious assumption is wrong, so it is said out loud")
     check("and that it needs automatic detection",
           "automatic detection" in streaming_note, streaming_note)
+
+    # Streaming cannot honour mic muting -- pausing the recording mangles the
+    # words -- so anyone relying on that setting has to be told, not surprised.
+    win.mute_var.set(True)
+    win._refresh_stt_mode()
+    check("it warns that mic muting does not apply",
+          "hear itself" in win.stt_mode_note.cget("text"),
+          win.stt_mode_note.cget("text"))
+    win.mute_var.set(False)
+    win._refresh_stt_mode()
+    check("and does not nag when nothing is muted",
+          "hear itself" not in win.stt_mode_note.cget("text"),
+          win.stt_mode_note.cget("text"))
+    win.mute_var.set(True)
     check("the two notes differ", sentence_note != streaming_note)
 
     win._collect()

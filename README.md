@@ -104,7 +104,7 @@ not a fast setting and a slow one, so pick by what you are doing:
 | | Wait for a sentence | Speak while talking |
 |---|---|---|
 | Speaks | the whole utterance, after you pause | each phrase as it settles |
-| Delay | however long you keep talking | typically ~2 s behind you |
+| Delay | however long you keep talking | ~0.5 s to have the words, plus however long the voice takes to say them |
 | Intonation | natural — a whole sentence at once | flatter, a phrase at a time |
 | Cost while speaking | nothing | ~half a processor core |
 | Works with push-to-talk | yes | no — it needs automatic detection |
@@ -123,7 +123,15 @@ four seconds of *"the tests are still failing"* it produced an obscenity, then
 corrected itself a second later once more context arrived. That word was never
 spoken, because the two readings never agreed on it.
 
-Two things worth knowing before you choose it:
+Three things worth knowing before you choose it:
+
+- **It keeps listening while it speaks**, so *Mute microphone while speaking*
+  does not apply. It cannot: pausing the recording either cuts a sentence in
+  half or ends the phrase early, and both mangle the words. Use headphones, or
+  send only to the virtual cable, or it will hear itself.
+- **It cannot speak faster than you talk.** Saying a sentence takes about as
+  long as saying it did, so any delay it picks up it keeps. If it drifts
+  further behind it says so and suggests raising the speech speed.
 
 - **A GPU does not make it cheaper.** Measured at 0.51× realtime on CUDA against
   0.49× on CPU. Decoding a long transcript is a chain of small dependent steps,

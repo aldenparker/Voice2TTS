@@ -1915,6 +1915,15 @@ class SettingsWindow(tk.Toplevel):
                     "and delivers speech a phrase at a time rather than a "
                     "sentence at a time. Needs automatic detection; with "
                     "push-to-talk it behaves as below.")
+            # It has to keep listening while it speaks: pausing the microphone
+            # either cuts the recording mid-sentence or ends the phrase early,
+            # and both were measured to mangle the words. So say what that
+            # means rather than letting someone find out during a call.
+            if self.mute_var.get():
+                text += ("\nIt keeps listening while it speaks, so “Mute "
+                         "microphone while speaking” does not apply here "
+                         "— use headphones, or the virtual cable alone, "
+                         "or it will hear itself.")
         else:
             text = ("Waits for a pause, then speaks the whole utterance. Best "
                     "wording and natural intonation, and it costs nothing "
