@@ -112,6 +112,10 @@ jobs:
           print(f"{len(manifest['pairs'])} pair(s), {total / 1e6:.0f} MB")
           EOF
 
+      # Assets first, verdict second. A pair that upstream does not publish
+      # (en-ja is not a repository, though ja-en is) must not throw away the
+      # fifteen that converted -- which is exactly what happened on the first
+      # real run.
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -137,6 +141,25 @@ jobs:
             gh release create "$TAG" dist/mt/*.zip dist/mt/*.zip.sha256               --title "Translation models" --notes-file notes.md
           fi
           gh release upload "$TAG" dist/mt/manifest.json --clobber
+
+      # After the assets are safely uploaded.
+      - name: Report any pair that could not be converted
+        if: always()
+        run: |
+          if [ -f dist/mt/FAILURES ]; then
+            {
+              echo "### Pairs that could not be converted"
+              sed 's/^/- /' dist/mt/FAILURES
+              echo ""
+              echo "Usually a model upstream does not publish under the name"
+              echo "the template expects. Add it to REPO_OVERRIDES in"
+              echo "scripts/convert_mt.py."
+            } >> $GITHUB_STEP_SUMMARY
+            echo "FAILED:"
+            cat dist/mt/FAILURES
+            exit 1
+          fi
+          echo "every pair converted"
 
       - name: Summary
         run: |

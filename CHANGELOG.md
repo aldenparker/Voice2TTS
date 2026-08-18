@@ -83,6 +83,13 @@ versioning follows [Semantic Versioning](https://semver.org/).
   voice now follows what will actually be spoken.
 - **Translation being unavailable was a quiet warning**; it is an error now,
   because the far end hears a language nobody asked for.
+- **One unpublishable pair threw away the other fifteen.** `opus-mt-en-ja` does
+  not exist upstream — the naming is not symmetric, `ja-en` is published and
+  `en-ja` is not — and the converter exited non-zero, so the publish step never
+  ran and an hour of conversion produced nothing. English to Japanese now comes
+  from `opus-tatoeba-en-ja`, and a partial run publishes what worked before
+  reporting the failure. A test checks every advertised pair exists upstream,
+  which takes seconds instead of an hour.
 - **The models release can be published by pushing a `models-*` tag**, not only
   from the Actions tab. The first build shipped a download button with nothing
   behind it because the workflow had simply never been run.

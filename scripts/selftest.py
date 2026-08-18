@@ -3638,6 +3638,45 @@ def test_network() -> None:
 
     from voice2tts import cable, voices
 
+    # Every pair we advertise must actually exist upstream. The naming is not
+    # symmetric -- ja-en is published, en-ja is not -- and finding that out
+    # during the conversion run cost an hour and produced nothing, because one
+    # missing repository failed the job before anything was uploaded.
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from convert_mt import PAIRS, repo_for
+
+    def head(repo):
+        request = urllib.request.Request(
+            f"https://huggingface.co/api/models/{repo}",
+            headers={"User-Agent": "Voice2TTS"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.status
+
+    missing = []
+    unreachable = None
+    for source, target in PAIRS:
+        repo = repo_for(source, target)
+        try:
+            _status, unreachable = _reach(f"the {repo} model card",
+                                          lambda r=repo: head(r))
+        except urllib.error.HTTPError as exc:
+            # Anonymous requests get 401 for a model that does not exist, not
+            # 404 -- the API cannot say whether it is missing or private
+            # without knowing who is asking. Either way we cannot convert it.
+            if exc.code in (401, 403, 404):
+                missing.append(f"{source}-{target} ({repo})")
+                continue
+            raise
+        if unreachable:
+            break
+    if unreachable:
+        print(f"  SKIP  every advertised pair exists ({unreachable})")
+    else:
+        check("every advertised translation pair exists upstream",
+              not missing,
+              "not published: " + ", ".join(missing) if missing
+              else f"{len(PAIRS)} pairs")
+
     try:
         resolved, unreachable = _reach("the VB-Audio download page",
                                        cable.resolve_download_url)

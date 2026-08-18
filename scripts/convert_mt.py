@@ -50,6 +50,20 @@ DEFAULT_OUT = ROOT / "dist" / "mt"
 REPO_TEMPLATE = "Helsinki-NLP/opus-mt-{source}-{target}"
 MODEL_CARD_URL = "https://huggingface.co/{repo}"
 
+# The naming is NOT symmetric, which cost a whole publishing run: ja-en exists,
+# en-ja does not, and one missing pair took the other fifteen down with it.
+# Anything that does not follow the template goes here.
+REPO_OVERRIDES = {
+    # Published under the Tatoeba-challenge name instead. (There is also an
+    # `opus-mt-en-jap`, on an obsolete language code and a smaller corpus.)
+    ("en", "ja"): "Helsinki-NLP/opus-tatoeba-en-ja",
+}
+
+
+def repo_for(source: str, target: str) -> str:
+    return REPO_OVERRIDES.get((source, target),
+                              REPO_TEMPLATE.format(source=source, target=target))
+
 # The pairs a release ships. English both ways first -- pivoting through
 # English is how everything else is reached, so these carry the most weight.
 PAIRS = [
@@ -94,7 +108,7 @@ WHAT WAS CHANGED
 def convert(source: str, target: str, out_dir: Path,
             quantization: str = "int8") -> Path:
     """Convert one pair. Returns the directory produced."""
-    repo = REPO_TEMPLATE.format(source=source, target=target)
+    repo = repo_for(source, target)
     destination = out_dir / f"{source}_{target}"
     staging = out_dir / f".{source}_{target}.partial"
 
@@ -257,11 +271,18 @@ def main() -> int:
     if not args.no_zip:
         write_manifest(out_dir)
 
-    print(f"\n{len(wanted) - len(failures)}/{len(wanted)} converted"
+    converted = len(wanted) - len(failures)
+    print(f"\n{converted}/{len(wanted)} converted"
           + (f", {total / 1e6:.0f} MB of archives" if total else ""))
     if failures:
         print(f"failed: {', '.join(failures)}")
-    return 1 if failures else 0
+        # Recorded for the workflow, which publishes what worked and only then
+        # marks the run failed. Exiting non-zero here skipped publishing
+        # altogether, so fifteen good models were thrown away over one bad one.
+        (out_dir / "FAILURES").write_text("\n".join(failures) + "\n",
+                                          encoding="utf-8")
+    # Only a total failure is fatal here.
+    return 0 if converted else 1
 
 
 if __name__ == "__main__":
