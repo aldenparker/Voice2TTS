@@ -1564,29 +1564,44 @@ class SettingsWindow(tk.Toplevel):
             row=5, column=2, sticky="w"
         )
 
+        self.beta_var = tk.BooleanVar()
+        ttk.Checkbutton(
+            tab,
+            text="Include beta versions",
+            variable=self.beta_var,
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Label(
+            tab,
+            text="Betas arrive earlier and break more. You can go back by "
+                 "installing the latest normal release over the top — turning "
+                 "this off does not undo one.",
+            foreground="#666", justify="left", wraplength=560,
+        ).grid(row=7, column=0, columnspan=3, sticky="w")
+
         ttk.Label(
             tab,
             text="Checking contacts api.github.com. Nothing else is sent.",
             foreground="#666",
-        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         ttk.Separator(tab, orient="horizontal").grid(
-            row=7, column=0, columnspan=3, sticky="ew", pady=12
+            row=9, column=0, columnspan=3, sticky="ew", pady=12
         )
 
         row = ttk.Frame(tab)
-        row.grid(row=8, column=0, columnspan=3, sticky="w")
+        row.grid(row=10, column=0, columnspan=3, sticky="w")
         self.update_btn = ttk.Button(row, text="Check now", command=self._check_updates)
         self.update_btn.pack(side="left")
         self.update_status = ttk.Label(row, text="", foreground="#666")
         self.update_status.pack(side="left", padx=10)
 
         self.update_notes = tk.Text(tab, height=8, wrap="word")
-        self.update_notes.grid(row=9, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
+        self.update_notes.grid(row=11, column=0, columnspan=3, sticky="nsew",
+                               pady=(10, 0))
         self.update_notes.configure(state="disabled")
 
         tab.columnconfigure(1, weight=1)
-        tab.rowconfigure(9, weight=1)
+        tab.rowconfigure(11, weight=1)
 
     def _reset_repo(self) -> None:
         self.repo_var.set(DEFAULT_UPDATE_REPO)
@@ -1606,7 +1621,9 @@ class SettingsWindow(tk.Toplevel):
 
         def work() -> None:
             try:
-                release = updater.check(self.cfg.updates.repo)
+                release = updater.check(
+                    self.cfg.updates.repo,
+                    include_prereleases=self.cfg.updates.include_prereleases)
             except Exception as exc:  # noqa: BLE001
                 failure = str(exc)  # `exc` is deleted when this block ends
                 self.after(0, lambda: self._check_done(None, failure))
@@ -1847,6 +1864,7 @@ class SettingsWindow(tk.Toplevel):
         self.repo_var.set(c.updates.repo)
         self.check_start_var.set(c.updates.check_on_start)
         self.interval_var.set(c.updates.interval_hours)
+        self.beta_var.set(c.updates.include_prereleases)
 
         # Both halves of the pairing are loaded now, so the warning can be evaluated.
         self._check_language()
@@ -1895,6 +1913,7 @@ class SettingsWindow(tk.Toplevel):
         c.updates.repo = self.repo_var.get().strip()
         c.updates.check_on_start = self.check_start_var.get()
         c.updates.interval_hours = int(self.interval_var.get())
+        c.updates.include_prereleases = bool(self.beta_var.get())
         c.validate()
         self.repo_var.set(c.updates.repo)  # reflect any normalisation back to the UI
         return True

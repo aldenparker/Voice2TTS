@@ -578,6 +578,22 @@ def main() -> int:
     check("collect stores interval", cfg.updates.interval_hours == 12)
     check("collect stores check-on-start", cfg.updates.check_on_start is False)
 
+    # Opting in to betas is a real preference, not a session toggle: it has to
+    # survive a save, or the app quietly drops back to stable next launch.
+    check("beta opt-in starts off", win.beta_var.get() is False,
+          "a beta is chosen, never drifted into")
+    win.beta_var.set(True)
+    win._collect()
+    check("collect stores the beta opt-in", cfg.updates.include_prereleases is True)
+    win.beta_var.set(False)
+    win._collect()
+    check("and clears it again", cfg.updates.include_prereleases is False)
+    cfg.updates.include_prereleases = True
+    win._load_from_config()
+    check("the checkbox reflects a saved opt-in", win.beta_var.get() is True)
+    cfg.updates.include_prereleases = False
+    win._load_from_config()
+
     fake = updater.Release(
         version="9.9.9", tag="v9.9.9", notes="Test notes.",
         asset_name="Voice2TTS-Setup-9.9.9.exe",

@@ -292,7 +292,8 @@ class TrayApp:
         if not updater.should_check(cfg.last_check, cfg.interval_hours):
             return
         try:
-            release = updater.check(cfg.repo)
+            release = updater.check(cfg.repo,
+                                    include_prereleases=cfg.include_prereleases)
         except Exception as exc:  # noqa: BLE001 - a failed check is not worth a dialog
             log.info("update check failed: %s", exc)
             return
@@ -338,7 +339,9 @@ class TrayApp:
 
         def work() -> None:
             try:
-                release = updater.check(self.cfg.updates.repo)
+                release = updater.check(
+                    self.cfg.updates.repo,
+                    include_prereleases=self.cfg.updates.include_prereleases)
             except Exception as exc:  # noqa: BLE001
                 self._post(messagebox.showerror, "Update check failed", str(exc))
                 return

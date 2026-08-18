@@ -245,9 +245,15 @@ pre-releases, so people on the stable build are never offered one. When `v0.6.0`
 proper is tagged, beta testers are offered it as an upgrade — pre-releases sort
 below the release they lead to.
 
-There is no in-app update from one beta to the next; install those by hand.
 Release notes come from the `[X.Y.Z]` CHANGELOG section if there is one, falling
 back to `[Unreleased]`.
+
+To receive betas in the app, tick **Include beta versions** under Settings →
+Updates. It is off by default, and the two channels read different endpoints:
+off asks for `/releases/latest`, which excludes pre-releases outright; on asks
+for the full listing and picks the newest installable release from it. Turning
+it off later does not roll anything back — install the latest normal release
+over the top to return to stable.
 
 ## Everyday use
 

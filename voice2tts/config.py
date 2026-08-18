@@ -175,6 +175,11 @@ class UpdateConfig:
     last_check: float = 0.0         # epoch seconds; 0 means never
     skipped_version: str = ""       # "remind me never about this one"
 
+    # Opt in to pre-releases. Off by default and deliberately not remembered
+    # across a reinstall of the stable build: a beta is something you choose,
+    # not something you drift into. See updater.check().
+    include_prereleases: bool = False
+
 
 @dataclass
 class Config:

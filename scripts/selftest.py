@@ -2228,6 +2228,62 @@ def test_updates() -> None:
     except Exception as exc:  # noqa: BLE001
         check("refuses to self-install from source", False, str(exc))
 
+    # -- the beta channel ----------------------------------------------------
+    # Selection from a full listing, which is only consulted when someone opts
+    # in. Offline: these are the shapes the GitHub API returns.
+    def entry(tag, *, draft=False, asset=True, prerelease=False):
+        payload = {"tag_name": tag, "draft": draft, "prerelease": prerelease,
+                   "body": "notes", "html_url": f"https://example.invalid/{tag}",
+                   "assets": []}
+        if asset:
+            payload["assets"] = [
+                {"name": f"Voice2TTS-Setup-{tag.lstrip('v')}.exe", "size": 123,
+                 "browser_download_url": f"https://example.invalid/{tag}.exe"},
+                {"name": f"Voice2TTS-Setup-{tag.lstrip('v')}.exe.sha256",
+                 "browser_download_url": f"https://example.invalid/{tag}.sha256"},
+            ]
+        return payload
+
+    listing = [entry("v0.6.0-beta-1", prerelease=True),
+               entry("v0.5.2"),
+               entry("v0.6.0-beta-2", prerelease=True)]
+    picked = updater.pick_newest(listing)
+    check("the newest beta is picked from a listing",
+          picked and picked["tag_name"] == "v0.6.0-beta-2",
+          str(picked and picked["tag_name"]))
+
+    # GitHub orders by creation date. A patch to an older series published after
+    # a newer release would come back first and must not win.
+    out_of_order = [entry("v0.5.3"), entry("v0.9.0"), entry("v0.5.4")]
+    check("selection goes by version, not by the order GitHub returns",
+          updater.pick_newest(out_of_order)["tag_name"] == "v0.9.0",
+          updater.pick_newest(out_of_order)["tag_name"])
+
+    check("drafts are never offered",
+          updater.pick_newest([entry("v9.9.9", draft=True), entry("v0.5.2")]
+                              )["tag_name"] == "v0.5.2")
+    # A release with no installer cannot be installed, so falling back to one
+    # that can beats failing the whole check.
+    check("a release with no installer is skipped, not fatal",
+          updater.pick_newest([entry("v9.9.9", asset=False), entry("v0.5.2")]
+                              )["tag_name"] == "v0.5.2")
+    check("an empty listing yields nothing", updater.pick_newest([]) is None)
+    check("a listing of only drafts yields nothing",
+          updater.pick_newest([entry("v9.9.9", draft=True)]) is None)
+
+    # The two channels must read different endpoints; that difference is the
+    # whole mechanism keeping betas away from people who did not ask.
+    check("the stable channel asks for the latest release only",
+          updater.API_TEMPLATE.endswith("/releases/latest"),
+          updater.API_TEMPLATE)
+    check("the beta channel asks for the full listing",
+          "/releases?" in updater.RELEASES_TEMPLATE
+          and "latest" not in updater.RELEASES_TEMPLATE,
+          updater.RELEASES_TEMPLATE)
+
+    check("opting in is off by default", Config().updates.include_prereleases is False,
+          "a beta is something you choose, not something you drift into")
+
     # The repository must be prefilled, or every user has to find and type it.
     import voice2tts as pkg
     from voice2tts.config import CURRENT_SCHEMA

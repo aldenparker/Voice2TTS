@@ -24,8 +24,8 @@ from everyone on the stable build.
 |---|---|
 | Pipeline | mic → Silero VAD → Whisper → Piper → N outputs |
 | Latency | ~300 ms utterance to first audio (RTX 5080, `small.en`) |
-| Tests | 463 self-test + 147 GUI, ruff clean, CI and the release gate run both |
-| Release gate | `release.yml` verifies (tag/version, lint, self-test) before it builds; asserted by a test |
+| Tests | 496 self-test + 158 GUI, ruff clean, CI and the release gate run both |
+| Release gate | `release.yml` verifies (tag shape, version, lint, both suites) before it builds; its PowerShell is executed by a test |
 | Licence | GPL-3.0-or-later (Piper links eSpeak NG) |
 | Distribution | Inno Setup, per-user, unsigned; winget manifests staged |
 
@@ -266,6 +266,177 @@ sidecar alongside.
 | 2.5 GB pack scares people off | On demand only; the app is fully usable without it |
 | Trained voices sound poor | Audition at checkpoints so quality is visible early |
 | Torch pulls CUDA that conflicts with the GPU pack | Verify during Phase 1; `cuda.py` already preloads by absolute path |
+
+---
+
+## 0.7.0 — Live translation
+
+**Goal.** Speak English, have the other side hear German. A translation stage
+between recognition and speech, running entirely on this machine.
+
+**Not in scope.** Translating what *they* say back to you — that needs their
+audio, which means loopback capture and a second pipeline. Worth doing later,
+but it is a different feature wearing the same word.
+
+### Where it goes
+
+The pipeline is `capture → VAD → Whisper → substitutions → Piper → outputs`.
+Translation slots between recognition and synthesis, but the substitution stage
+has to split around it:
+
+- **Before** — fixes for what the recogniser mishears (names, jargon). These
+  correct the *source* text and must happen before it is translated, or the
+  translator faithfully carries the error across.
+- **After** — fixes for what the voice says badly. These are properties of the
+  *target* language and voice, and applying the English list to German output
+  would be nonsense.
+
+That split is the first real work, and it is worth doing even if translation
+slipped: the current single stage is already doing two jobs.
+
+### Engine — OPUS-MT on CTranslate2
+
+Recommended, and the reason is dependencies: **CTranslate2 is already here**,
+because faster-whisper runs on it. Helsinki-NLP's OPUS-MT models convert to its
+format, are roughly 75 MB per language pair, and are permissively licensed. A
+translation feature that adds no new runtime dependency, and 75 MB per language
+someone actually wants, is a very different proposition from one that adds a
+framework.
+
+Alternatives considered:
+
+| Option | Why not |
+|---|---|
+| Whisper's own `task="translate"` | Free, but translates **to English only**. Covers "I speak X, they hear English" and nothing else. Worth wiring up anyway — it is one parameter. |
+| NLLB-200 (distilled 600M) | 200 languages in one model, but **CC-BY-NC**. A non-commercial model inside a GPL application is a licence story we should not want. |
+| argos-translate | Wraps the same OPUS-MT/CTranslate2 stack, and adds a dependency to do it. |
+| A cloud API | Contradicts the entire premise. Nothing in this app leaves the machine. |
+
+Pairs OPUS-MT does not publish directly pivot through English, at the cost of a
+second hop and its compounding errors.
+
+### Prerequisites
+
+- [ ] **Multilingual recognition**, currently in the backlog, becomes a hard
+      dependency. The bundled `base.en` cannot hear anything but English, so
+      translating *from* another language is impossible until the recognition
+      model and a real language setting land.
+- [ ] **The voice must match the target language.** Piper voices are
+      language-specific, and speaking German text with an English voice produces
+      confident gibberish. The existing language guard already knows how to
+      detect this mismatch; here it has to *drive* the voice choice rather than
+      warn about it.
+
+### Work
+
+- [ ] **Spike first.** Convert one OPUS-MT pair, measure latency for a typical
+      sentence on CPU, and listen to the result. The budget is the thing to
+      establish: the pipeline is ~300 ms from utterance to first audio today,
+      and translation has to fit inside a total that still feels live. If a
+      small model costs 150 ms this is easy; if it costs 800 ms the feature
+      needs sentence-level pipelining first.
+- [ ] Split the substitution stage into source-side and target-side lists
+- [ ] `translate.py` — model download, cache, and a `translate(text, src, dst)`
+      that is a pure function over a loaded model
+- [ ] Language pair picker, with the download surfaced like the voice library's
+- [ ] Pivot through English where a direct pair does not exist, and say so
+- [ ] Wire `task="translate"` as the zero-download path to English
+- [ ] Review-before-speaking becomes far more valuable here and should probably
+      default to on when translating: an ASR error feeds a translator that will
+      produce something fluent and wrong
+- [ ] Show both texts in the transcript, source above target
+
+### Risks
+
+| Risk | Mitigation |
+|---|---|
+| Latency makes it unusable in a live call | Measure in the spike, before building anything on top |
+| An ASR error becomes a fluent mistranslation | Review-before-speaking on by default; show both texts |
+| Pivoting compounds errors | Prefer direct pairs; mark pivoted ones in the UI |
+| Model licences | OPUS-MT is permissive; NLLB is not. Check per pair and record it, as base-voice licences already are |
+
+---
+
+## 0.8.0 — Linux
+
+**Goal.** Run properly on Linux. Not a port that technically starts, but the
+same application: tray, hotkeys, virtual microphone, Studio.
+
+**Only Linux.** macOS is not planned. It would need its own virtual audio
+device (nothing like a null sink ships with the OS), its own signing and
+notarisation, and Apple hardware to test on.
+
+### The platform layer
+
+OS-specific code currently sits wherever it was first needed, across fourteen
+modules: `winreg` in three, `ctypes.WinDLL` in seven, `creationflags` in four,
+WASAPI assumptions in four, `.exe` paths in six. `platform_win.py` already
+exists for DPI, the single-instance guard and run-at-login — the right idea,
+applied to a fraction of the surface.
+
+So: a `voice2tts/platform/` package.
+
+    platform/
+      __init__.py     picks the implementation once, at import, and re-exports
+      base.py         the interface every OS must satisfy
+      windows.py      what platform_win.py is now, plus what is scattered today
+      linux.py        the new one
+
+`__init__.py` chooses by `sys.platform` and exposes plain functions, so callers
+never branch on the OS themselves. The rule that keeps this honest: **no
+`sys.platform` test outside `platform/`**, enforced by a test that greps for it.
+Without that, the layer grows holes the first time something is urgent.
+
+### What actually differs
+
+| Concern | Windows | Linux |
+|---|---|---|
+| Virtual microphone | VB-CABLE, downloaded and installed | PipeWire/PulseAudio `module-null-sink`, created at runtime — **no install, no third-party driver**, which makes first run *simpler* than on Windows |
+| Autostart | Registry `Run` key | XDG autostart `.desktop` |
+| Host API | WASAPI, filtered to avoid duplicates | ALSA vs Pulse vs PipeWire through PortAudio; same duplicate problem, different names |
+| Global hotkeys | `pynput` low-level hook | X11 fine; **Wayland is the hard problem** — see risks |
+| Tray icon | `pystray` win32 | StatusNotifierItem; GNOME needs an extension |
+| CUDA libraries | `ctypes.WinDLL` by absolute path | `ctypes.CDLL` and `LD_LIBRARY_PATH`; the nvidia wheels ship `.so` |
+| Studio pack | Embeddable Python zip | `venv` from the system interpreter — embeddable Python is Windows-only |
+| Subprocesses | `CREATE_NO_WINDOW`, `CREATE_NEW_PROCESS_GROUP` | `start_new_session=True`; no console to hide |
+| Graceful stop | `CTRL_BREAK_EVENT` | `SIGINT`, which is what the trainer already expects |
+| Paths | `%APPDATA%`, `%LOCALAPPDATA%` | `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` — `paths.py` already centralises this, so it is one module |
+| Updates | Downloads and runs the installer | **Disabled.** Updates come from the package manager; running an installer over a distro package would be wrong |
+| DPI / scaling | Per-monitor v2 via ctypes | Tk reads `Xft.dpi`; usually nothing to do |
+
+### Packaging
+
+- [ ] **Debian / Ubuntu** — `.deb`, depending on `python3`, `libportaudio2`, and
+      `pipewire` or `pulseaudio`
+- [ ] **Fedora** — `.rpm`, same shape
+- [ ] **NixOS** — a flake exposing a package and a Home Manager module. The most
+      work and the most reproducible; also the one that will find every
+      undeclared dependency, because nothing is ambient
+- [ ] CI builds all three plus the Windows installer from one tag
+- [ ] Both suites run on Linux in CI. `bare_machine.py` matters more here, since
+      a container has no audio at all
+
+### Work
+
+- [ ] Build `platform/`, move the Windows code into it **unchanged**, and add
+      the test forbidding `sys.platform` elsewhere. No Linux code in this step:
+      proving Windows still passes on a pure move is what makes the rest safe.
+- [ ] `linux.py` — null sink, XDG autostart, host API choice, `.so` CUDA
+      loading, venv-based studio pack
+- [ ] Replace the VB-CABLE wizard step with null-sink creation on Linux
+- [ ] Turn the in-app updater into a "your package manager handles this" notice
+- [ ] Package for all three targets
+- [ ] Test on X11 and Wayland, GNOME and KDE
+
+### Risks
+
+| Risk | Mitigation |
+|---|---|
+| **Wayland blocks global hotkeys** — the big one. Compositors do not let an ordinary process grab keys | Three options, in order: the `xdg-desktop-portal` GlobalShortcuts interface where the compositor implements it; reading `/dev/input` via evdev, which needs group membership and is intrusive; or accepting that push-to-talk is X11-only and VAD is the Wayland path. Decide from a spike, and say plainly in the docs which desktops get which. |
+| Tray icon absent on GNOME | StatusNotifierItem needs an extension there. Ship a normal window as the fallback so the app is never invisible |
+| PipeWire vs PulseAudio vs bare ALSA | Target PipeWire, now the default nearly everywhere, and fall back to Pulse. Bare ALSA gets no virtual microphone |
+| The refactor breaks Windows | Move code without changing it, in its own commit, with both suites green before any Linux code exists |
+| Three package formats is a lot of surface | The flake is the strictest; get it right first and the others follow |
 
 ---
 

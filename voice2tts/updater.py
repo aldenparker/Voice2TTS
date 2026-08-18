@@ -37,6 +37,10 @@ log = logging.getLogger(__name__)
 
 USER_AGENT = f"Voice2TTS/{__version__}"
 API_TEMPLATE = "https://api.github.com/repos/{repo}/releases/latest"
+# The full list, newest-created first. Only consulted when someone has opted in
+# to betas: /releases/latest deliberately skips pre-releases, which is what keeps
+# them away from everyone who has not asked for them.
+RELEASES_TEMPLATE = "https://api.github.com/repos/{repo}/releases?per_page=30"
 RELEASES_PAGE = "https://github.com/{repo}/releases/latest"
 
 MAX_INSTALLER_BYTES = 3_000_000_000
@@ -106,25 +110,15 @@ def current_version() -> str:
 # -- discovery --------------------------------------------------------------
 
 
-def check(repo: str, timeout: float = 15.0) -> Release | None:
-    """Ask GitHub for the latest release. Returns None if it is not newer.
-
-    Raises on network or API failure so callers can distinguish "up to date" from
-    "could not tell".
-    """
-    if not _REPO_RE.match(repo or ""):
-        raise ValueError(
-            f"update repo must look like 'owner/name', got {repo!r}. "
-            "Set it in Settings -> Updates."
-        )
-
+def _fetch(url: str, repo: str, timeout: float):
+    """GET a GitHub API endpoint, turning its failures into readable ones."""
     req = urllib.request.Request(
-        API_TEMPLATE.format(repo=repo),
+        url,
         headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             # GitHub returns 404 rather than 403 for a private repo when the caller
@@ -144,36 +138,107 @@ def check(repo: str, timeout: float = 15.0) -> Release | None:
             ) from exc
         raise
 
-    tag = str(data.get("tag_name") or "")
-    version = tag.lstrip("vV") or "0"
-    if not is_newer(version):
-        log.info("up to date (latest %s, running %s)", version or "?", __version__)
-        return None
 
-    assets = data.get("assets") or []
+def _installer_asset(entry: dict) -> tuple[dict | None, dict | None]:
+    """The Setup .exe and its .sha256 from a release payload."""
+    assets = entry.get("assets") or []
     installer = next(
         (a for a in assets
          if a.get("name", "").lower().endswith(".exe")
          and "setup" in a.get("name", "").lower()),
         None,
     )
-    if installer is None:
-        raise RuntimeError(f"Release {tag} has no *Setup*.exe asset attached")
-
     checksum = next(
         (a for a in assets if a.get("name", "").lower().endswith(".sha256")), None
     )
+    return installer, checksum
 
+
+def _tag_version(entry: dict) -> str:
+    return str(entry.get("tag_name") or "").lstrip("vV")
+
+
+def pick_newest(entries: list[dict]) -> dict | None:
+    """The newest usable release in a listing, by version rather than by date.
+
+    Three things are filtered out, each for its own reason:
+
+      * drafts, which are not published and whose assets may not exist;
+      * releases with no installer attached, which cannot be installed even
+        though they are newer -- skipping lets the update fall back to the last
+        release that CAN be installed, rather than failing outright;
+      * anything not actually newer, handled by the caller.
+
+    Ordered by parse_version rather than trusting the API's order: GitHub sorts
+    by creation date, which stops matching version order the moment a patch to
+    an older series is published after a newer one.
+    """
+    best: dict | None = None
+    for entry in entries or []:
+        if entry.get("draft"):
+            continue
+        version = _tag_version(entry)
+        if not version:
+            continue
+        if _installer_asset(entry)[0] is None:
+            log.debug("skipping %s: no installer asset", version)
+            continue
+        if best is None or parse_version(version) > parse_version(_tag_version(best)):
+            best = entry
+    return best
+
+
+def _to_release(entry: dict, repo: str) -> Release:
+    tag = str(entry.get("tag_name") or "")
+    installer, checksum = _installer_asset(entry)
+    if installer is None:
+        raise RuntimeError(f"Release {tag} has no *Setup*.exe asset attached")
     return Release(
-        version=version,
+        version=_tag_version(entry) or "0",
         tag=tag,
-        notes=str(data.get("body") or "").strip(),
+        notes=str(entry.get("body") or "").strip(),
         asset_name=installer["name"],
         asset_url=installer["browser_download_url"],
         asset_size=int(installer.get("size") or 0),
         sha256_url=checksum["browser_download_url"] if checksum else None,
-        page_url=data.get("html_url") or RELEASES_PAGE.format(repo=repo),
+        page_url=entry.get("html_url") or RELEASES_PAGE.format(repo=repo),
     )
+
+
+def check(repo: str, timeout: float = 15.0,
+          include_prereleases: bool = False) -> Release | None:
+    """Ask GitHub for the newest release. Returns None if it is not newer.
+
+    With `include_prereleases`, betas are considered too. That needs the full
+    listing rather than /releases/latest, which excludes them by design -- and
+    that exclusion is precisely what keeps betas away from everyone who has not
+    opted in, so the two paths are deliberately separate.
+
+    Raises on network or API failure so callers can distinguish "up to date" from
+    "could not tell".
+    """
+    if not _REPO_RE.match(repo or ""):
+        raise ValueError(
+            f"update repo must look like 'owner/name', got {repo!r}. "
+            "Set it in Settings -> Updates."
+        )
+
+    if include_prereleases:
+        listing = _fetch(RELEASES_TEMPLATE.format(repo=repo), repo, timeout)
+        if not isinstance(listing, list):
+            raise RuntimeError(f"Unexpected release listing for {repo}")
+        entry = pick_newest(listing)
+        if entry is None:
+            log.info("no installable release found for %s", repo)
+            return None
+    else:
+        entry = _fetch(API_TEMPLATE.format(repo=repo), repo, timeout)
+
+    version = _tag_version(entry) or "0"
+    if not is_newer(version):
+        log.info("up to date (newest %s, running %s)", version or "?", __version__)
+        return None
+    return _to_release(entry, repo)
 
 
 def should_check(last_check_epoch: float, interval_hours: int) -> bool:
