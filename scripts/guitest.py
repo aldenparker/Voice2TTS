@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from voice2tts import devices as devices_mod  # noqa: E402
+from voice2tts import gpupack as gpupack_mod  # noqa: E402
 from voice2tts import translate  # noqa: E402
 from voice2tts import updater as updater_mod  # noqa: E402
 from voice2tts.config import OutputTarget, load_config  # noqa: E402
@@ -160,8 +161,21 @@ def main() -> int:
     print("\n[voice library tab]")
     rows = win.lib_tree.get_children()
     check("library lists installed voices", len(rows) >= 3, f"{len(rows)} rows")
-    check("bundled voices marked as such",
-          all(win.lib_tree.set(r, "state") in ("bundled", "installed") for r in rows))
+    check("every voice reports a state",
+          all(win.lib_tree.set(r, "state")
+              in ("bundled", "installed", "needs add-on") for r in rows),
+          str({win.lib_tree.set(r, "state") for r in rows}))
+    # A voice this build cannot pronounce is marked before anyone downloads
+    # 60 MB and discovers it in the middle of a call.
+    from voice2tts import voices as voices_mod
+    unspeakable = [r for r in rows if voices_mod.missing_phonemizer(r)]
+    if unspeakable:
+        check("a voice needing an add-on says so",
+              all(win.lib_tree.set(r, "state") == "needs add-on"
+                  for r in unspeakable),
+              str([(r, win.lib_tree.set(r, "state")) for r in unspeakable]))
+    else:
+        print("  SKIP  add-on marking (every installed voice is speakable)")
 
     # Pick a BUNDLED row explicitly rather than assuming row 0 is one -- a
     # user-downloaded voice can sort ahead of the bundled ones, and selecting a
@@ -1164,10 +1178,52 @@ def main() -> int:
     check("and explains why instead", len(shown) == 1,
           shown[0][0] if shown else "no dialog")
 
-    print("\n[gpu section]")
-    check("gpu label populated", bool(win.gpu_label.cget("text")),
-          win.gpu_label.cget("text")[:48])
-    check("gpu button labelled", bool(win.gpu_btn.cget("text")), win.gpu_btn.cget("text"))
+    print("\n[add-ons tab]")
+    # Every optional download in one place. Before this the GPU pack was
+    # explained on Recognition, the Studio one inside Studio, and the Japanese
+    # one did not exist -- so there was nowhere to look.
+    keys = set(win._addon_rows)
+    check("every optional download is listed",
+          keys == {"gpu", "japanese", "studio"}, str(sorted(keys)))
+    for key, row in win._addon_rows.items():
+        check(f"{key} says whether it is installed",
+              bool(row["state"].cget("text")), row["state"].cget("text"))
+        check(f"{key} offers an action",
+              row["button"].cget("text") in ("Download", "Remove"),
+              row["button"].cget("text"))
+    sizes = [r["spec"]["size"] for r in win._addon_rows.values()]
+    check("and what each one costs", all(sizes), str(sizes))
+
+    # An add-on that cannot work here is disabled with the reason, not hidden:
+    # hiding it just makes people wonder where it went.
+    gpu_row = win._addon_rows["gpu"]
+    if not gpupack_mod.gpu_present():
+        check("an unavailable add-on is disabled, with a reason",
+              str(gpu_row["button"].cget("state")) == "disabled"
+              and bool(gpu_row["note"].cget("text")),
+              gpu_row["note"].cget("text"))
+    else:
+        check("an available add-on can be acted on",
+              str(gpu_row["button"].cget("state")) != "disabled")
+
+    # The Recognition section points here rather than carrying its own copy.
+    check("recognition points at the add-ons tab for the GPU pack",
+          "Add-ons" in win.gpu_label.cget("text")
+          or "installed" in win.gpu_label.cget("text").lower(),
+          win.gpu_label.cget("text"))
+
+    print("\n[tab structure]")
+    top = [win.nb.tab(i, "text") for i in range(win.nb.index("end"))]
+    check("the top level is one tab per thing you might be doing",
+          top == ["Normal", "Translate", "Studio", "Add-ons", "Misc"], str(top))
+    nested = [win.misc_nb.tab(i, "text") for i in range(win.misc_nb.index("end"))]
+    check("and the details are nested under Misc",
+          {"Audio", "Trigger", "Words", "History", "Updates"} <= set(nested),
+          str(nested))
+    check("voice and recognition live together under Normal",
+          str(win.voice_combo.winfo_toplevel()) == str(win)
+          and win.voice_combo.winfo_exists(),
+          "both are needed for ordinary speech")
 
     print("\n[language warning]")
     win.model_var.set("small.en")

@@ -85,11 +85,20 @@ def missing_phonemizer(voice_key: str) -> str:
     if needed is None:
         return ""
     module, language = needed
+
+    # Put the optional pack on the import path first. Doing this only at
+    # application startup meant every other entry point -- the tests, a tool,
+    # anything importing this module directly -- reported an installed pack as
+    # missing, which is a difference nobody should have to know about.
+    from . import jppack
+
+    jppack.activate()
+
     if importlib.util.find_spec(module) is not None:
         return ""
     return (f"{voice_key} is a {language} voice, and speaking {language} needs "
-            f"the {module} phonemizer, which this build does not include. "
-            "Choose a different voice.")
+            f"the {module} phonemizer, which is not installed. Get it from "
+            "Settings -> Add-ons, or choose a different voice.")
 
 
 def is_speakable(voice_key: str) -> bool:

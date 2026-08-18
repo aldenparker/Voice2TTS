@@ -99,23 +99,36 @@ class SettingsWindow(tk.Toplevel):
 
     def _build(self) -> None:
         nb = ttk.Notebook(self)
+        self.nb = nb
         # NOT packed yet. Pack gives space in packing order, so a notebook
         # packed first with expand=True claims the whole window and squeezes
         # out whatever comes after it -- which is how Save/Apply/Close ended up
         # off the bottom edge until the window was dragged bigger. The bar is
         # packed first, against the bottom; the notebook then takes what is
         # left, however little that is.
-        self._build_audio(nb)
-        self._build_trigger(nb)
-        self._build_voice(nb)
-        self._build_voice_library(nb)
-        self._build_words(nb)
+        # Top level is one tab per thing you might be doing, plus the optional
+        # downloads. Everything else is a detail of one of those, and lives
+        # nested under Misc -- the way Studio has always nested its own panels.
+        # Before this, making translation work meant Translate for the pair,
+        # Voice for the voice, Recognition for the model and Add-ons for the
+        # download, with nothing saying so.
+        self._build_normal(nb)
         self._build_translate(nb)
-        self._build_history(nb)
         self._build_studio(nb)
-        self._build_recognition(nb)
-        self._build_updates(nb)
-        self._build_status(nb)
+        self._build_addons(nb)
+
+        misc_outer = ttk.Frame(nb)
+        nb.add(misc_outer, text="Misc")
+        misc = ttk.Notebook(misc_outer)
+        misc.pack(fill="both", expand=True, padx=6, pady=6)
+        self.misc_nb = misc
+        self._build_audio(misc)
+        self._build_trigger(misc)
+        self._build_voice_library(misc)
+        self._build_words(misc)
+        self._build_history(misc)
+        self._build_updates(misc)
+        self._build_status(misc)
 
         bar = ttk.Frame(self)
         bar.pack(side="bottom", fill="x", padx=8, pady=8)
@@ -651,9 +664,16 @@ class SettingsWindow(tk.Toplevel):
 
     # -- voice tab ------------------------------------------------------------
 
-    def _build_voice(self, nb: ttk.Notebook) -> None:
+    def _build_normal(self, nb: ttk.Notebook) -> None:
+        """Everything ordinary speech needs, in the order it matters."""
         tab = ttk.Frame(nb, padding=10)
-        nb.add(tab, text="Voice")
+        nb.add(tab, text="Normal")
+        self._build_voice(tab)
+        self._build_recognition(tab)
+
+    def _build_voice(self, parent: ttk.Frame) -> None:
+        tab = ttk.LabelFrame(parent, text="Voice", padding=10)
+        tab.pack(fill="x", pady=(0, 10))
 
         ttk.Label(tab, text="Piper voice").grid(row=0, column=0, sticky="w")
         self.voice_var = tk.StringVar()
@@ -766,6 +786,8 @@ class SettingsWindow(tk.Toplevel):
             # The speaker count is only known from the catalogue, so it stays
             # blank until that is loaded. One value per column, or every field
             # after the gap shows the wrong thing.
+            if state != "bundled" and voices.missing_phonemizer(key):
+                state = "needs add-on"
             self.lib_tree.insert("", "end", iid=key,
                                  values=(key, "-", "-", "-", "", state))
         self.lib_status.config(text="Load the catalogue to browse more voices.")
@@ -1144,6 +1166,10 @@ class SettingsWindow(tk.Toplevel):
                          "-- pick a multilingual model on the Recognition tab")
         # A voice that speaks a different language than the text produces
         # confident gibberish, which is worse than an error.
+        unspeakable = voices.missing_phonemizer(self.voice_var.get().strip())
+        if unspeakable:
+            notes.append(unspeakable)
+
         spoken_by_voice = self._voice_language()
         if spoken_by_voice and spoken_by_voice != target:
             fix = self._matching_voice(target)
@@ -1327,6 +1353,218 @@ class SettingsWindow(tk.Toplevel):
         else:
             self.trans_status.config(text="It was not installed.")
         self._refresh_translate_list()
+
+    # -- add-ons tab ----------------------------------------------------------
+
+    def _addon_specs(self) -> list[dict]:
+        """Every optional download, described in one place.
+
+        A table rather than three hand-written panels: they differ only in what
+        they cost and what they unlock, and writing that three times is how the
+        GPU pack ended up explained on the Recognition tab while the Studio one
+        was explained inside Studio and neither mentioned the other.
+        """
+        from . import jppack
+
+        def gpu_available() -> tuple[bool, str]:
+            if gpupack.gpu_present():
+                return True, ""
+            return False, "No NVIDIA graphics card was found."
+
+        def studio_available() -> tuple[bool, str]:
+            verdict = studiopack.gate(self.cfg.studio.ignore_hardware_check)
+            return verdict.ok, "" if verdict.ok else verdict.summary
+
+        return [
+            {
+                "key": "gpu",
+                "title": "GPU acceleration",
+                "blurb": ("Runs recognition on an NVIDIA card instead of the "
+                          "processor, and upgrades the recognition model to "
+                          "small.en."),
+                "size": "about 1.9 GB",
+                "status": lambda: (
+                    gpupack.status().usable,
+                    f"{gpupack.status().dll_count} libraries, "
+                    f"{gpupack.status().size_mb:.0f} MB"),
+                "available": gpu_available,
+                "install": lambda report: gpupack.install(progress=report),
+                "uninstall": gpupack.uninstall,
+                "removed": self._after_gpu_removed,
+            },
+            {
+                "key": "japanese",
+                "title": "Japanese voices",
+                "blurb": ("Japanese voices are built on a different phonemizer, "
+                          "which Piper does not carry. Without it a Japanese "
+                          "voice cannot speak at all."),
+                "size": f"about {jppack.APPROX_DOWNLOAD_MB} MB "
+                        f"({jppack.APPROX_INSTALLED_MB} MB on disk)",
+                "status": lambda: (jppack.status().usable,
+                                   f"{jppack.status().size_mb:.0f} MB"),
+                "available": lambda: (True, ""),
+                "install": lambda report: jppack.install(progress=report),
+                "uninstall": jppack.uninstall,
+                "removed": None,
+            },
+            {
+                "key": "studio",
+                "title": "Voice Studio training",
+                "blurb": ("Python, PyTorch and the Piper training code, needed "
+                          "to train a voice of your own. Designing a voice from "
+                          "existing ones does not need it."),
+                "size": f"about {studiopack.APPROX_DOWNLOAD_GB:.0f} GB",
+                "status": lambda: (studiopack.status().usable,
+                                   f"{studiopack.status().size_gb:.1f} GB"),
+                "available": studio_available,
+                "install": lambda report: studiopack.install(progress=report),
+                "uninstall": studiopack.uninstall,
+                "removed": None,
+            },
+        ]
+
+    def _build_addons(self, nb: ttk.Notebook) -> None:
+        tab = ttk.Frame(nb, padding=10)
+        nb.add(tab, text="Add-ons")
+        self.addons_tab = tab
+
+        ttk.Label(
+            tab,
+            text="Optional downloads. Nothing here is needed for ordinary use, "
+                 "and nothing is fetched\nuntil you ask for it.",
+            foreground=self.palette.muted, justify="left",
+        ).pack(anchor="w", pady=(0, 10))
+
+        self._addon_rows: dict[str, dict] = {}
+        for spec in self._addon_specs():
+            self._build_addon_row(tab, spec)
+
+        self._refresh_addons()
+
+    def _build_addon_row(self, parent: ttk.Frame, spec: dict) -> None:
+        frame = ttk.LabelFrame(parent, text=spec["title"], padding=10)
+        frame.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(frame, text=spec["blurb"], foreground=self.palette.muted,
+                  justify="left", wraplength=620).grid(
+            row=0, column=0, columnspan=2, sticky="w")
+
+        state = ttk.Label(frame, text="", justify="left")
+        state.grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+        actions = ttk.Frame(frame)
+        actions.grid(row=1, column=1, sticky="e", pady=(6, 0))
+        button = ttk.Button(actions, text="Download",
+                            command=lambda key=spec["key"]: self._toggle_addon(key))
+        button.pack(side="left")
+        progress = ttk.Progressbar(actions, mode="indeterminate", length=140)
+
+        note = ttk.Label(frame, text="", foreground=self.palette.muted,
+                         justify="left", wraplength=620)
+        note.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        frame.columnconfigure(0, weight=1)
+        self._addon_rows[spec["key"]] = {
+            "spec": spec, "state": state, "button": button,
+            "progress": progress, "note": note, "busy": False,
+        }
+
+    def _refresh_addons(self) -> None:
+        """Say what each add-on costs, and whether it is here."""
+        if not hasattr(self, "_addon_rows"):
+            return
+        for row in self._addon_rows.values():
+            if row["busy"]:
+                continue
+            spec = row["spec"]
+            try:
+                installed, detail = spec["status"]()
+            except Exception as exc:  # noqa: BLE001 - a probe must not break the tab
+                log.debug("could not read %s status: %s", spec["key"], exc)
+                installed, detail = False, ""
+            allowed, why_not = spec["available"]()
+
+            if installed:
+                row["state"].config(text=f"Installed — {detail}")
+                row["button"].config(text="Remove", state="normal")
+                row["note"].config(text="")
+            elif not allowed:
+                row["state"].config(text="Not available on this machine")
+                row["button"].config(text="Download", state="disabled")
+                row["note"].config(text=why_not)
+            else:
+                row["state"].config(text=f"Not installed — {spec['size']}")
+                row["button"].config(text="Download", state="normal")
+                row["note"].config(text="")
+
+    def _toggle_addon(self, key: str) -> None:
+        row = self._addon_rows[key]
+        spec = row["spec"]
+        installed, _ = spec["status"]()
+
+        if installed:
+            if not messagebox.askyesno(
+                f"Remove {spec['title']}",
+                f"Delete the downloaded files for {spec['title']}?",
+                parent=self,
+            ):
+                return
+            spec["uninstall"]()
+            if spec["removed"]:
+                spec["removed"]()
+            self._refresh_addons()
+            self._refresh_addon_dependents()
+            return
+
+        row["busy"] = True
+        row["button"].config(state="disabled")
+        row["progress"].pack(side="left", padx=8)
+        row["progress"].start(12)
+
+        def report(message: str) -> None:
+            self.after(0, lambda: row["note"].config(text=message))
+
+        def work() -> None:
+            try:
+                spec["install"](report)
+            except Exception as exc:  # noqa: BLE001
+                failure = str(exc)  # `exc` is deleted when this block ends
+                self.after(0, lambda: self._addon_done(key, failure))
+                return
+            self.after(0, lambda: self._addon_done(key, None))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _addon_done(self, key: str, error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        row = self._addon_rows[key]
+        row["busy"] = False
+        row["progress"].stop()
+        row["progress"].pack_forget()
+        row["button"].config(state="normal")
+        if error:
+            row["note"].config(text=f"Failed: {error}")
+        self._refresh_addons()
+        self._refresh_addon_dependents()
+
+    def _refresh_addon_dependents(self) -> None:
+        """Anything whose advice depends on what is now installed.
+
+        Installing the Japanese pack makes voices speakable that were not a
+        moment ago, so every place that says so has to be asked again.
+        """
+        self._check_language()
+        if hasattr(self, "trans_enabled"):
+            self._refresh_translate_route()
+        if hasattr(self, "studio_setup_note"):
+            self._refresh_studio()
+
+    def _after_gpu_removed(self) -> None:
+        """The GPU model is gone with the pack, so stop asking for it."""
+        self.cfg.stt.model = "base.en"
+        if hasattr(self, "model_var"):
+            self.model_var.set("base.en")
 
     # -- words tab ------------------------------------------------------------
 
@@ -1902,9 +2140,9 @@ class SettingsWindow(tk.Toplevel):
 
     # -- recognition tab ------------------------------------------------------
 
-    def _build_recognition(self, nb: ttk.Notebook) -> None:
-        tab = ttk.Frame(nb, padding=10)
-        nb.add(tab, text="Recognition")
+    def _build_recognition(self, parent: ttk.Frame) -> None:
+        tab = ttk.LabelFrame(parent, text="Recognition", padding=10)
+        tab.pack(fill="both", expand=True)
 
         ttk.Label(tab, text="When to speak", font=("", 9, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w")
@@ -1968,18 +2206,11 @@ class SettingsWindow(tk.Toplevel):
         ttk.Separator(tab, orient="horizontal").grid(
             row=11, column=0, columnspan=2, sticky="ew", pady=12
         )
-        ttk.Label(tab, text="GPU acceleration", font=("", 9, "bold")).grid(
-            row=12, column=0, columnspan=2, sticky="w"
-        )
-        self.gpu_label = ttk.Label(tab, text="", justify="left", foreground="#444")
-        self.gpu_label.grid(row=13, column=0, columnspan=2, sticky="w", pady=(2, 6))
-        gpu_row = ttk.Frame(tab)
-        gpu_row.grid(row=14, column=0, columnspan=2, sticky="w")
-        self.gpu_btn = ttk.Button(gpu_row, text="", command=self._toggle_gpu_pack)
-        self.gpu_btn.pack(side="left")
-        self.gpu_progress = ttk.Progressbar(gpu_row, mode="indeterminate", length=200)
-        self.gpu_note = ttk.Label(tab, text="", foreground="#666")
-        self.gpu_note.grid(row=15, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        # The pack itself lives on the Add-ons tab, with everything else that is
+        # downloaded on demand. This says whether it is here and where to get it.
+        self.gpu_label = ttk.Label(tab, text="", justify="left",
+                                   foreground=self.palette.muted, wraplength=560)
+        self.gpu_label.grid(row=12, column=0, columnspan=2, sticky="w")
 
         tab.columnconfigure(1, weight=1)
         self._refresh_stt_mode()
@@ -2017,70 +2248,21 @@ class SettingsWindow(tk.Toplevel):
         self.stt_mode_note.config(text=text)
 
     def _refresh_gpu(self) -> None:
+        """Say where recognition runs, and point at Add-ons if it could be faster."""
         pack = gpupack.status()
         if pack.usable:
             self.gpu_label.config(
-                text=f"Installed — {pack.dll_count} libraries, {pack.size_mb:.0f} MB."
-            )
-            self.gpu_btn.config(text="Remove GPU pack")
+                text=f"GPU acceleration is installed ({pack.size_mb:.0f} MB). "
+                     "Manage it on the Add-ons tab.")
         elif gpupack.gpu_present():
             self.gpu_label.config(
-                text="An NVIDIA GPU was found but the CUDA libraries are not installed.\n"
-                     "Downloading them makes transcription roughly 20x faster (~1.3 GB)."
-            )
-            self.gpu_btn.config(text="Download GPU acceleration")
+                text="An NVIDIA card was found, but the CUDA libraries are not "
+                     "installed, so recognition is running on the processor. "
+                     "The Add-ons tab can download them.")
         else:
             self.gpu_label.config(
-                text="No NVIDIA GPU detected. Transcription runs on the CPU."
-            )
-            self.gpu_btn.config(text="Download anyway", state="disabled")
-
-    def _toggle_gpu_pack(self) -> None:
-        if gpupack.status().usable:
-            if not messagebox.askyesno(
-                "Remove GPU pack",
-                "Delete the downloaded CUDA libraries? Transcription falls back to CPU.",
-                parent=self,
-            ):
-                return
-            gpupack.uninstall()
-            self.cfg.stt.model = "base.en"
-            self.model_var.set("base.en")
-            self._refresh_gpu()
-            return
-
-        self.gpu_btn.config(state="disabled")
-        self.gpu_progress.pack(side="left", padx=8)
-        self.gpu_progress.start(12)
-
-        def report(msg: str) -> None:
-            self.after(0, lambda: self.gpu_note.config(text=msg))
-
-        def work() -> None:
-            try:
-                gpupack.install(progress=report)
-            except Exception as exc:  # noqa: BLE001
-                failure = str(exc)  # `exc` is deleted when this block ends
-                self.after(0, lambda: self._gpu_done(failure))
-                return
-            self.after(0, lambda: self._gpu_done(None))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _gpu_done(self, error: str | None) -> None:
-        self.gpu_progress.stop()
-        self.gpu_progress.pack_forget()
-        self.gpu_btn.config(state="normal")
-        if error:
-            self.gpu_note.config(text="")
-            messagebox.showerror("Download failed", error, parent=self)
-            return
-        self.cfg.stt.model = gpupack.GPU_WHISPER_MODEL
-        self.model_var.set(gpupack.GPU_WHISPER_MODEL)
-        self.gpu_note.config(text="Ready. Restart the pipeline to use it.")
-        self._refresh_gpu()
-
-    # -- updates tab ----------------------------------------------------------
+                text="No NVIDIA card detected; recognition runs on the "
+                     "processor.")
 
     def _build_updates(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=10)
