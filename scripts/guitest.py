@@ -26,6 +26,7 @@ from voice2tts.gui import SettingsWindow  # noqa: E402
 from voice2tts.icon import make_icon  # noqa: E402
 from voice2tts.logging_setup import setup_logging  # noqa: E402
 from voice2tts.modes import (  # noqa: E402
+    AddonState,
     RecognitionMode,
     TranslationMode,
     TriggerMode,
@@ -1320,10 +1321,55 @@ def main() -> int:
         check(f"{key} says whether it is installed",
               bool(row["state"].cget("text")), row["state"].cget("text"))
         check(f"{key} offers an action",
-              row["button"].cget("text") in ("Download", "Remove"),
+              row["button"].cget("text") in ("Download", "Remove", "Repair"),
               row["button"].cget("text"))
     sizes = [r["spec"]["size"] for r in win._addon_rows.values()]
     check("and what each one costs", all(sizes), str(sizes))
+
+    # THE reported fault: a pack that is unpacked but will not load. It was one
+    # boolean, so it had to be reported as either installed or not -- and as
+    # "not installed" the row offered a Download button and no way to remove it,
+    # on a pack that was already there. Downloading it again was the one action
+    # that could not help, and it is what the user did, three times.
+    class Broken:
+        installed, size_mb, problem = True, 340.0, "No module named 'pydantic'"
+        usable = False
+
+    class Fine:
+        installed, size_mb, problem = True, 340.0, ""
+        usable = True
+
+    class Absent:
+        installed, size_mb, problem = False, 0.0, "missing"
+        usable = False
+
+    describe = lambda s: f"{s.size_mb:.0f} MB"   # noqa: E731
+    broken_state, broken_text = win._pack_line(Broken(), describe)
+    check("a pack that will not load is its own state",
+          broken_state is AddonState.BROKEN, str(broken_state))
+    check("and the row says why, not just that it is there",
+          "pydantic" in broken_text, broken_text)
+    check("a working pack is ready",
+          win._pack_line(Fine(), describe)[0] is AddonState.READY)
+    check("and one that was never downloaded is missing",
+          win._pack_line(Absent(), describe)[0] is AddonState.MISSING)
+
+    jp_row = win._addon_rows["japanese"]
+    real_status = jp_row["spec"]["status"]
+    jp_row["spec"]["status"] = lambda: (AddonState.BROKEN, "340 MB -- not working")
+    try:
+        win._refresh_addons()
+        check("a broken pack offers Repair rather than Download",
+              jp_row["button"].cget("text") == "Repair",
+              jp_row["button"].cget("text"))
+        check("and is not described as missing",
+              "Not installed" not in jp_row["state"].cget("text"),
+              jp_row["state"].cget("text"))
+        check("with the button enabled, so it can be acted on",
+              str(jp_row["button"].cget("state")) != "disabled")
+    finally:
+        jp_row["spec"]["status"] = real_status
+        win._refresh_addons()
 
     # An add-on that cannot work here is disabled with the reason, not hidden:
     # hiding it just makes people wonder where it went.

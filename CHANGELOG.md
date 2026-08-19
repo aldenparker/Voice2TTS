@@ -200,13 +200,35 @@ release named the reason exactly (`installed but will not load: No module named
   to be importable" differs between a venv and an installer -- which is the
   whole shape of this bug.
 
+- **Asking what is installed no longer locks it.** `status()` imported the
+  phonemizer to prove it worked, and importing loads compiled extensions that
+  Windows then refuses to let anything overwrite or delete. So opening the
+  settings window locked the pack: every repair failed on its first package --
+  before reaching the missing one -- and every removal left a half-deleted
+  directory and reported failure. A query that changes what the app is allowed
+  to do next is not a query; the proof happens at install, and when a voice
+  actually needs it.
+
+- **Installing builds elsewhere and swaps.** Windows allows a loaded file to be
+  renamed even though it cannot be overwritten or deleted, so the pack is
+  unpacked beside the old one and moved into place. Repair and removal both work
+  while the phonemizer is in use; the app says to restart when the copy already
+  in memory is the old one.
+
+- **A pack that is here but broken is its own state.** It was a boolean, so it
+  had to be reported as installed or not, and "not installed" offered a Download
+  button and no Remove -- on a pack that was already downloaded. There are three
+  states now, and a broken one offers **Repair**.
+
 - **`scripts/isolated_pack.py`** installs the pack into a temporary directory
   and imports it under `python -S` with only the pack and a staged copy of the
   application's numpy reachable. That is the frozen build's condition, and it is
   the only thing that catches this class of failure. Its first version pointed
   at numpy's parent directory -- which is site-packages -- and so put the entire
   venv back and reported a deliberately broken pack as fine; staging a copy is
-  what makes it real.
+  what makes it real. It then repeats the whole thing with the pack deliberately
+  broken and the phonemizer loaded, which is the state every retry in the field
+  failed from.
 
 ### Fixed — things that failed without saying so
 

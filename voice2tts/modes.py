@@ -118,6 +118,20 @@ class WhisperTask(StrEnum):
     TRANSLATE = "translate"
 
 
+class AddonState(Mode):
+    """What an optional download is, from the settings window's side.
+
+    Three states, not two. It was a boolean, and a pack that was unpacked but
+    would not load had to be one or the other: reported as MISSING it offered a
+    Download button on something already downloaded, which was the one action
+    that could not help; reported as present it offered only Remove.
+    """
+
+    MISSING = "missing"
+    READY = "ready"
+    BROKEN = "broken"   # here, but known not to work
+
+
 class Theme(Mode):
     """Widget appearance. `native` leaves Windows' own widgets untouched."""
 

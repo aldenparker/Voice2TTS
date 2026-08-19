@@ -62,6 +62,27 @@ def forget() -> None:
     _IMPORTED.clear()
 
 
+def import_answer(module: str) -> tuple[bool, str | None]:
+    """(has this been checked, what it said). Never imports anything.
+
+    `status()` calls this rather than import_problem(). Importing a package to
+    answer a passive question LOADS its compiled extensions, and Windows will
+    not let anything overwrite or delete a loaded one -- so simply opening the
+    settings window made the pack impossible to repair or remove for the rest of
+    the session. A query that changes what the app is allowed to do next is not
+    a query.
+    """
+    key = f"import:{module}"
+    if key not in _ANSWERS:
+        return False, None
+    return True, _ANSWERS[key]
+
+
+def is_loaded(module: str) -> bool:
+    """Whether this module is in memory, and so cannot be replaced in place."""
+    return module in sys.modules
+
+
 def import_problem(module: str) -> str | None:
     """None if the module imports, MISSING if absent, else why it failed.
 

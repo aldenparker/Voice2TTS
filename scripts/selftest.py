@@ -2295,7 +2295,47 @@ def test_japanese_pack() -> None:
             except RuntimeError as exc:
                 check("a wheel cannot write outside the pack", "unsafe" in str(exc))
 
-            check("uninstalling removes it", jppack.uninstall())
+            # An install builds somewhere else and swaps, so a failure part-way
+            # cannot leave a pack that is neither the old one nor the new one.
+            source = inspect.getsource(jppack.install)
+            check("the install stages and swaps rather than writing in place",
+                  ".installing" in source and "_aside(final)" in source,
+                  "extracting over a loaded .pyd is what made repair impossible")
+
+            # -- a query must not change what the app can do next ---------
+            # status() used to IMPORT the phonemizer to prove it worked. On
+            # Windows that loads its compiled extensions, and nothing can then
+            # overwrite or delete them -- so opening the settings window locked
+            # the pack, and a broken one could not be repaired or removed until
+            # the app was restarted. Every retry failed on the first package.
+            sys.modules.pop("pyopenjtalk", None)
+            jppack.status()
+            check("asking what is installed does not import it",
+                  "pyopenjtalk" not in sys.modules,
+                  "a query that loads a DLL is not a query")
+
+            # -- removal moves aside rather than deleting in place ----------
+            # Windows will not DELETE a loaded .pyd but will let the directory
+            # holding it be RENAMED, and that difference is the only reason a
+            # pack in use can be removed at all. rmtree(ignore_errors=True) left
+            # a half-deleted pack behind and reported failure, so the settings
+            # window then offered to download one that was already there.
+            aside = jppack._aside(root)
+            check("a pack can be moved out of the way", aside is not None,
+                  "renaming is what works when deleting does not")
+            check("which frees the name immediately", not root.exists())
+            check("and leaves it somewhere sweepable",
+                  aside is not None and ".removing-" in aside.name,
+                  str(aside))
+            jppack.sweep()
+            check("sweeping clears what was set aside",
+                  aside is not None and not aside.exists(), str(aside))
+
+            root.mkdir(parents=True, exist_ok=True)
+            (root / jppack.PROBE_MODULE).mkdir()
+            jppack.activate()
+            check("uninstalling reports success and means it",
+                  jppack.uninstall() and not root.exists())
             check("and takes it off the path", str(root) not in sys.path)
         finally:
             jppack.japanese_dir = real_dir

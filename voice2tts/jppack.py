@@ -99,31 +99,43 @@ APPROX_INSTALLED_MB = 340
 class PackStatus:
     installed: bool
     size_mb: float
-    # Empty when the phonemizer loads. A pack can unpack perfectly and still be
-    # unusable -- a wheel built for the wrong Python ABI is the case that
-    # actually happened -- and `installed` cannot tell the difference.
+    # Empty when nothing is known to be wrong. A pack can unpack perfectly and
+    # still be unusable -- a wheel built for the wrong Python ABI, or a missing
+    # dependency -- and `installed` cannot tell the difference. Filled in from
+    # what the import check found the last time anything actually needed the
+    # phonemizer; see status().
     problem: str = ""
 
     @property
     def usable(self) -> bool:
         return self.installed and not self.problem
 
+    @property
+    def broken(self) -> bool:
+        """Here, but known not to work. Offer to remove it, not to fetch it."""
+        return self.installed and bool(self.problem)
+
 
 def status() -> PackStatus:
-    """What is on disk, and whether it works.
+    """What is on disk, and what we already know about whether it works.
 
-    `usable` requires the phonemizer to IMPORT, not merely to be unpacked. The
-    directory check alone reported a broken pack as installed, and the failure
-    surfaced one utterance at a time as "Failed to process utterance".
+    Deliberately does NOT import the phonemizer to find out. It used to, and
+    importing loads compiled extensions that Windows then refuses to let anyone
+    overwrite or delete -- so opening the settings window locked the pack, and
+    a broken one could not be repaired or removed without restarting the app.
+
+    The proof still happens where it matters and where the cost is expected: at
+    the end of install(), and when a voice that needs it is loaded. Whatever
+    those found is remembered, and reported here.
     """
+    sweep()
     root = japanese_dir()
     if not (root / PROBE_MODULE).is_dir():
         return PackStatus(False, 0.0, probe.MISSING)
     total = sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
-    activate()
-    trouble = probe.import_problem(PROBE_MODULE)
+    _, trouble = probe.import_answer(PROBE_MODULE)
     return PackStatus(installed=True, size_mb=round(total / 1e6, 1),
-                      problem="" if trouble is None else trouble)
+                      problem=trouble or "")
 
 
 def activate() -> bool:
@@ -133,6 +145,7 @@ def activate() -> bool:
     searches sys.path, so anything asking "can this build speak Japanese?"
     before this ran would be told no.
     """
+    sweep()
     root = japanese_dir()
     if not (root / PROBE_MODULE).is_dir():
         return False
@@ -282,6 +295,43 @@ def _resolve(wanted: tuple[tuple[str, str], ...] = WANTED,
     return resolved
 
 
+def _aside(root: Path) -> Path | None:
+    """Move a pack directory out of the way. Returns where it went, or None.
+
+    Renaming works on Windows even when a compiled extension inside is loaded;
+    deleting and overwriting do not. That difference is the whole reason install
+    and uninstall can work at all without asking the user to restart first.
+    """
+    if not root.exists():
+        return None
+    for attempt in range(100):
+        spare = root.with_name(f"{root.name}.removing-{attempt}")
+        if spare.exists():
+            continue
+        try:
+            root.rename(spare)
+        except OSError as exc:
+            log.warning("could not move %s aside: %s", root.name, exc)
+            return None
+        return spare
+    return None
+
+
+def sweep() -> None:
+    """Delete packs moved aside earlier, now that nothing has them open.
+
+    Called from status() and activate(), so a directory left behind by a
+    removal during a session is gone by the next start rather than sitting in
+    the user's cache forever.
+    """
+    root = japanese_dir()
+    for leftover in root.parent.glob(f"{root.name}.removing-*"):
+        shutil.rmtree(leftover, ignore_errors=True)
+        if leftover.exists():
+            log.debug("%s is still held open; it will go next time",
+                      leftover.name)
+
+
 def _wheel_url(package: str, version: str,
                timeout: float = 20.0) -> tuple[str, int, str]:
     """The Windows wheel for a package, or the pure-python one if that is all
@@ -370,7 +420,15 @@ def install(progress: StepProgress = None) -> PackStatus:
         if progress:
             progress(message)
 
-    dest = japanese_dir()
+    final = japanese_dir()
+    sweep()
+    # Built somewhere else and swapped in at the end, never written over the
+    # top of what is there. A repair used to extract into the live pack, and
+    # Windows refuses to overwrite a loaded .pyd -- so the very first package
+    # failed and everything after it, including the missing one being repaired,
+    # was never fetched at all.
+    dest = final.with_name(f"{final.name}.installing")
+    shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix="voice2tts-jp-"))
     try:
@@ -386,42 +444,76 @@ def install(progress: StepProgress = None) -> PackStatus:
             say(f"Unpacking {package}...")
             _extract(wheel, dest)
             wheel.unlink(missing_ok=True)
+        say("Installing...")
+        previous = _aside(final)
+        try:
+            dest.rename(final)
+        except OSError as exc:
+            if previous is not None:
+                previous.rename(final)   # put back what was working
+            raise RuntimeError(
+                f"could not put the phonemizer in place ({exc}). Close "
+                "Voice2TTS and try again.") from exc
+        if previous is not None:
+            shutil.rmtree(previous, ignore_errors=True)
+    except BaseException:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
+    # Whatever the old pack said is no longer about these files.
+    was_loaded = probe.is_loaded(PROBE_MODULE)
+    probe.forget()
     activate()
-    result = status()
-    if not result.usable:
+
+    if not (japanese_dir() / PROBE_MODULE).is_dir():
         raise RuntimeError("Japanese pack incomplete: the phonemizer is missing")
+
+    if was_loaded:
+        # The new files are in place, but this process is still holding the old
+        # ones open -- Windows keeps a loaded extension alive even after the
+        # file it came from has been renamed away. Importing now would prove
+        # nothing about what was just downloaded, so say what is true instead of
+        # guessing.
+        say("Japanese voices installed. Restart Voice2TTS to use them.")
+        return status()
 
     # Prove it imports before claiming success. A pack that unpacks but cannot
     # load is worse than one that failed to download, because nothing says so
     # until someone tries to speak.
-    try:
-        import importlib
-
-        importlib.invalidate_caches()
-        importlib.import_module(PROBE_MODULE)
-    except Exception as exc:
+    trouble = probe.import_problem(PROBE_MODULE)
+    if trouble is not None:
         raise RuntimeError(
-            f"Japanese pack installed but {PROBE_MODULE} will not load: {exc}"
-        ) from exc
+            f"Japanese pack installed but {PROBE_MODULE} will not load: "
+            f"{trouble}")
 
+    result = status()
     say(f"Japanese voices ready ({result.size_mb:.0f} MB).")
     return result
 
 
 def uninstall() -> bool:
+    """Remove the pack. Works even while the phonemizer is loaded.
+
+    Moved aside and then deleted, rather than deleted where it stands: Windows
+    will not delete a loaded .pyd, so `rmtree(ignore_errors=True)` left a
+    half-deleted pack behind and reported failure -- and the settings window
+    then offered to download a pack that was already there.
+    """
     root = japanese_dir()
     if not root.is_dir():
         return False
-    shutil.rmtree(root, ignore_errors=True)
+    spare = _aside(root)
+    if spare is None:
+        return False
+    shutil.rmtree(spare, ignore_errors=True)   # the rest goes on the next start
+
     entry = str(root)
     while entry in sys.path:
         sys.path.remove(entry)
-    # The phonemizer was imported to prove the pack worked. Left in sys.modules
-    # it would keep importing, so the pack would report itself usable for the
-    # rest of the session -- after being deleted.
+    # Anything imported to prove the pack worked stays in sys.modules otherwise,
+    # so the pack would go on reporting itself usable after being deleted.
     probe.forget()
     log.info("removed the Japanese pack")
-    return not root.is_dir()
+    return not root.exists()

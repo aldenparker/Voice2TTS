@@ -36,7 +36,14 @@ from .config import (
 )
 from .diagnostics import diagnostics
 from .hotkey import describe
-from .modes import RecognitionMode, SttDevice, Theme, TranslationMode, TriggerMode
+from .modes import (
+    AddonState,
+    RecognitionMode,
+    SttDevice,
+    Theme,
+    TranslationMode,
+    TriggerMode,
+)
 from .paths import config_path, is_frozen, list_voices, log_path
 from .pipeline import Pipeline
 from .platform_win import run_at_login, set_run_at_login
@@ -1406,17 +1413,20 @@ class SettingsWindow(tk.Toplevel):
 
     @staticmethod
     def _pack_line(status, describe):
-        """(usable, what to show). A pack that is there but broken says so.
+        """(AddonState, what to show). Present and broken is its own answer.
 
-        Reporting only `usable` meant an unpacked-but-unloadable pack showed as
-        simply "not installed", so the fix offered was to download it again --
-        which is exactly what had already happened.
+        This returned a boolean, so a pack that was unpacked but would not load
+        had to be reported as one or the other -- and as "not installed" it
+        offered to download something already downloaded, which is exactly what
+        the user had been doing.
         """
         note = describe(status)
         problem = getattr(status, "problem", "")
         if problem and problem != "missing":
-            return False, f"{note} -- installed but not working: {problem}"
-        return status.usable, note
+            return AddonState.BROKEN, f"{note} -- not working: {problem}"
+        if status.installed and status.usable:
+            return AddonState.READY, note
+        return AddonState.MISSING, note
 
     def _addon_specs(self) -> list[dict]:
         """Every optional download, described in one place.
@@ -1539,31 +1549,44 @@ class SettingsWindow(tk.Toplevel):
                 continue
             spec = row["spec"]
             try:
-                installed, detail = spec["status"]()
+                state, detail = spec["status"]()
             except Exception as exc:  # noqa: BLE001 - a probe must not break the tab
                 log.debug("could not read %s status: %s", spec["key"], exc)
-                installed, detail = False, ""
+                state, detail = AddonState.MISSING, ""
             allowed, why_not = spec["available"]()
+            row["addon_state"] = state
 
-            if installed:
-                row["state"].config(text=f"Installed — {detail}")
-                row["button"].config(text="Remove", state="normal")
-                row["note"].config(text="")
-            elif not allowed:
-                row["state"].config(text="Not available on this machine")
-                row["button"].config(text="Download", state="disabled")
-                row["note"].config(text=why_not)
-            else:
-                row["state"].config(text=f"Not installed — {spec['size']}")
-                row["button"].config(text="Download", state="normal")
-                row["note"].config(text="")
+            match state:
+                case AddonState.READY:
+                    row["state"].config(text=f"Installed — {detail}")
+                    row["button"].config(text="Remove", state="normal")
+                    row["note"].config(text="")
+                case AddonState.BROKEN:
+                    # Repair, not Download: the files are there, and fetching
+                    # them again is what the user has already tried.
+                    row["state"].config(text=f"Installed — {detail}")
+                    row["button"].config(text="Repair", state="normal")
+                    row["note"].config(
+                        text="Repair downloads it again, including anything "
+                             "that was missing. Remove it from the log tab if "
+                             "you would rather start over.")
+                case _ if not allowed:
+                    row["state"].config(text="Not available on this machine")
+                    row["button"].config(text="Download", state="disabled")
+                    row["note"].config(text=why_not)
+                case _:
+                    row["state"].config(text=f"Not installed — {spec['size']}")
+                    row["button"].config(text="Download", state="normal")
+                    row["note"].config(text="")
 
     def _toggle_addon(self, key: str) -> None:
         row = self._addon_rows[key]
         spec = row["spec"]
-        installed, _ = spec["status"]()
+        state, _ = spec["status"]()
 
-        if installed:
+        # A broken pack falls through to the install path below: downloading it
+        # again is the repair, and it is the only button that can help.
+        if state is AddonState.READY:
             if not messagebox.askyesno(
                 f"Remove {spec['title']}",
                 f"Delete the downloaded files for {spec['title']}?",
