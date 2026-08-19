@@ -387,8 +387,22 @@ class Config:
             names = {f.name for f in dataclasses.fields(kind)}
             return kind(**{k: v for k, v in blob.items() if k in names})
 
+        def table(name: str) -> dict[str, Any]:
+            """One section as a dict, whatever the file actually holds there.
+
+            `section` already tolerated a section of the wrong type; the three
+            list-rebuilding blocks below did not, and a hand-edited file with
+            `audio = "default"` in it crashed the loader before validate() ever
+            got a chance to repair anything.
+            """
+            found = data.get(name)
+            return found if isinstance(found, dict) else {}
+
+        def items(blob: Any) -> list[Any]:
+            return blob if isinstance(blob, list) else []
+
         audio = section(AudioConfig, data.get("audio"))
-        raw_outputs = (data.get("audio") or {}).get("outputs") or []
+        raw_outputs = items(table("audio").get("outputs"))
         audio.outputs = [
             OutputTarget(
                 match=str(o.get("match", "")),
@@ -409,19 +423,19 @@ class Config:
                     regex=bool(r.get("regex", False)),
                     case_sensitive=bool(r.get("case_sensitive", False)),
                 )
-                for r in (blob or [])
+                for r in items(blob)
                 if isinstance(r, dict)
             ]
 
         text_cfg = section(TextConfig, data.get("text"))
         # Both lists need rebuilding, not just the source one: `section` copies
         # whatever was in the file, which for these is a list of plain dicts.
-        raw_text = data.get("text") or {}
+        raw_text = table("text")
         text_cfg.substitutions = rules(raw_text.get("substitutions"))
         text_cfg.target_substitutions = rules(raw_text.get("target_substitutions"))
 
         profiles_cfg = section(ProfilesConfig, data.get("profiles"))
-        raw_profiles = (data.get("profiles") or {}).get("entries") or []
+        raw_profiles = items(table("profiles").get("entries"))
         profiles_cfg.entries = [
             ProfileEntry(
                 name=str(p.get("name", "")),
@@ -474,10 +488,11 @@ class Config:
         """
         if self.schema_version >= CURRENT_SCHEMA:
             return
-        raw_stt = data.get("stt")
-        stt: dict[str, Any] = raw_stt if isinstance(raw_stt, dict) else {}
-        raw_trans = data.get("translation")
-        trans: dict[str, Any] = raw_trans if isinstance(raw_trans, dict) else {}
+        def table(name: str) -> dict[str, Any]:
+            found = data.get(name)
+            return found if isinstance(found, dict) else {}
+
+        stt, trans = table("stt"), table("translation")
         if str(stt.get("task", "")).strip().lower() == "translate":
             self.translation.mode = TranslationMode.RECOGNISER
         elif bool(trans.get("enabled", False)):

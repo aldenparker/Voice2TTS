@@ -29,7 +29,11 @@ sys.path.insert(0, str(ROOT))
 from voice2tts.config import Config, OutputTarget, load_config  # noqa: E402
 from voice2tts.logging_setup import setup_logging  # noqa: E402
 from voice2tts.modes import (  # noqa: E402
+    ComputeType,
+    LogLevel,
     RecognitionMode,
+    SttDevice,
+    Theme,
     TranslationMode,
     TriggerMode,
     WhisperTask,
@@ -4821,6 +4825,262 @@ def test_language_guard() -> None:
           voices.voice_language("nl_BE-nathalie-medium") == "nl")
 
 
+def test_mode_matrix() -> None:
+    """Every combination of modes the app can be in, checked at once.
+
+    The three bugs that started this sweep were all one shape: a combination of
+    settings nobody had put together, producing a confident wrong answer. So
+    rather than adding a case per bug, this walks the whole space -- triggering
+    by recognition by translation by model kind by voice language -- and
+    asserts the things that must hold for ALL of them:
+
+        the plan is internally consistent, whatever the combination
+        anything serious names a place to go and fix it
+        nothing produces wrong output without a serious problem attached
+
+    That last one is the test that would have caught all three.
+    """
+    print("\n[mode matrix]")
+    from voice2tts import plan, translate
+    from voice2tts.config import Config
+
+    voices_by_language = {"en": "en_US-amy-medium", "de": "de_DE-thorsten-medium",
+                          "ja": "ja_JA-hi_fi_captain-medium"}
+    models = ["base.en", "small"]
+    languages = ["en", "de", "ja"]
+
+    combinations = []
+    for trigger in TriggerMode:
+        for recognition in RecognitionMode:
+            for translation in TranslationMode:
+                for model in models:
+                    for source in languages:
+                        for target in languages:
+                            for voice_language in languages:
+                                combinations.append((
+                                    trigger, recognition, translation, model,
+                                    source, target, voice_language))
+
+    incoherent, unhelpful, silent = [], [], []
+    for combo in combinations:
+        trigger, recognition, translation, model, source, target, spoken_by = combo
+        cfg = Config()
+        cfg.trigger.mode = trigger
+        cfg.stt.mode = recognition
+        cfg.stt.model = model
+        cfg.stt.language = source
+        cfg.translation.mode = translation
+        cfg.translation.source = source
+        cfg.translation.target = target
+        cfg.tts.voice = voices_by_language[spoken_by]
+        cfg.validate()
+        current = plan.build(cfg)
+        label = (f"{trigger.value}/{recognition.value}/{translation.value} "
+                 f"{model} {source}->{target} voice={spoken_by}")
+
+        # -- coherent, whatever the combination -----------------------------
+        # `mode` is the config's, `whisper_task` follows from it, and the two
+        # cannot disagree because there is only one field behind them. This
+        # asserts the property the type was introduced for.
+        wants_translate = current.mode is TranslationMode.RECOGNISER
+        if (current.whisper_task is WhisperTask.TRANSLATE) != wants_translate:
+            incoherent.append(f"{label}: task {current.whisper_task}")
+        if current.needs_chain and wants_translate:
+            incoherent.append(f"{label}: both ways of translating at once")
+        if current.mode is TranslationMode.RECOGNISER and current.spoken != "en":
+            incoherent.append(f"{label}: recogniser produced {current.spoken}")
+        if not current.summary.strip():
+            incoherent.append(f"{label}: no summary")
+        # describe() is what a bug report carries; it must not raise on any
+        # combination, which is exactly what diagnostics used to do differently.
+        if len(current.describe()) < 6:
+            incoherent.append(f"{label}: describe() said almost nothing")
+
+        # -- every serious problem names a place ----------------------------
+        for problem in current.serious:
+            if not problem.where:
+                unhelpful.append(f"{label}: {problem.text[:50]}")
+
+        # -- nothing wrong happens quietly ----------------------------------
+        # The voice is about to be handed text in `spoken`. If it cannot say
+        # that language, SOMETHING has to be flagged as serious -- this is the
+        # "English read in a German accent" case, and the "Japanese voice for
+        # Japanese output" case, from the one place that decides both.
+        mismatch = spoken_by != current.spoken and current.spoken not in ("auto", "")
+        if mismatch and not current.serious:
+            silent.append(f"{label}: {spoken_by} voice, {current.spoken} text")
+
+    check(f"every combination is coherent ({len(combinations)} of them)",
+          not incoherent, "; ".join(incoherent[:3]))
+    check("every serious problem says where to fix it",
+          not unhelpful, "; ".join(unhelpful[:3]))
+    check("no combination speaks the wrong language quietly",
+          not silent, "; ".join(silent[:3]))
+
+    # Streaming under push-to-talk is not a combination that survives loading.
+    surviving = []
+    for trigger in TriggerMode:
+        cfg = Config()
+        cfg.trigger.mode = trigger
+        cfg.stt.mode = RecognitionMode.STREAMING
+        cfg.validate()
+        if (cfg.trigger.mode is TriggerMode.PTT
+                and cfg.stt.mode is RecognitionMode.STREAMING):
+            surviving.append(trigger.value)
+    check("streaming under push-to-talk does not survive validate()",
+          not surviving, str(surviving))
+
+    # And the one that could not be written down before: two ways of
+    # translating at once. It took two config fields; it now takes one.
+    check("no config can ask for both ways of translating",
+          len(TranslationMode) == 3 and
+          not any(plan.build(_translating(m)).needs_chain
+                  and plan.build(_translating(m)).whisper_task
+                  is WhisperTask.TRANSLATE
+                  for m in TranslationMode),
+          "one field, three values, no overlap")
+
+    # Adding a mode without teaching the plan about it is a type error, not a
+    # wrong answer -- but only if nothing quietly falls through. Prove the
+    # dispatch is total by asking for every member.
+    unhandled = []
+    for mode in TranslationMode:
+        try:
+            _ = plan.build(_translating(mode)).summary
+        except Exception as exc:  # noqa: BLE001
+            unhandled.append(f"{mode.value}: {exc}")
+    check("the plan handles every translation mode",
+          not unhandled, "; ".join(unhandled))
+
+    _ = translate  # imported for the route lookups plan.build makes
+
+
+def _translating(mode):
+    """A config in one translation mode, otherwise at its defaults."""
+    from voice2tts.config import Config
+
+    cfg = Config()
+    cfg.stt.model = "small"
+    cfg.translation.mode = mode
+    cfg.translation.source, cfg.translation.target = "en", "de"
+    return cfg
+
+
+def test_config_repair() -> None:
+    """A damaged config is repaired, and every repair comes back to be shown.
+
+    validate() used to write these to the log and nothing else, so a config
+    whose translation had been quietly switched off looked exactly like one
+    that was working -- tick still in the box.
+    """
+    print("\n[config repair]")
+    import tempfile
+
+    import tomli_w
+
+    from voice2tts.config import CURRENT_SCHEMA, Config, load_config
+
+    def repaired(**sections):
+        cfg = Config.from_dict(sections)
+        return cfg, [str(r) for r in cfg.repairs]
+
+    cfg, notes = repaired(trigger={"mode": "telepathy"})
+    check("an unknown trigger mode falls back",
+          cfg.trigger.mode is TriggerMode.PTT, str(cfg.trigger.mode))
+    check("and the fallback is reported",
+          any("telepathy" in n for n in notes), str(notes))
+    check("naming the choices, so the fix is obvious",
+          any("ptt" in n and "vad" in n for n in notes), str(notes))
+
+    cfg, notes = repaired(text={"review_timeout_s": 0})
+    check("a zero review timeout is refused",
+          cfg.text.review_timeout_s >= 1.0, cfg.text.review_timeout_s)
+    check("and says what it would have done",
+          any("wait" in n for n in notes), str(notes))
+
+    cfg, notes = repaired(trigger={"max_utterance_s": 0})
+    check("a zero utterance cap is refused",
+          cfg.trigger.max_utterance_s >= 1.0, cfg.trigger.max_utterance_s)
+
+    cfg, notes = repaired(stt={"min_chars": 900})
+    check("an impossible min_chars is pulled back",
+          cfg.stt.min_chars <= 40, cfg.stt.min_chars)
+    check("and says that nothing would ever be spoken",
+          any("noise" in n for n in notes), str(notes))
+
+    cfg, notes = repaired(stt={"device": "quantum", "compute_type": "wishful"})
+    check("an unknown device falls back",
+          cfg.stt.device is SttDevice.AUTO, str(cfg.stt.device))
+    check("as does an unknown compute type",
+          cfg.stt.compute_type is ComputeType.AUTO, str(cfg.stt.compute_type))
+    check("both reported, not one",
+          len([n for n in notes if "does not understand" in n]) == 2, str(notes))
+
+    cfg, notes = repaired(theme="chartreuse", log_level="SHOUTING")
+    check("an unknown theme falls back", cfg.theme is Theme.NATIVE, str(cfg.theme))
+    check("an unknown log level falls back",
+          cfg.log_level is LogLevel.INFO, str(cfg.log_level))
+
+    cfg, _ = repaired(audio="not a table", trigger=["also", "not"])
+    check("a section of the wrong type does not stop the load",
+          cfg.audio.input_match == "" and cfg.trigger.mode is TriggerMode.PTT)
+
+    cfg, notes = repaired(stt={"model": "base.en", "language": "auto"})
+    check("detection on an English-only model is settled",
+          cfg.stt.language == "en", cfg.stt.language)
+    check("and said out loud rather than silently corrected",
+          any("English only" in n for n in notes), str(notes))
+
+    # The pair that used to be two fields, in every combination it could hold.
+    for task, enabled, expected in [
+        ("translate", True, TranslationMode.RECOGNISER),
+        ("translate", False, TranslationMode.RECOGNISER),
+        ("transcribe", True, TranslationMode.MODELS),
+        ("transcribe", False, TranslationMode.OFF),
+    ]:
+        cfg = Config.from_dict({
+            "schema_version": 3,
+            "stt": {"task": task, "model": "small"},
+            "translation": {"enabled": enabled, "source": "de", "target": "en"},
+        })
+        check(f"schema 3 task={task} enabled={enabled} becomes {expected.value}",
+              cfg.translation.mode is expected, str(cfg.translation.mode))
+
+    check("and the recogniser wins the contradictory case",
+          Config.from_dict({
+              "schema_version": 3,
+              "stt": {"task": "translate", "model": "small"},
+              "translation": {"enabled": True, "source": "de", "target": "fr"},
+          }).translation.mode is TranslationMode.RECOGNISER,
+          "that is what the old pipeline actually did")
+
+    # A file at the current schema must not be re-folded on every load.
+    cfg = Config()
+    cfg.translation.mode = TranslationMode.MODELS
+    cfg.stt.model = "small"
+    round_tripped = Config.from_dict(cfg.to_dict())
+    check("a current config round-trips unchanged",
+          round_tripped.translation.mode is TranslationMode.MODELS,
+          str(round_tripped.translation.mode))
+    check("and the modes survive TOML as their own values",
+          tomli_w.dumps(cfg.to_dict()).count('mode = "models"') == 1,
+          "StrEnum serialises as the string, so the file format is unchanged")
+
+    # An unreadable file must not be silently overwritten by the next Save.
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "config.toml"
+        path.write_text("this is not [ valid toml", encoding="utf-8")
+        loaded = load_config(path)
+        check("an unreadable config still starts the app",
+              loaded.schema_version == CURRENT_SCHEMA)
+        check("and is kept rather than overwritten",
+              (Path(tmp) / "config.toml.unreadable").is_file(),
+              "hand-written rules are the user's work, not ours to bin")
+        check("and the user is told",
+              any("could not be read" in str(r) for r in loaded.repairs),
+              str([str(r) for r in loaded.repairs]))
+
+
 def main() -> int:
     setup_logging("WARNING")
     no_audio = "--no-audio" in sys.argv
@@ -4855,6 +5115,8 @@ def main() -> int:
     test_vad()
     test_japanese_pack()
     test_speech_plan()
+    test_mode_matrix()
+    test_config_repair()
     test_unspeakable_voices()
     test_streaming()
     test_streaming_faults()
