@@ -2167,7 +2167,7 @@ def test_japanese_pack() -> None:
     import tempfile
     import zipfile
 
-    from voice2tts import jppack
+    from voice2tts import jppack, probe
 
     check("the probe module is what piper imports",
           jppack.PROBE_MODULE == "pyopenjtalk",
@@ -2228,6 +2228,10 @@ def test_japanese_pack() -> None:
             jppack.japanese_dir = real_dir
             while str(root) in sys.path:
                 sys.path.remove(str(root))
+            # status() imports the phonemizer to prove it works, and what was
+            # imported here is a one-line stand-in. Leaving it bound would make
+            # every later test see a pyopenjtalk with nothing in it.
+            probe.forget()
 
 
 def test_speech_plan() -> None:
@@ -3151,6 +3155,7 @@ def test_model_catalogue() -> None:
 
     real_dir = translate.models_dir
     real_url = translate.ASSET_URL
+    real_verify = translate.verify_pair
     try:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3166,6 +3171,24 @@ def test_model_catalogue() -> None:
                   "so the picker opens offline")
             check("nothing is installed yet", not found[0].installed)
 
+            # A model that unpacks but will not load is removed, not installed.
+            # Checking that the files arrived is what let a truncated download
+            # sit on disk looking ready until the first time someone spoke --
+            # and this fixture's "model" is exactly such a file.
+            try:
+                translate.download_pair(found[0], "owner/repo")
+                check("a model that will not load is refused", False, "installed")
+            except translate.TranslationUnavailable as exc:
+                check("a model that will not load is refused",
+                      "will not translate" in str(exc), str(exc)[:80])
+            check("and nothing is left behind claiming to work",
+                  not found[0].installed,
+                  "a half-installed model translates by not translating")
+
+            # The rest is about the download and unpack plumbing, which the
+            # fixture can exercise; loading a real CTranslate2 model cannot be
+            # faked, so that one step stands aside.
+            translate.verify_pair = lambda pair, beam_size=4: None
             installed = translate.download_pair(found[0], "owner/repo")
             check("a pair downloads and installs", found[0].installed)
             check("the archive is not left behind",
@@ -3189,6 +3212,7 @@ def test_model_catalogue() -> None:
     finally:
         translate.models_dir = real_dir
         translate.ASSET_URL = real_url
+        translate.verify_pair = real_verify
         server.server_close()
 
     # A corrupt download must install nothing at all.

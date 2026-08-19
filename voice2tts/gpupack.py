@@ -21,6 +21,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import probe
 from .net import USER_AGENT, ByteProgress, StepProgress
 from .paths import cuda_dir, whisper_cache
 
@@ -47,25 +48,47 @@ class PackStatus:
     size_mb: float
     has_cublas: bool
     has_cudnn: bool
+    # Empty when both libraries actually load. A DLL of the right name built
+    # against the wrong CUDA runtime is exactly as unusable as no DLL at all,
+    # and the filename cannot tell the two apart -- the failure lands inside
+    # ctranslate2 at model load, as an error naming neither.
+    problem: str = ""
 
     @property
     def usable(self) -> bool:
-        return self.has_cublas and self.has_cudnn
+        return self.has_cublas and self.has_cudnn and not self.problem
+
+
+# The two the CUDA build of ctranslate2 dynamically loads. Checked by loading
+# them, because that is the only thing that answers the question.
+REQUIRED_DLLS = ("cublas64_12.dll", "cudnn64_9.dll")
 
 
 def status() -> PackStatus:
     root = cuda_dir()
     if not root.is_dir():
-        return PackStatus(False, 0, 0.0, False, False)
+        return PackStatus(False, 0, 0.0, False, False, probe.MISSING)
     dlls = list(root.rglob("*.dll"))
-    names = {p.name.lower() for p in dlls}
+    by_name = {p.name.lower(): p for p in dlls}
     total = sum(p.stat().st_size for p in dlls) / 1e6
+
+    trouble = ""
+    for name in REQUIRED_DLLS:
+        found = by_name.get(name)
+        if found is None:
+            continue  # has_cublas / has_cudnn already report an absent one
+        failed = probe.library_problem(found)
+        if failed is not None:
+            trouble = f"{name} will not load: {failed}"
+            break
+
     return PackStatus(
         installed=bool(dlls),
         dll_count=len(dlls),
         size_mb=round(total, 1),
-        has_cublas="cublas64_12.dll" in names,
-        has_cudnn="cudnn64_9.dll" in names,
+        has_cublas=REQUIRED_DLLS[0] in by_name,
+        has_cudnn=REQUIRED_DLLS[1] in by_name,
+        problem=trouble,
     )
 
 

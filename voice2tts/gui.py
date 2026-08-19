@@ -1397,6 +1397,20 @@ class SettingsWindow(tk.Toplevel):
 
     # -- add-ons tab ----------------------------------------------------------
 
+    @staticmethod
+    def _pack_line(status, describe):
+        """(usable, what to show). A pack that is there but broken says so.
+
+        Reporting only `usable` meant an unpacked-but-unloadable pack showed as
+        simply "not installed", so the fix offered was to download it again --
+        which is exactly what had already happened.
+        """
+        note = describe(status)
+        problem = getattr(status, "problem", "")
+        if problem and problem != "missing":
+            return False, f"{note} -- installed but not working: {problem}"
+        return status.usable, note
+
     def _addon_specs(self) -> list[dict]:
         """Every optional download, described in one place.
 
@@ -1424,10 +1438,9 @@ class SettingsWindow(tk.Toplevel):
                           "processor, and upgrades the recognition model to "
                           "small.en."),
                 "size": "about 1.9 GB",
-                "status": lambda: (
-                    gpupack.status().usable,
-                    f"{gpupack.status().dll_count} libraries, "
-                    f"{gpupack.status().size_mb:.0f} MB"),
+                "status": lambda: self._pack_line(
+                    gpupack.status(),
+                    lambda s: f"{s.dll_count} libraries, {s.size_mb:.0f} MB"),
                 "available": gpu_available,
                 "install": lambda report: gpupack.install(progress=report),
                 "uninstall": gpupack.uninstall,
@@ -1441,8 +1454,8 @@ class SettingsWindow(tk.Toplevel):
                           "voice cannot speak at all."),
                 "size": f"about {jppack.APPROX_DOWNLOAD_MB} MB "
                         f"({jppack.APPROX_INSTALLED_MB} MB on disk)",
-                "status": lambda: (jppack.status().usable,
-                                   f"{jppack.status().size_mb:.0f} MB"),
+                "status": lambda: self._pack_line(
+                    jppack.status(), lambda s: f"{s.size_mb:.0f} MB"),
                 "available": lambda: (True, ""),
                 "install": lambda report: jppack.install(progress=report),
                 "uninstall": jppack.uninstall,

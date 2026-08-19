@@ -7,7 +7,6 @@ precedence over the bundled folder so a downloaded voice can shadow a bundled on
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
 import re
@@ -16,6 +15,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import probe
 from .net import USER_AGENT, StepProgress
 from .paths import list_voices, resource_root, user_data_dir
 
@@ -97,7 +97,7 @@ def missing_phonemizer(voice_key: str) -> str:
     problem = _import_problem(module)
     if problem is None:
         return ""
-    if problem == "missing":
+    if problem == probe.MISSING:
         return (f"{voice_key} is a {language} voice, and speaking {language} "
                 f"needs the {module} phonemizer, which is not installed. Get it "
                 "from Settings -> Add-ons, or choose a different voice.")
@@ -106,39 +106,14 @@ def missing_phonemizer(voice_key: str) -> str:
             "re-downloading it in Settings -> Add-ons.")
 
 
-# Importing a package costs real time, so the answer is remembered. Keyed by
-# module name; cleared when a pack is installed or removed.
-_IMPORT_CHECKS: dict[str, str | None] = {}
-
-
 def forget_import_checks() -> None:
     """Re-test importability, after a pack is installed or removed."""
-    _IMPORT_CHECKS.clear()
+    probe.forget()
 
 
 def _import_problem(module: str) -> str | None:
-    """None if the module imports, "missing" if absent, else why it failed.
-
-    Actually imports it. `find_spec` only proves a module can be FOUND, and a
-    phonemizer that is present but will not load reported as usable and then
-    failed inside synthesis -- once per utterance, as "Failed to process
-    utterance" with the real reason buried in a traceback. Finding out here
-    costs one import and says what is actually wrong.
-    """
-    if module in _IMPORT_CHECKS:
-        return _IMPORT_CHECKS[module]
-
-    result: str | None = None
-    if importlib.util.find_spec(module) is None:
-        result = "missing"
-    else:
-        try:
-            importlib.import_module(module)
-        except Exception as exc:  # noqa: BLE001 - any failure is disqualifying
-            log.warning("%s is present but will not import: %s", module, exc)
-            result = f"{type(exc).__name__}: {exc}"
-    _IMPORT_CHECKS[module] = result
-    return result
+    """None if the module imports, "missing" if absent, else why it failed."""
+    return probe.import_problem(module)
 
 
 def is_speakable(voice_key: str) -> bool:
@@ -340,10 +315,22 @@ def download_voice(key: str, progress: StepProgress = None) -> Path:
     _dl(key, dest)
 
     onnx = dest / f"{key}.onnx"
-    if not onnx.exists():
-        raise RuntimeError(f"download finished but {onnx.name} is missing")
-    if not (dest / f"{key}.onnx.json").exists():
-        raise RuntimeError(f"{key}.onnx.json is missing; the voice will not load")
+    trouble = probe.files_problem(dest, {
+        f"{key}.onnx": "there is no voice to speak with",
+        f"{key}.onnx.json":
+            "nothing says what language it speaks or how it is tuned",
+    })
+    if trouble is not None:
+        raise RuntimeError(f"the download of {key} did not finish: {trouble}")
+
+    # Prove it loads before calling it installed. A voice that arrives whole but
+    # needs a phonemizer this build does not carry is not a download failure --
+    # it is a voice that will fail once per utterance, days later.
+    if progress:
+        progress(f"Checking {key}...")
+    unspeakable = missing_phonemizer(key)
+    if unspeakable:
+        log.warning("%s downloaded but cannot be spoken: %s", key, unspeakable)
     if progress:
         progress(f"Installed {key}")
     return onnx

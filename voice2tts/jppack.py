@@ -41,6 +41,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import probe
 from .net import USER_AGENT, ByteProgress, Json, StepProgress
 from .paths import japanese_dir
 
@@ -69,18 +70,31 @@ APPROX_INSTALLED_MB = 330
 class PackStatus:
     installed: bool
     size_mb: float
+    # Empty when the phonemizer loads. A pack can unpack perfectly and still be
+    # unusable -- a wheel built for the wrong Python ABI is the case that
+    # actually happened -- and `installed` cannot tell the difference.
+    problem: str = ""
 
     @property
     def usable(self) -> bool:
-        return self.installed
+        return self.installed and not self.problem
 
 
 def status() -> PackStatus:
+    """What is on disk, and whether it works.
+
+    `usable` requires the phonemizer to IMPORT, not merely to be unpacked. The
+    directory check alone reported a broken pack as installed, and the failure
+    surfaced one utterance at a time as "Failed to process utterance".
+    """
     root = japanese_dir()
     if not (root / PROBE_MODULE).is_dir():
-        return PackStatus(False, 0.0)
+        return PackStatus(False, 0.0, probe.MISSING)
     total = sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
-    return PackStatus(installed=True, size_mb=round(total / 1e6, 1))
+    activate()
+    trouble = probe.import_problem(PROBE_MODULE)
+    return PackStatus(installed=True, size_mb=round(total / 1e6, 1),
+                      problem="" if trouble is None else trouble)
 
 
 def activate() -> bool:
@@ -239,5 +253,9 @@ def uninstall() -> bool:
     entry = str(root)
     while entry in sys.path:
         sys.path.remove(entry)
+    # The phonemizer was imported to prove the pack worked. Left in sys.modules
+    # it would keep importing, so the pack would report itself usable for the
+    # rest of the session -- after being deleted.
+    probe.forget()
     log.info("removed the Japanese pack")
     return not root.is_dir()

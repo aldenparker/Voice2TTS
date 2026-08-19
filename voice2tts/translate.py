@@ -32,7 +32,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import net
+from . import net, probe
 from .net import ByteProgress, Json
 from .paths import cache_dir
 
@@ -131,8 +131,41 @@ def tokenizers_in(directory: Path) -> tuple[Path, Path] | None:
 
 def is_usable(directory: Path) -> bool:
     """Both halves present. A model without its tokenizer produces gibberish."""
-    return ((directory / MODEL_DIR_NAME / "model.bin").is_file()
-            and tokenizers_in(directory) is not None)
+    return unusable_because(directory) is None
+
+
+def unusable_because(directory: Path) -> str | None:
+    """Why this model cannot be used, or None. The reason, not just a verdict.
+
+    A file check, not a load: building a Pair costs about 200 ms and a few
+    hundred megabytes, which is not something a settings window refresh can
+    afford. What makes that safe is verify_pair(), which DOES load, and runs
+    once at install -- so nothing that survives a download can be broken here
+    without someone having deleted part of it since.
+    """
+    trouble = probe.files_problem(directory, {
+        f"{MODEL_DIR_NAME}/model.bin":
+            "there is nothing to translate with",
+    })
+    if trouble is not None:
+        return trouble
+    if tokenizers_in(directory) is None:
+        return ("the tokenizer is missing, so translation would produce "
+                "fluent-looking nonsense rather than fail")
+    return None
+
+
+def verify_pair(pair: Pair, beam_size: int = DEFAULT_BEAM) -> None:
+    """Load the model and translate one word. Raises if it cannot.
+
+    Run once, at install. Checking that files exist is what let a truncated
+    download sit on disk looking installed until the first time someone spoke.
+    """
+    engine = Translator(pair, beam_size=beam_size)
+    try:
+        engine.translate("Hello.")
+    finally:
+        engine.close()
 
 
 def installed_pairs() -> list[Pair]:
@@ -376,6 +409,19 @@ def download_pair(entry: Available, repo: str, tag: str = MODELS_TAG,
         installed = install_package(archive, entry.source, entry.target)
     finally:
         archive.unlink(missing_ok=True)
+
+    # Prove it translates before calling it installed. Checking that the files
+    # arrived is what let a truncated download sit on disk looking ready until
+    # the first time somebody spoke -- at which point the failure arrived
+    # mid-call, as an error naming ctranslate2 rather than the download.
+    try:
+        verify_pair(Pair(entry.source, entry.target, installed))
+    except Exception as exc:
+        shutil.rmtree(installed, ignore_errors=True)
+        raise TranslationUnavailable(
+            f"{entry.label} downloaded but will not translate ({exc}). It has "
+            "been removed; try the download again.") from exc
+
     log.info("installed %s", entry.label)
     return installed
 
