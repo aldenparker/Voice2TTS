@@ -748,14 +748,54 @@ class SettingsWindow(tk.Toplevel):
         ttk.Button(tab, text="Speak", command=self._speak_test).grid(row=6, column=2)
         tab.columnconfigure(1, weight=1)
 
+    def _current_plan(self):
+        """What the app would do with the settings as they are shown.
+
+        Built from the WIDGETS, not the saved config, so every warning answers
+        "what happens if I press Apply" rather than "what happened last time".
+        """
+        from dataclasses import replace
+
+        from . import plan as plan_mod
+
+        cfg = self.cfg
+        stt, translation = cfg.stt, cfg.translation
+        by_recogniser = (hasattr(self, "trans_method")
+                         and self.trans_method.get() == "whisper"
+                         and self.trans_enabled.get())
+        if hasattr(self, "model_var"):
+            stt = replace(
+                stt,
+                model=self.model_var.get().strip() or stt.model,
+                language=self.stt_lang_var.get().strip() or stt.language,
+                task="translate" if by_recogniser else "transcribe",
+            )
+        if hasattr(self, "trans_enabled"):
+            translation = replace(
+                translation,
+                enabled=self.trans_enabled.get() and not by_recogniser,
+                source=self._source_code(),
+                target=self._target_code(),
+            )
+        snapshot = replace(cfg, stt=stt, translation=translation,
+                           tts=replace(cfg.tts,
+                                       voice=self.voice_var.get().strip()))
+        return plan_mod.build(snapshot)
+
     def _check_language(self) -> None:
-        """Surface a voice/recognition-model language mismatch."""
+        """Show whatever is wrong with the plan, worked out in one place.
+
+        This used to compare the voice against the RECOGNITION model, which is
+        the wrong question the moment translation is on: a Japanese voice is
+        exactly right for English-to-Japanese, and was reported as "not an
+        English voice" because the check knew nothing about translation.
+        """
         if not hasattr(self, "lang_warning") or not hasattr(self, "model_var"):
             return
-        warning = voices.language_mismatch(
-            self.voice_var.get().strip(), self.model_var.get().strip()
-        )
-        self.lang_warning.config(text=warning.split("\n\n")[0] if warning else "")
+        current = self._current_plan()
+        trouble = current.serious or current.problems
+        self.lang_warning.config(
+            text=str(trouble[0]).split("\n\n")[0] if trouble else "")
 
     def _speak_test(self) -> None:
         if not self.pipeline.running:
@@ -1140,6 +1180,18 @@ class SettingsWindow(tk.Toplevel):
         self._check_language()
 
     def _refresh_translate_route(self) -> None:
+        """Redraw the route line AND the voice warning.
+
+        One entry point, because they are two views of the same question and
+        leaving each caller to remember both is what left "not an English
+        voice" on screen while translating INTO that language. The route line
+        has several early returns; wrapping it means every one of them still
+        updates the warning.
+        """
+        self._render_route()
+        self._check_language()
+
+    def _render_route(self) -> None:
         """Say what will happen, including every reason it might not work."""
         from . import translate
 
@@ -1592,8 +1644,11 @@ class SettingsWindow(tk.Toplevel):
         """Anything whose advice depends on what is now installed.
 
         Installing the Japanese pack makes voices speakable that were not a
-        moment ago, so every place that says so has to be asked again.
+        moment ago, so every place that says so has to be asked again -- and
+        the cached "does this import" answer has to be thrown away first, or it
+        keeps reporting the state from before the download.
         """
+        voices.forget_import_checks()
         self._check_language()
         if hasattr(self, "trans_enabled"):
             self._refresh_translate_route()
@@ -2221,6 +2276,12 @@ class SettingsWindow(tk.Toplevel):
                  "\"auto\" detects\nper utterance, which costs a little accuracy.",
             foreground="#555", justify="left",
         ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        # The voice warning depends on the model and the spoken language as well
+        # as the voice, so all three have to re-evaluate it. Watching only the
+        # voice left a stale warning on screen after changing the language.
+        for watched in (self.model_var, self.stt_lang_var):
+            watched.trace_add("write", lambda *_: self._check_language())
 
         ttk.Label(tab, text="Compute device").grid(row=8, column=0, sticky="w")
         self.stt_device_var = tk.StringVar()

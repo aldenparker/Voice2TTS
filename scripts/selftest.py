@@ -2172,6 +2172,109 @@ def test_japanese_pack() -> None:
                 sys.path.remove(str(root))
 
 
+def test_speech_plan() -> None:
+    """One place decides what the app is doing. Everything else reads it.
+
+    Every question here used to be answered separately by whoever needed it,
+    and the answers disagreed: the settings window said a Japanese voice was
+    "not an English voice" while translating English INTO Japanese, because
+    that check compared the voice against the RECOGNITION model.
+    """
+    print("\n[speech plan]")
+    from voice2tts import plan, translate
+    from voice2tts.config import Config
+
+    def make(**kwargs):
+        cfg = Config()
+        cfg.tts.voice = kwargs.pop("voice", "en_US-amy-medium")
+        cfg.stt.model = kwargs.pop("model", "base.en")
+        cfg.stt.language = kwargs.pop("language", "en")
+        cfg.stt.task = kwargs.pop("task", "transcribe")
+        cfg.translation.enabled = kwargs.pop("translating", False)
+        cfg.translation.source = kwargs.pop("source", "en")
+        cfg.translation.target = kwargs.pop("target", "de")
+        assert not kwargs, kwargs
+        return cfg
+
+    # -- the three modes -----------------------------------------------------
+    normal = plan.build(make())
+    check("speaking normally is its own mode", normal.mode == plan.NORMAL)
+    check("and what is heard is what is spoken",
+          normal.heard == normal.spoken == "en")
+    check("with nothing wrong", normal.ok, str([str(p) for p in normal.problems]))
+
+    by_recogniser = plan.build(make(task="translate", model="small",
+                                    translating=True, source="de", target="en"))
+    check("the recogniser translating is its own mode",
+          by_recogniser.mode == plan.RECOGNISER)
+    check("and it only ever produces English", by_recogniser.spoken == "en")
+
+    # -- THE reported fault --------------------------------------------------
+    # Translating English into Japanese with a Japanese voice is correct, and
+    # was being reported as a mismatch.
+    japanese = plan.build(make(translating=True, source="en", target="ja",
+                               voice="ja_JA-hi_fi_captain-medium"))
+    if translate.find_pair("en", "ja") is None:
+        print("  SKIP  the reported case (no en->ja model installed)")
+    else:
+        check("translating into Japanese wants a Japanese voice",
+              japanese.spoken == "ja", japanese.spoken)
+        check("so a Japanese voice raises no complaint",
+              not [p for p in japanese.problems if "mispronounce" in p.text],
+              str([str(p) for p in japanese.problems]))
+        check("and an English-only recogniser is fine, because it hears English",
+              not [p for p in japanese.problems if "only understands" in p.text],
+              str([str(p) for p in japanese.problems]))
+
+    # The same voice with translation OFF is a real mismatch.
+    off = plan.build(make(voice="ja_JA-hi_fi_captain-medium"))
+    check("the same voice without translation is wrong",
+          any("mispronounce" in p.text for p in off.problems),
+          str([str(p) for p in off.problems]))
+
+    # -- the other way round -------------------------------------------------
+    wrong_voice = plan.build(make(translating=True, source="en", target="de",
+                                  voice="en_US-amy-medium"))
+    if translate.find_pair("en", "de") is not None:
+        check("an English voice for German output is wrong",
+              any("mispronounce" in p.text for p in wrong_voice.problems),
+              str([str(p) for p in wrong_voice.problems]))
+
+    # -- no model for the pair ----------------------------------------------
+    # The text stays in the SOURCE language, so the voice should match THAT.
+    # Following the target here is what produced English in a German accent.
+    unavailable = plan.build(make(translating=True, source="en", target="xx"))
+    check("with no model, the words stay in the source language",
+          unavailable.spoken == "en", unavailable.spoken)
+    check("and that is serious, not a note",
+          any(p.serious and "untranslated" in p.text
+              for p in unavailable.problems),
+          str([str(p) for p in unavailable.problems]))
+
+    # -- the recogniser cannot hear it ---------------------------------------
+    deaf = plan.build(make(translating=True, source="de", target="en",
+                           model="base.en"))
+    check("an English-only model cannot hear German",
+          any(p.serious and "only understands English" in p.text
+              for p in deaf.problems),
+          str([str(p) for p in deaf.problems]))
+
+    # -- a no-op pair --------------------------------------------------------
+    pointless = plan.build(make(translating=True, source="en", target="en"))
+    check("translating a language into itself is called out",
+          any("does nothing" in p.text for p in pointless.problems),
+          str([str(p) for p in pointless.problems]))
+
+    # -- every problem says where to fix it ----------------------------------
+    everywhere = [p for state in (unavailable, deaf, off) for p in state.problems]
+    check("every problem says where to go",
+          all(p.where for p in everywhere),
+          str([str(p) for p in everywhere if not p.where]))
+    check("and the summary reads like a sentence",
+          "Translating" in japanese.summary and "→" in japanese.summary,
+          japanese.summary)
+
+
 def test_unspeakable_voices() -> None:
     """Voices this build has no phonemizer for must be refused, not crash.
 
@@ -2181,7 +2284,9 @@ def test_unspeakable_voices() -> None:
     "Failed to process utterance" with the app otherwise looking healthy.
     """
     print("\n[voices we cannot speak]")
+    import importlib.util
     import json
+    import sys
     import tempfile
 
     from voice2tts import voices
@@ -2226,6 +2331,49 @@ def test_unspeakable_voices() -> None:
                 voices._PHONEMIZERS = real_map
         finally:
             voices.installed_path = real_installed
+
+    # A phonemizer that is PRESENT but will not load. This is the case that got
+    # reported: the pack was installed, the check said the voice was fine, and
+    # synthesis then failed once per utterance as "Failed to process utterance"
+    # with the real reason buried in a traceback. find_spec only proves a module
+    # can be FOUND.
+    with tempfile.TemporaryDirectory() as broken_dir:
+        broken_root = Path(broken_dir)
+        (broken_root / "broken_phonemizer.py").write_text(
+            "raise ImportError('numpy ABI mismatch')\n", encoding="utf-8")
+        # A voice of its own: the fake above lived in a temp directory that
+        # has since been removed, so its config can no longer be read.
+        broken_voice = broken_root / "yy_YY-broken-medium.onnx"
+        broken_voice.write_bytes(b"not a real model")
+        broken_voice.with_suffix(".onnx.json").write_text(json.dumps({
+            "phoneme_type": "japanese",
+            "language": {"family": "yy"},
+        }), encoding="utf-8")
+        sys.path.insert(0, str(broken_root))
+        real_map = voices._PHONEMIZERS
+        real_installed = voices.installed_path
+        voices._PHONEMIZERS = dict(real_map)
+        voices._PHONEMIZERS["japanese"] = ("broken_phonemizer", "Klingon")
+        voices.installed_path = (
+            lambda key: broken_voice if key == broken_voice.stem else None)
+        voices.forget_import_checks()
+        try:
+            check("a module that exists is still found",
+                  importlib.util.find_spec("broken_phonemizer") is not None,
+                  "so find_spec alone would call this voice usable")
+            problem = voices.missing_phonemizer(broken_voice.stem)
+            check("but a phonemizer that will not import is refused",
+                  bool(problem), problem or "reported as usable")
+            check("and the reason is carried through",
+                  "numpy ABI mismatch" in problem, problem)
+            check("rather than being called missing",
+                  "not installed" not in problem, problem)
+        finally:
+            voices._PHONEMIZERS = real_map
+            voices.installed_path = real_installed
+            voices.forget_import_checks()
+            while str(broken_root) in sys.path:
+                sys.path.remove(str(broken_root))
 
     # Refused at load, not at synthesis: the point is that it fails once, in a
     # place the caller can report, rather than on every utterance forever.
@@ -2816,14 +2964,16 @@ def test_pipeline_translation() -> None:
                                  target="xx")
     pipe._load_translator()
     check("a missing model leaves translation off", pipe.translator is None)
-    events = drain()
-    # An error, not a warning: with translation on and no model the far end
-    # hears a language nobody asked for, and if a voice for the target language
-    # is selected it reads the untranslated text in that accent -- which sounds
-    # like a broken translator rather than a missing one.
-    check("and explains why, loudly",
-          any(k == "error" and "spoken untranslated" in m for k, m in events),
-          str(events))
+    # Announced by the pipeline's plan report at start(), in the same words the
+    # settings window uses -- not by the translator loader, which used to say
+    # the same thing differently and let the two drift apart.
+    from voice2tts import plan as plan_mod
+
+    unavailable = plan_mod.build(pipe.cfg)
+    check("and the plan explains why, loudly",
+          any(p.serious and "spoken untranslated" in p.text
+              for p in unavailable.problems),
+          str([str(p) for p in unavailable.problems]))
     check("the app is still usable", pipe.state is not None)
 
     # Same language both ways is a no-op the config refuses to enable.
@@ -4550,6 +4700,7 @@ def main() -> int:
     test_history_and_review()
     test_vad()
     test_japanese_pack()
+    test_speech_plan()
     test_unspeakable_voices()
     test_streaming()
     test_streaming_faults()

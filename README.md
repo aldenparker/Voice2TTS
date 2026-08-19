@@ -570,6 +570,7 @@ settings window.
       tts.py          Piper wrapper
       streaming.py    recognising while someone is still speaking
       translate.py    OPUS-MT models: catalogue, install, translation
+      plan.py         what the app is about to do, and what is wrong with it
       output.py       multi-device fan-out
       hotkey.py       global hotkey with press/release
       cable.py        virtual cable detection and assisted install

@@ -231,6 +231,7 @@ class Pipeline:
             self._streaming_started = self.cfg.stt.mode == "streaming"
             self._streaming_degraded = False
             self._backlog_reported = False
+            self._report_plan()
             self._running.set()
             self._spawn(self._notifier_loop, "notifier")
             self._spawn(self._segmenter_loop, "segmenter")
@@ -277,6 +278,21 @@ class Pipeline:
         self.stt.warmup()
         self.tts.warmup()
 
+    def _report_plan(self) -> None:
+        """Say what this run is going to do, and everything wrong with it.
+
+        The same reasoning the settings window shows, from the same function.
+        They used to decide separately and disagree -- the window said a
+        Japanese voice was wrong for translating INTO Japanese while the
+        pipeline happily did it.
+        """
+        from . import plan as plan_mod
+
+        current = plan_mod.build(self.cfg)
+        self._emit("info", current.summary)
+        for problem in current.problems:
+            self._emit("error" if problem.serious else "warning", str(problem))
+
     @property
     def streaming_mode(self) -> bool:
         """Whether text should come out while someone is still speaking.
@@ -308,17 +324,15 @@ class Pipeline:
             self.translator = translate.chain_for(
                 cfg.source, cfg.target, pivot=cfg.pivot, beam_size=cfg.beam_size)
         except translate.TranslationUnavailable as exc:
-            # An error rather than a warning: the far end is about to hear a
-            # language nobody asked for, and if a voice for the target language
-            # is selected it will read the untranslated text in that accent --
-            # which sounds like a broken translator rather than a missing one.
-            self._emit(
-                "error",
-                f"Translation is ON but {exc}. Your own words will be spoken "
-                "untranslated. Download the model on the Translate tab.")
+            # Not announced here: _report_plan already says this, in the same
+            # words the settings window uses. Saying it twice, differently, is
+            # how the two came to disagree in the first place.
+            log.warning("no translation chain: %s", exc)
             return
-        hops = " via ".join(p.label for p in self.translator.pairs)
-        self._emit("info", f"Translating {hops}")
+        # Not announced here -- _report_plan says this, in the words the
+        # settings window uses.
+        log.info("translation chain ready: %s",
+                 " via ".join(pair.label for pair in self.translator.pairs))
 
     def _open_audio(self) -> None:
         assert self.tts is not None

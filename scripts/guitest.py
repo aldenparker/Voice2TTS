@@ -1303,11 +1303,72 @@ def main() -> int:
     win.voice_var.set("en_US-amy-medium")
     root.update()
     check("clears for an English voice", not win.lang_warning.cget("text"))
+    # A multilingual model is not on its own enough: what matters is the
+    # language the VOICE will be handed. Speaking English through a German
+    # voice mispronounces every word whatever the recogniser can understand.
     win.model_var.set("large-v3")
     win.voice_var.set("de_DE-thorsten-medium")
+    win.stt_lang_var.set("en")
     root.update()
-    check("no warning with a multilingual model", not win.lang_warning.cget("text"))
+    check("a German voice still warns while you are speaking English",
+          bool(win.lang_warning.cget("text")), win.lang_warning.cget("text")[:70])
+
+    win.stt_lang_var.set("de")
+    root.update()
+    check("and clears once the spoken language matches it",
+          not win.lang_warning.cget("text"), win.lang_warning.cget("text")[:70])
+    win.stt_lang_var.set("en")
     win.voice_var.set("en_US-amy-medium")
+    root.update()
+    win.voice_var.set("en_US-amy-medium")
+
+    print("\n[the app knows which mode it is in]")
+    # THE reported fault: translating English into Japanese with a Japanese
+    # voice was reported as "not an English voice", because the check compared
+    # the voice against the RECOGNITION model and knew nothing about
+    # translation. Both views now come from the same plan.
+    win.voice_var.set("ja_JA-hi_fi_captain-medium")
+    win.model_var.set("base.en")
+    win.stt_lang_var.set("en")
+    win.trans_method.set("models")
+    win.trans_enabled.set(True)
+    win.trans_source.set("en (English)")
+    win.trans_target.set("ja (Japanese)")
+    win._refresh_translate_route()
+    root.update()
+
+    current = win._current_plan()
+    check("the window knows it is translating", current.mode == "translate",
+          current.mode)
+    check("and that Japanese is what will be spoken",
+          current.spoken == "ja" if translate.find_pair("en", "ja") else True,
+          current.spoken)
+    if translate.find_pair("en", "ja") is not None:
+        check("so a Japanese voice draws no complaint",
+              not win.lang_warning.cget("text"),
+              win.lang_warning.cget("text"))
+    else:
+        print("  SKIP  the reported case (no en->ja model installed)")
+
+    # Turning translation off makes the same voice wrong again, and the warning
+    # has to come back without anyone touching the voice.
+    win.trans_enabled.set(False)
+    win._refresh_translate_route()
+    root.update()
+    check("turning translation off brings the warning back",
+          "mispronounce" in win.lang_warning.cget("text"),
+          win.lang_warning.cget("text")[:70])
+    check("and it names the language actually being spoken",
+          "English" in win.lang_warning.cget("text"),
+          win.lang_warning.cget("text")[:70])
+
+    # One refresh drives both views: relying on each caller to remember the
+    # route line AND the warning is how they came to disagree.
+    win.voice_var.set("en_US-amy-medium")
+    win._refresh_translate_route()
+    root.update()
+    check("a matching voice clears it again",
+          not win.lang_warning.cget("text"), win.lang_warning.cget("text"))
 
     print("\n[diagnostics]")
     win._copy_diagnostics()

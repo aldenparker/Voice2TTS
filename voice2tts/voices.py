@@ -94,11 +94,51 @@ def missing_phonemizer(voice_key: str) -> str:
 
     jppack.activate()
 
-    if importlib.util.find_spec(module) is not None:
+    problem = _import_problem(module)
+    if problem is None:
         return ""
-    return (f"{voice_key} is a {language} voice, and speaking {language} needs "
-            f"the {module} phonemizer, which is not installed. Get it from "
-            "Settings -> Add-ons, or choose a different voice.")
+    if problem == "missing":
+        return (f"{voice_key} is a {language} voice, and speaking {language} "
+                f"needs the {module} phonemizer, which is not installed. Get it "
+                "from Settings -> Add-ons, or choose a different voice.")
+    return (f"{voice_key} is a {language} voice, and the {module} phonemizer is "
+            f"installed but will not load: {problem}. Try removing and "
+            "re-downloading it in Settings -> Add-ons.")
+
+
+# Importing a package costs real time, so the answer is remembered. Keyed by
+# module name; cleared when a pack is installed or removed.
+_IMPORT_CHECKS: dict[str, str | None] = {}
+
+
+def forget_import_checks() -> None:
+    """Re-test importability, after a pack is installed or removed."""
+    _IMPORT_CHECKS.clear()
+
+
+def _import_problem(module: str) -> str | None:
+    """None if the module imports, "missing" if absent, else why it failed.
+
+    Actually imports it. `find_spec` only proves a module can be FOUND, and a
+    phonemizer that is present but will not load reported as usable and then
+    failed inside synthesis -- once per utterance, as "Failed to process
+    utterance" with the real reason buried in a traceback. Finding out here
+    costs one import and says what is actually wrong.
+    """
+    if module in _IMPORT_CHECKS:
+        return _IMPORT_CHECKS[module]
+
+    result: str | None = None
+    if importlib.util.find_spec(module) is None:
+        result = "missing"
+    else:
+        try:
+            importlib.import_module(module)
+        except Exception as exc:  # noqa: BLE001 - any failure is disqualifying
+            log.warning("%s is present but will not import: %s", module, exc)
+            result = f"{type(exc).__name__}: {exc}"
+    _IMPORT_CHECKS[module] = result
+    return result
 
 
 def is_speakable(voice_key: str) -> bool:

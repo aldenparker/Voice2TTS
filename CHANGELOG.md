@@ -67,6 +67,28 @@ versioning follows [Semantic Versioning](https://semver.org/).
   pause is back, and is now one of the two modes above -- which is what that
   change was reaching for and the wrong way to get it.
 
+- **The app now works out what it is doing in one place**, and everything reads
+  that rather than deciding for itself. There are two modes — speak what you
+  said, or speak a translation — and three questions that decide whether either
+  works: what language will be heard, what language will be spoken, and whether
+  this build can pronounce it. Each of those used to be answered separately by
+  whoever needed it, and the answers disagreed:
+
+  - The settings window said a Japanese voice "is not an English voice" while
+    translating English **into** Japanese, because that check compared the voice
+    against the recognition model and knew nothing about translation.
+  - The window and the pipeline announced the same situation in different words,
+    and could reach different conclusions about it.
+
+  The warning also only recomputed when the voice changed, so changing the
+  target language or the recognition model left a stale one on screen.
+
+- **A voice could be reported as usable and then fail on every utterance.** The
+  phonemizer check asked whether the module could be *found*, not whether it
+  would *load* — so a pack that unpacked but would not import passed the check
+  and failed inside synthesis, once per utterance, as "Failed to process
+  utterance". It is imported now, and a failure says what actually went wrong.
+
 - **The Audio tab showed more outputs than were configured.** Reloading the
   widgets appended another set of rows instead of replacing them, and switching
   a profile reloads them — so two outputs showed as four, then six. The saved
