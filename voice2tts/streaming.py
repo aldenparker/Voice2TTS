@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .stt import TimedText, WhisperEngine
 from .vad import SAMPLE_RATE
 
 log = logging.getLogger(__name__)
@@ -141,7 +142,8 @@ class StreamingRecognizer:
     it on the segmenter thread, which is the only one that has the audio.
     """
 
-    def __init__(self, engine, interval_s: float = DEFAULT_INTERVAL_S,
+    def __init__(self, engine: WhisperEngine,
+                 interval_s: float = DEFAULT_INTERVAL_S,
                  max_sentence_words: int = 25,
                  max_interval_s: float = MAX_INTERVAL_S,
                  sentences_only: bool = False):
@@ -320,7 +322,7 @@ class StreamingRecognizer:
         self._spoken_words += take
         return " ".join(pending[:take])
 
-    def _trim(self, timed) -> float:
+    def _trim(self, timed: list[TimedText]) -> float:
         """Drop audio that has been committed, keeping recent context.
 
         Cuts only on a boundary the recogniser itself drew: an arbitrary cut

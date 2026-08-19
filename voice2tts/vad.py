@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
@@ -33,7 +34,7 @@ CONTEXT = 64
 
 
 class SileroVad:
-    def __init__(self, model_path=None):
+    def __init__(self, model_path: Path | None = None):
         path = model_path or vad_model_path()
         if not path.exists():
             raise FileNotFoundError(
@@ -85,7 +86,8 @@ class VadSegmenter:
     ):
         self.cfg = cfg
         self.vad = SileroVad()
-        self._preroll = deque(maxlen=max(1, preroll_ms // WINDOW_MS))
+        self._preroll: deque[np.ndarray] = deque(
+            maxlen=max(1, preroll_ms // WINDOW_MS))
         self._max_windows = int(max_utterance_s * 1000 / WINDOW_MS)
         self._pad_windows = max(0, cfg.speech_pad_ms // WINDOW_MS)
         self._min_speech_windows = max(1, cfg.min_speech_ms // WINDOW_MS)

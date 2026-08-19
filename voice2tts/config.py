@@ -81,7 +81,7 @@ class Bound:
         obj: Any = cfg
         for part in self.path.split("."):
             obj = getattr(obj, part)
-        return obj
+        return float(obj)
 
     def set(self, cfg: Config, value: float) -> None:
         obj: Any = cfg
@@ -381,7 +381,7 @@ class Config:
         with sane defaults rather than crash the app on startup.
         """
 
-        def section(kind, blob: Any):
+        def section(kind: type[Any], blob: Any) -> Any:
             if not isinstance(blob, dict):
                 return kind()
             names = {f.name for f in dataclasses.fields(kind)}
@@ -474,9 +474,10 @@ class Config:
         """
         if self.schema_version >= CURRENT_SCHEMA:
             return
-        stt = data.get("stt") if isinstance(data.get("stt"), dict) else {}
-        trans = (data.get("translation")
-                 if isinstance(data.get("translation"), dict) else {})
+        raw_stt = data.get("stt")
+        stt: dict[str, Any] = raw_stt if isinstance(raw_stt, dict) else {}
+        raw_trans = data.get("translation")
+        trans: dict[str, Any] = raw_trans if isinstance(raw_trans, dict) else {}
         if str(stt.get("task", "")).strip().lower() == "translate":
             self.translation.mode = TranslationMode.RECOGNISER
         elif bool(trans.get("enabled", False)):
@@ -716,7 +717,7 @@ def load_config(path: Path | None = None) -> Config:
 
 def _as_int(value: Any, fallback: int) -> int:
     try:
-        return int(value)  # type: ignore[arg-type]
+        return int(value)
     except (TypeError, ValueError):
         return fallback
 
@@ -746,7 +747,7 @@ def default_config() -> Config:
     cfg = Config()
     found = cable_mod.detect()
     have_cable = found is not None
-    if have_cable:
+    if found is not None:
         cfg.audio.outputs.append(
             OutputTarget(match=found.output_name, gain=1.0, enabled=True)
         )

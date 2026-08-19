@@ -29,9 +29,10 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import __version__
-from .net import USER_AGENT
+from .net import USER_AGENT, ByteProgress, Json
 from .paths import cache_dir, is_frozen
 
 log = logging.getLogger(__name__)
@@ -110,7 +111,7 @@ def current_version() -> str:
 # -- discovery --------------------------------------------------------------
 
 
-def _fetch(url: str, repo: str, timeout: float):
+def _fetch(url: str, repo: str, timeout: float) -> Any:
     """GET a GitHub API endpoint, turning its failures into readable ones."""
     req = urllib.request.Request(
         url,
@@ -139,7 +140,7 @@ def _fetch(url: str, repo: str, timeout: float):
         raise
 
 
-def _installer_asset(entry: dict) -> tuple[dict | None, dict | None]:
+def _installer_asset(entry: Json) -> tuple[Json | None, Json | None]:
     """The Setup .exe and its .sha256 from a release payload."""
     assets = entry.get("assets") or []
     installer = next(
@@ -159,11 +160,11 @@ def _installer_asset(entry: dict) -> tuple[dict | None, dict | None]:
 _APP_TAG_RE = re.compile(r"^v?\d+\.\d+\.\d+(?:-beta-\d+)?$")
 
 
-def _tag_version(entry: dict) -> str:
+def _tag_version(entry: Json) -> str:
     return str(entry.get("tag_name") or "").lstrip("vV")
 
 
-def is_app_release(entry: dict) -> bool:
+def is_app_release(entry: Json) -> bool:
     """Whether this release is a build of the app, rather than something else.
 
     The translation models are published as a release of their own, under a
@@ -181,8 +182,8 @@ def is_app_release(entry: dict) -> bool:
     return _installer_asset(entry)[0] is not None
 
 
-def pick_newest(entries: list[dict],
-                include_prereleases: bool = False) -> dict | None:
+def pick_newest(entries: list[Json],
+                include_prereleases: bool = False) -> Json | None:
     """The newest usable release in a listing, by version rather than by date.
 
     Three things are filtered out, each for its own reason:
@@ -197,7 +198,7 @@ def pick_newest(entries: list[dict],
     by creation date, which stops matching version order the moment a patch to
     an older series is published after a newer one.
     """
-    best: dict | None = None
+    best: Json | None = None
     for entry in entries or []:
         if not is_app_release(entry):
             log.debug("skipping %r: not an installable app release",
@@ -211,7 +212,7 @@ def pick_newest(entries: list[dict],
     return best
 
 
-def _to_release(entry: dict, repo: str) -> Release:
+def _to_release(entry: Json, repo: str) -> Release:
     tag = str(entry.get("tag_name") or "")
     installer, checksum = _installer_asset(entry)
     if installer is None:
@@ -276,7 +277,8 @@ def should_check(last_check_epoch: float, interval_hours: int) -> bool:
 # -- download ---------------------------------------------------------------
 
 
-def download(release: Release, progress=None, timeout: float = 120.0) -> Path:
+def download(release: Release, progress: ByteProgress = None,
+             timeout: float = 120.0) -> Path:
     """Fetch the installer into the cache directory and verify it."""
     dest_dir = cache_dir() / "updates"
     dest_dir.mkdir(parents=True, exist_ok=True)

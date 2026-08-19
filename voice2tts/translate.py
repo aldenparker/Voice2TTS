@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import net
+from .net import ByteProgress, Json
 from .paths import cache_dir
 
 log = logging.getLogger(__name__)
@@ -207,7 +208,12 @@ def install_package(archive: Path, source: str, target: str) -> Path:
             shutil.rmtree(keep, ignore_errors=True)
         keep.mkdir()
         shutil.move(str(root / MODEL_DIR_NAME), str(keep / MODEL_DIR_NAME))
-        source_spm, target_spm = tokenizers_in(root)
+        found = tokenizers_in(root)
+        if found is None:  # is_usable() proved otherwise above; keep it provable
+            raise TranslationUnavailable(
+                f"{archive.name} lost its tokenizer between the check and the "
+                "unpack")
+        source_spm, target_spm = found
         if source_spm == target_spm:
             shutil.move(str(source_spm), str(keep / SHARED_TOKENIZER_NAMES[0]))
         else:
@@ -300,7 +306,7 @@ class Available:
         return ASSET_URL.format(repo=repo, tag=tag, asset=self.asset)
 
 
-def parse_catalogue(data: dict) -> list[Available]:
+def parse_catalogue(data: Json) -> list[Available]:
     """Turn manifest.json into entries. Pure, so it needs no network.
 
     Skips entries it cannot use rather than failing the whole list: a future
@@ -355,7 +361,8 @@ def fetch_catalogue(repo: str, tag: str = MODELS_TAG,
 
 
 def download_pair(entry: Available, repo: str, tag: str = MODELS_TAG,
-                  progress=None, timeout: float = 60.0) -> Path:
+                  progress: ByteProgress = None,
+                  timeout: float = 60.0) -> Path:
     """Fetch and install one pair. Returns the installed directory.
 
     The archive is kept in the models directory while it downloads so a
@@ -393,6 +400,7 @@ class Translator:
 
         self.pair = pair
         self.beam_size = beam_size
+        self._closed = False
         self._engine = ctranslate2.Translator(
             str(pair.path / MODEL_DIR_NAME), device="cpu",
             inter_threads=1, intra_threads=threads)
@@ -405,6 +413,7 @@ class Translator:
 
     def translate(self, text: str) -> str:
         """Translate one utterance, sentence by sentence."""
+        assert not self._closed, "this pair was closed"
         sentences = split_sentences(text)
         if not sentences:
             return ""
@@ -417,9 +426,14 @@ class Translator:
             for r in results)
 
     def close(self) -> None:
-        self._engine = None
-        self._source = None
-        self._target = None
+        """Release the model. The pair is unusable afterwards, by design.
+
+        Not set to None: that made every use site optional for the type checker
+        and none of them optional in fact, so a use-after-close would have read
+        as an ordinary attribute error somewhere far away.
+        """
+        self._closed = True
+        self._engine.unload_model()
 
 
 def chain_for(source: str, target: str, pivot: str = "en",

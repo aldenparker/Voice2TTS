@@ -866,8 +866,10 @@ class DesignPanel(ttk.Frame):
         self.palette = palette
 
         self.base_key: str = ""
-        self.table = None            # [speakers, width] embeddings
-        self.coords = None           # [speakers, 2] projection
+        # None until a base voice is chosen; _set_enabled(False) is what keeps
+        # every reader out until then.
+        self.table: np.ndarray | None = None    # [speakers, width] embeddings
+        self.coords: np.ndarray | None = None   # [speakers, 2] projection
         self.names: list[str] = []
         self.weights: dict[int, float] = {}
         self.macro_vars: dict[str, tk.DoubleVar] = {}
@@ -1047,10 +1049,11 @@ class DesignPanel(ttk.Frame):
         self.status.config(text=f"Reading {key}…", foreground=self.palette.muted)
         self.update_idletasks()
         try:
-            self.table = designer.speaker_table(path)
+            table = designer.speaker_table(path)
             self.names = designer.speaker_names(
-                path.with_suffix(".onnx.json"), self.table.shape[0])
-            self.coords = designer.project(self.table)
+                path.with_suffix(".onnx.json"), table.shape[0])
+            self.coords = designer.project(table)
+            self.table = table
         except Exception as exc:  # noqa: BLE001 - shown to the user
             self.base_note.config(text=f"Could not read {key}: {exc}",
                                   foreground=self.palette.error)
@@ -1060,7 +1063,7 @@ class DesignPanel(ttk.Frame):
         self.base_key = key
         self.weights = {}
         self.base_note.config(
-            text=f"{self.table.shape[0]} speakers, laid out by similarity. "
+            text=f"{table.shape[0]} speakers, laid out by similarity. "
                  "The layout is a guide; blending uses the full model.",
             foreground=self.palette.muted)
         self.status.config(text="")
@@ -1319,8 +1322,10 @@ class DesignPanel(ttk.Frame):
                         path = self._bake_to(Path(tmp) / "preview.onnx", voice,
                                              with_design=False, snapshot=snapshot)
                         dry, rate = _speak(path, self.PREVIEW_TEXT)
-                else:
+                elif self._dry is not None:
                     dry, rate = self._dry, self._dry_rate
+                else:  # unreachable: the branch above sets it or returns
+                    raise RuntimeError("no dry audio to shape")
 
                 shaped = dsp.apply(dry, rate, design) if not design.is_neutral else dry
                 _play(shaped, rate)

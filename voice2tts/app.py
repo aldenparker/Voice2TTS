@@ -17,7 +17,7 @@ from tkinter import messagebox, ttk
 
 import pystray
 
-from . import theme
+from . import theme, updater
 from .config import Config, Repair, load_config
 from .gui import SettingsWindow
 from .icon import make_icon
@@ -25,6 +25,7 @@ from .modes import TriggerMode
 from .pipeline import Pipeline, State
 from .platform_win import apply_tk_scaling, listen_for_activation
 from .speakbox import SpeakBox
+from .wizard import Wizard
 
 log = logging.getLogger(__name__)
 
@@ -57,12 +58,12 @@ class TrayApp:
 
         self.events: deque[tuple[str, str]] = deque(maxlen=300)
         self.settings: SettingsWindow | None = None
-        self.wizard = None
-        self.speakbox = None
-        self.pending_update = None
+        self.wizard: Wizard | None = None
+        self.speakbox: SpeakBox | None = None
+        self.pending_update: updater.Release | None = None
         self._quitting = False
 
-        self._review_window = None
+        self._review_window: tk.Toplevel | None = None
         self.pipeline = Pipeline(self.cfg, on_state=self._on_state, on_event=self._on_event)
         self.pipeline.review_hook = self._review_hook
         self.icon = pystray.Icon(

@@ -77,6 +77,11 @@ def install_crash_handlers() -> None:
         def report_callback_exception(self, exc, val, tb) -> None:
             log.critical("unhandled exception in Tk callback", exc_info=(exc, val, tb))
 
-        tkinter.Tk.report_callback_exception = report_callback_exception
+        # Tk calls this with (exc, val, tb) plus self; the stub declares the
+        # three-argument sys.excepthook shape.
+        # Tk calls this with self plus the (exc, val, tb) triple; the stub
+        # declares the three-argument sys.excepthook shape.
+        tkinter.Tk.report_callback_exception = (
+            report_callback_exception)  # type: ignore[assignment]
     except Exception:  # noqa: BLE001 - tkinter may be unavailable in a CLI-only run
         pass

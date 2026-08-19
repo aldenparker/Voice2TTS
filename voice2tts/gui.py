@@ -11,6 +11,7 @@ import logging
 import threading
 import tkinter as tk
 import webbrowser
+from functools import partial
 from tkinter import messagebox, simpledialog, ttk
 
 from . import (
@@ -293,7 +294,7 @@ class SettingsWindow(tk.Toplevel):
             try:
                 result = loopback.verify_cable(
                     info, progress=lambda m: self.after(
-                        0, lambda m=m: self.verify_status.config(text=m))
+                        0, partial(self.verify_status.config, text=m))
                 )
             except Exception as exc:  # noqa: BLE001
                 failure = str(exc)
@@ -335,7 +336,7 @@ class SettingsWindow(tk.Toplevel):
                 hits = loopback.scan(
                     info.output_name,
                     progress=lambda m: self.after(
-                        0, lambda m=m: self.verify_status.config(text=m)),
+                        0, partial(self.verify_status.config, text=m)),
                 )
             except Exception as exc:  # noqa: BLE001
                 failure = str(exc)
@@ -412,9 +413,11 @@ class SettingsWindow(tk.Toplevel):
                 self._later(lambda: messagebox.showerror(
                     "Uninstall failed", failure, parent=self))
                 return
-            self._later(lambda: (self._update_cable_hint(),
-                                   messagebox.showinfo("Virtual cable", message,
-                                                       parent=self)))
+            def removed() -> None:
+                self._update_cable_hint()
+                messagebox.showinfo("Virtual cable", message, parent=self)
+
+            self._later(removed)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -648,7 +651,7 @@ class SettingsWindow(tk.Toplevel):
         self.vad_header.config(foreground="" if active else "#999")
         for w in self._vad_widgets:
             try:
-                w.config(state=state)
+                w.config(state=state)  # type: ignore[call-arg]  # Misc in stubs
             except tk.TclError:
                 pass  # plain ttk.Label has no state option on some themes
 
@@ -1046,8 +1049,7 @@ class SettingsWindow(tk.Toplevel):
 
         self.trans_enabled = tk.BooleanVar(value=False)
         ttk.Checkbutton(tab, text="Translate what I say", variable=self.trans_enabled,
-                        command=lambda: (self._refresh_translate_route(),
-                                         self._check_language())).grid(
+                        command=self._refresh_translation_views).grid(
             row=1, column=0, columnspan=5, sticky="w", pady=(6, 4))
 
         method = ttk.Frame(tab)
@@ -1082,8 +1084,7 @@ class SettingsWindow(tk.Toplevel):
         self.trans_target_combo.pack(side="left", padx=4)
         for combo in (self.trans_source_combo, self.trans_target_combo):
             combo.bind("<<ComboboxSelected>>",
-                       lambda _e: (self._refresh_translate_route(),
-                                   self._check_language()))
+                       lambda _e: self._refresh_translation_views())
 
         # The route line is where every reason this will not work gets said: no
         # model, a pivot that will compound errors, an English-only recogniser,
@@ -1194,6 +1195,15 @@ class SettingsWindow(tk.Toplevel):
 
         The route line says the output will be English; the stored target is
         left exactly as the user set it.
+        """
+        self._refresh_translate_route()
+        self._check_language()
+
+    def _refresh_translation_views(self) -> None:
+        """Both views of the plan, refreshed together.
+
+        Leaving each caller to remember the route line AND the warning is how
+        they came to show different things at the same moment.
         """
         self._refresh_translate_route()
         self._check_language()
@@ -1486,7 +1496,7 @@ class SettingsWindow(tk.Toplevel):
         actions = ttk.Frame(frame)
         actions.grid(row=1, column=1, sticky="e", pady=(6, 0))
         button = ttk.Button(actions, text="Download",
-                            command=lambda key=spec["key"]: self._toggle_addon(key))
+                            command=partial(self._toggle_addon, str(spec["key"])))
         button.pack(side="left")
         progress = ttk.Progressbar(actions, mode="indeterminate", length=140)
 
@@ -1815,9 +1825,9 @@ class SettingsWindow(tk.Toplevel):
             self.subs_preview.config(text="(rules are switched off)",
                                      foreground="#666")
             return
-        rules = [Rule(r.pattern, r.replacement, r.enabled, r.whole_word,
-                      r.regex, r.case_sensitive) for r in rules]
-        result = substitutions.preview(rules, sample)
+        compiled = [Rule(r.pattern, r.replacement, r.enabled, r.whole_word,
+                         r.regex, r.case_sensitive) for r in rules]
+        result = substitutions.preview(compiled, sample)
         changed = result != sample
         self.subs_preview.config(
             text=f"Spoken as:  {result}" if changed else "(no rule matches)",
@@ -2834,7 +2844,7 @@ class SettingsWindow(tk.Toplevel):
         # Remembered so close() can cancel it. A tick left scheduled fires
         # after the window is destroyed and Tk complains about an "invalid
         # command name" for a callback nobody can see.
-        self._tick_id = self.after(100, self._tick)
+        self._tick_id: str | None = self.after(100, self._tick)
 
     def close(self) -> None:
         self._closing = True

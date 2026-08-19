@@ -17,6 +17,7 @@ import logging
 import threading
 import tkinter as tk
 import webbrowser
+from functools import partial
 from tkinter import messagebox, ttk
 
 from . import cable, devices, gpupack, voices
@@ -502,7 +503,7 @@ class Wizard(tk.Toplevel):
         def work():
             return loopback.verify_cable(
                 info, progress=lambda m: self.after(
-                    0, lambda m=m: self.test_log.config(text=m))
+                    0, partial(self.test_log.config, text=m))
             )
 
         def done(result, error) -> None:

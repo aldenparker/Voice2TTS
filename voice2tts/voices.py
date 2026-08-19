@@ -16,7 +16,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from .net import USER_AGENT
+from .net import USER_AGENT, StepProgress
 from .paths import list_voices, resource_root, user_data_dir
 
 log = logging.getLogger(__name__)
@@ -329,7 +329,7 @@ def languages(entries: list[VoiceEntry]) -> list[str]:
 # -- install / remove -------------------------------------------------------
 
 
-def download_voice(key: str, progress=None) -> Path:
+def download_voice(key: str, progress: StepProgress = None) -> Path:
     """Download a voice into the user directory. Returns the .onnx path."""
     from piper.download_voices import download_voice as _dl
 

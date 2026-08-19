@@ -42,6 +42,7 @@ cuda = [
 dev = [
     "pyinstaller>=6.10",
     "ruff>=0.6",
+    "mypy>=1.11",
 ]
 
 [project.scripts]
@@ -82,3 +83,49 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "scripts/*" = ["T201"]      # scripts print by design
 "Voice2TTS.spec" = ["F821"] # PyInstaller injects SPECPATH, Analysis, EXE, COLLECT
+
+[tool.mypy]
+python_version = "3.12"
+files = ["voice2tts"]
+# Third-party audio and ML packages ship no stubs. Their absence says nothing
+# about our code, and drowning the real output in it is how a checker gets
+# turned off two weeks after it is added.
+ignore_missing_imports = true
+# The interface tier. Tk is dynamic by nature and its widgets carry no useful
+# types, so this catches only what needs no annotations: calling something that
+# does not exist, unpacking the wrong shape, returning nothing from a function
+# whose result is used.
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+# The core tier: where the modes and the state machine live, and where every
+# bug this sweep was called for actually happened. Annotations are required
+# here, so adding a member to a StrEnum turns every `match` that does not
+# handle it into a build failure rather than a wrong answer at runtime.
+#
+# Not `strict = true`: that also forbids calling into the untyped interface
+# modules, which would be a hundred findings about Tk and none about us.
+[[tool.mypy.overrides]]
+module = [
+    "voice2tts.config",
+    "voice2tts.gpupack",
+    "voice2tts.jppack",
+    "voice2tts.modes",
+    "voice2tts.net",
+    "voice2tts.pipeline",
+    "voice2tts.plan",
+    "voice2tts.profiles",
+    "voice2tts.stt",
+    "voice2tts.streaming",
+    "voice2tts.translate",
+    "voice2tts.tts",
+    "voice2tts.updater",
+    "voice2tts.vad",
+    "voice2tts.voices",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_any_generics = true
+warn_return_any = true

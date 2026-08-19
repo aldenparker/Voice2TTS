@@ -89,8 +89,8 @@ class Binding:
     """One combo and what it does."""
 
     def __init__(self, name: str, spec: HotkeySpec,
-                 on_press: Callable[[], None],
-                 on_release: Callable[[], None] | None = None):
+                 on_press: Callable[[], object],
+                 on_release: Callable[[], object] | None = None):
         self.name = name
         self.spec = spec
         self.on_press = on_press
@@ -115,8 +115,8 @@ class HotkeyManager:
 
     # -- registration ---------------------------------------------------------
 
-    def bind(self, name: str, hotkey: str, on_press: Callable[[], None],
-             on_release: Callable[[], None] | None = None) -> None:
+    def bind(self, name: str, hotkey: str, on_press: Callable[[], object],
+             on_release: Callable[[], object] | None = None) -> None:
         """Add or replace a binding. Raises ValueError on an unparseable combo."""
         spec = HotkeySpec(hotkey)  # parse first: a bad string must change nothing
         with self._lock:
@@ -225,7 +225,7 @@ def _modifier_name(key) -> str | None:
     return None
 
 
-def _safe(fn: Callable[[], None]) -> None:
+def _safe(fn: Callable[[], object]) -> None:
     # Anything escaping here kills the listener thread, silently disabling every
     # hotkey at once, so callbacks are always wrapped.
     try:

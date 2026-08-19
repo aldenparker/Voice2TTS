@@ -19,12 +19,21 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 
 log = logging.getLogger(__name__)
 
 CHUNK = 1024 * 512
+
+# Shared shapes, so six modules stop spelling them six ways.
+#   Json      one decoded JSON object, from an API we do not control
+#   ByteProgress  (received, total) in bytes; None means "do not tell me"
+#   StepProgress  a sentence naming what is happening now
+Json = dict[str, Any]
+ByteProgress = Callable[[int, int], None] | None
+StepProgress = Callable[[str], None] | None
 
 
 def user_agent(note: str = "") -> str:
@@ -45,11 +54,11 @@ def request(url: str, headers: dict[str, str] | None = None) -> urllib.request.R
 def fetch(url: str, timeout: float = 30.0,
           headers: dict[str, str] | None = None) -> bytes:
     with urllib.request.urlopen(request(url, headers), timeout=timeout) as resp:
-        return resp.read()
+        return bytes(resp.read())
 
 
 def fetch_json(url: str, timeout: float = 30.0,
-               headers: dict[str, str] | None = None):
+               headers: dict[str, str] | None = None) -> Any:
     return json.loads(fetch(url, timeout, headers).decode("utf-8"))
 
 

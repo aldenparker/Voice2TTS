@@ -86,11 +86,14 @@ jobs:
           "prerelease=$prerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "Releasing $tag (version $version, prerelease $prerelease)"
 
-      - name: Install ruff
-        run: pip install ruff
+      - name: Install ruff and mypy
+        run: pip install ruff mypy
 
       - name: Lint
         run: ruff check --output-format github .
+
+      - name: Type check
+        run: mypy --no-error-summary
 
       - name: Cache models
         uses: actions/cache@v4

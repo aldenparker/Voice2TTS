@@ -26,9 +26,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ruff
+      - run: pip install ruff mypy
       - name: Lint
         run: ruff check --output-format github .
+
+      # ruff cannot see any of what this catches. The core modules are checked
+      # strictly, so adding a member to a mode enum fails here rather than
+      # producing a wrong answer on someone's machine.
+      - name: Type check
+        run: mypy --no-error-summary
 
   test:
     runs-on: windows-latest

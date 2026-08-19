@@ -17,9 +17,10 @@ import queue
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 import numpy as np
 
@@ -31,8 +32,10 @@ from .devices import resolve_input
 from .hotkey import HotkeyManager
 from .modes import RecognitionMode, TriggerMode
 from .output import OutputSink
+from .streaming import StreamingRecognizer
 from .stt import Heard, WhisperEngine
 from .substitutions import Rule, Substituter
+from .translate import Chain
 from .tts import PiperEngine, UnspeakableVoice
 from .vad import SAMPLE_RATE, WINDOW, VadSegmenter
 
@@ -114,8 +117,8 @@ class Pipeline:
         self.segmenter: VadSegmenter | None = None
         self.substituter = Substituter()          # what was misheard
         self.target_substituter = Substituter()   # what is said badly
-        self.translator = None                    # a translate.Chain, when on
-        self.streamer = None                      # a StreamingRecognizer, when on
+        self.translator: Chain | None = None      # a translate.Chain, when on
+        self.streamer: StreamingRecognizer | None = None
         # What this run is doing: which languages, which way of translating,
         # what is wrong with it. Rebuilt on start() and whenever a setting that
         # could change it is applied, and read by everything that used to work
@@ -126,7 +129,7 @@ class Pipeline:
         # thread cannot keep up, dropping the oldest window is far better
         # than growing without limit, and falling behind is already
         # detected and reported by the recogniser itself.
-        self._stream_windows: queue.Queue = queue.Queue(maxsize=400)
+        self._stream_windows: queue.Queue[Any] = queue.Queue(maxsize=400)
         self._stream_active = threading.Event()
         self._streaming_degraded = False
         self._backlog_reported = False
@@ -153,9 +156,9 @@ class Pipeline:
         # who does not pause will always be ahead of playback -- dropping the
         # overflow silently loses words that were actually said. Falling behind
         # is visible and recoverable; a dropped sentence is neither.
-        self._utterances: queue.Queue = queue.Queue()
+        self._utterances: queue.Queue[Any] = queue.Queue()
         # Observer notices ARE droppable: they only drive the tray and the log.
-        self._notices: queue.Queue = queue.Queue(maxsize=256)
+        self._notices: queue.Queue[Any] = queue.Queue(maxsize=256)
         # Set when the VAD settings change; the segmenter thread rebuilds.
         self._vad_dirty = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -178,7 +181,7 @@ class Pipeline:
         log.debug("state -> %s", state.value)
         self._notify(("state", state))
 
-    def _notify(self, notice) -> None:
+    def _notify(self, notice: tuple[str, Any]) -> None:
         """Hand an observer call to the notifier thread.
 
         NEVER call an observer from the audio path. The tray and settings
@@ -385,7 +388,10 @@ class Pipeline:
         self.hotkey.clear()
 
         trig = self.cfg.trigger
-        wanted: list[tuple[str, str, object, object]] = []
+        # `object`, not None: speak_clipboard and stop_speaking both return
+        # something useful to their other callers, and a hotkey ignores it.
+        Binding = tuple[str, str, Callable[[], object], Callable[[], object] | None]
+        wanted: list[Binding] = []
         if trig.mode in ("ptt", "both"):
             wanted.append(("ptt", trig.hotkey, self._on_ptt_press, self._on_ptt_release))
         if trig.clipboard_hotkey:
@@ -408,7 +414,7 @@ class Pipeline:
         else:
             self.hotkey.stop()
 
-    def _spawn(self, fn, name: str) -> None:
+    def _spawn(self, fn: Callable[[], None], name: str) -> None:
         t = threading.Thread(target=fn, name=f"v2t-{name}", daemon=True)
         t.start()
         self._threads.append(t)
@@ -489,7 +495,7 @@ class Pipeline:
             self.target_substituter.load([])
             return self.substituter.load([])
 
-        def compile_rules(entries):
+        def compile_rules(entries: Iterable[Any]) -> list[Rule]:
             return [
                 Rule(
                     pattern=r.pattern,
@@ -592,7 +598,7 @@ class Pipeline:
             return
         self._submit(audio)
 
-    def _submit(self, item) -> None:
+    def _submit(self, item: Any) -> None:
         try:
             self._utterances.put_nowait(item)
             self._set_state(State.THINKING)
@@ -816,8 +822,6 @@ class Pipeline:
         or windows are lost. The segmenter forwards audio here and this thread
         does nothing but read it.
         """
-        from .streaming import StreamingRecognizer
-
         assert self.stt is not None
         # A translator handed a clause fragment produces fluent nonsense, so
         # while translating this waits for a real sentence end.
@@ -1031,7 +1035,7 @@ class Pipeline:
                    f"{translated}  [{(time.perf_counter() - started) * 1000:.0f} ms]")
         return translated
 
-    def _handle_utterance(self, item) -> None:
+    def _handle_utterance(self, item: Any) -> None:
         """One unit of work: audio to recognise, or text already recognised.
 
         Streaming mode does its own recognition on its own thread, so what
@@ -1070,9 +1074,10 @@ class Pipeline:
         spoken = self.substituter.apply(text)
 
         if self.translator is not None:
-            spoken = self._translate(spoken)
-            if spoken is None:
+            translated = self._translate(spoken)
+            if translated is None:
                 return
+            spoken = translated
 
         # Target rules last: they fix what the VOICE says badly, which is a
         # property of the output language.
@@ -1100,6 +1105,7 @@ class Pipeline:
         is "nothing unreviewed gets spoken" do the opposite under a fault
         nobody would ever see coming.
         """
+        assert self.review_hook is not None
         try:
             return self.review_hook(text)
         except Exception:
@@ -1201,7 +1207,7 @@ class Pipeline:
     def running(self) -> bool:
         return self._running.is_set()
 
-    def status(self) -> dict:
+    def status(self) -> dict[str, Any]:
         return {
             "state": self.state.value,
             "mode": self.cfg.trigger.mode,

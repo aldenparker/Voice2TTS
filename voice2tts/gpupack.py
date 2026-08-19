@@ -21,7 +21,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .net import USER_AGENT
+from .net import USER_AGENT, ByteProgress, StepProgress
 from .paths import cuda_dir, whisper_cache
 
 log = logging.getLogger(__name__)
@@ -109,7 +109,8 @@ def _wheel_url(package: str, version: str, timeout: float = 20.0) -> tuple[str, 
     raise RuntimeError(f"no Windows wheel found for {package}")
 
 
-def _download(url: str, dest: Path, progress=None, timeout: float = 120.0) -> Path:
+def _download(url: str, dest: Path, progress: ByteProgress = None,
+              timeout: float = 120.0) -> Path:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         total = int(resp.headers.get("Content-Length") or 0)
@@ -152,7 +153,8 @@ def _extract_dlls(wheel: Path, dest_root: Path) -> int:
     return count
 
 
-def install(progress=None, fetch_model: bool = True) -> PackStatus:
+def install(progress: StepProgress = None,
+            fetch_model: bool = True) -> PackStatus:
     """Download and unpack the CUDA runtime. Returns the resulting status."""
 
     def say(msg: str) -> None:

@@ -41,7 +41,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .net import USER_AGENT
+from .net import USER_AGENT, ByteProgress, Json, StepProgress
 from .paths import japanese_dir
 
 log = logging.getLogger(__name__)
@@ -116,7 +116,7 @@ def _wheel_url(package: str, version: str,
     # tag is what decides.
     tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
 
-    def pick(entries):
+    def pick(entries: list[Json]) -> Json | None:
         for entry in entries:
             name = entry.get("filename", "")
             if name.endswith("win_amd64.whl") and tag in name:
@@ -141,7 +141,9 @@ def _wheel_url(package: str, version: str,
         "is newer than anything the phonemizer publishes.")
 
 
-def _download(url: str, dest: Path, progress=None, timeout: float = 180.0) -> Path:
+def _download(url: str, dest: Path,
+              progress: ByteProgress = None,
+              timeout: float = 180.0) -> Path:
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         total = int(response.headers.get("Content-Length") or 0)
@@ -182,7 +184,7 @@ def _extract(wheel: Path, dest_root: Path) -> int:
     return count
 
 
-def install(progress=None) -> PackStatus:
+def install(progress: StepProgress = None) -> PackStatus:
     """Download and unpack the phonemizer. Returns the resulting status."""
 
     def say(message: str) -> None:

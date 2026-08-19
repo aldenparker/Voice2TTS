@@ -60,19 +60,19 @@ class Profile:
         return f"{mode}, {voice}"
 
 
-def _get(cfg, path: str):
+def _get(cfg: Any, path: str) -> Any:
     section, _, name = path.partition(".")
     return getattr(getattr(cfg, section), name)
 
 
-def _set(cfg, path: str, value) -> None:
+def _set(cfg: Any, path: str, value: Any) -> None:
     section, _, name = path.partition(".")
     setattr(getattr(cfg, section), name, value)
 
 
-def capture(cfg, name: str) -> Profile:
+def capture(cfg: Any, name: str) -> Profile:
     """Snapshot the profiled fields of `cfg`."""
-    values = {}
+    values: dict[str, Any] = {}
     for path in PROFILED_FIELDS:
         try:
             values[path] = copy.deepcopy(_get(cfg, path))
@@ -81,7 +81,7 @@ def capture(cfg, name: str) -> Profile:
     return Profile(name=name, values=values)
 
 
-def apply(cfg, profile: Profile) -> list[str]:
+def apply(cfg: Any, profile: Profile) -> list[str]:
     """Write a profile into `cfg`. Returns the fields that actually changed."""
     changed = []
     for path, value in profile.values.items():
@@ -101,11 +101,11 @@ def apply(cfg, profile: Profile) -> list[str]:
     return changed
 
 
-def to_dict(profile: Profile) -> dict:
+def to_dict(profile: Profile) -> dict[str, Any]:
     return dataclasses.asdict(profile)
 
 
-def from_dict(data: dict) -> Profile:
+def from_dict(data: dict[str, Any]) -> Profile:
     return Profile(
         name=str(data.get("name", "")),
         values={k: v for k, v in (data.get("values") or {}).items()

@@ -133,7 +133,7 @@ def apply(root: tk.Misc, mode: Theme | str = Theme.NATIVE) -> Palette:
 
     p = palette
     try:
-        root.configure(bg=p.bg)
+        root.configure(bg=p.bg)  # type: ignore[call-arg]  # Misc in the stubs
     except tk.TclError:
         pass
 
