@@ -153,7 +153,8 @@ def _cmd_cli() -> int:
 
     pipeline = Pipeline(cfg, on_event=on_event)
     pipeline.start()
-    print(f"\nRunning in {cfg.trigger.mode} mode. Hotkey: {cfg.trigger.hotkey}")
+    print(f"\nRunning in {cfg.trigger.mode.value} mode. "
+          f"Hotkey: {cfg.trigger.hotkey}")
     print("Ctrl+C to stop.\n")
     try:
         while True:

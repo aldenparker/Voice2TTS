@@ -186,46 +186,10 @@ def is_english(voice_key: str) -> bool:
     return voice_language(voice_key) == ENGLISH_PREFIX
 
 
-def language_mismatch(voice_key: str, whisper_model: str,
-                      output_language: str = "") -> str:
-    """Return a warning if this voice cannot say what it is going to be given.
-
-    `output_language` is the language the TEXT will be in when it reaches the
-    voice. With translation on that is the target, not the language being
-    recognised -- so a Japanese voice is exactly right for English-to-Japanese,
-    and warning about it because the recogniser is English-only is nonsense.
-
-    Empty string means the pairing is fine.
-    """
-    if not voice_key:
-        return ""
-    family = voice_language(voice_key)
-    # Unknown language: say nothing. Warning on a guess is how a voice built in
-    # the Studio ended up being called foreign.
-    if not family:
-        return ""
-
-    if output_language:
-        if family == output_language:
-            return ""
-        return (
-            f"{voice_key} speaks {family}, but the text reaching it will be in "
-            f"{output_language}. It will mispronounce every word.\n\n"
-            f"Pick a {output_language} voice, or change the target language."
-        )
-
-    if not whisper_model:
-        return ""
-    english_model = whisper_model.endswith(".en")
-    if english_model and family != ENGLISH_PREFIX:
-        return (
-            f"{voice_key} is not an English voice, but the {whisper_model} "
-            "recognition model only understands English. Speech will be "
-            "transcribed as English and the result will be wrong.\n\n"
-            "Switch to a multilingual model (large-v3) in Recognition, or pick an "
-            "English voice."
-        )
-    return ""
+# language_mismatch() used to live here. It answered "is this voice wrong for
+# this recognition model", which is the wrong question the moment translation
+# is on -- and it was asked from four places that each passed it something
+# different. plan.build() answers the whole question once; see plan.py.
 
 
 @dataclass(frozen=True)

@@ -25,6 +25,12 @@ from voice2tts.config import OutputTarget, load_config  # noqa: E402
 from voice2tts.gui import SettingsWindow  # noqa: E402
 from voice2tts.icon import make_icon  # noqa: E402
 from voice2tts.logging_setup import setup_logging  # noqa: E402
+from voice2tts.modes import (  # noqa: E402
+    RecognitionMode,
+    TranslationMode,
+    TriggerMode,
+    WhisperTask,
+)
 from voice2tts.pipeline import Pipeline, State  # noqa: E402
 from voice2tts.substitutions import STARTER_RULES  # noqa: E402
 from voice2tts.wizard import Wizard  # noqa: E402
@@ -490,13 +496,16 @@ def main() -> int:
     win.trans_source.set("en")
     win.trans_target.set("de")
     win._collect()
-    check("with models, the chain is on and the recogniser transcribes",
-          cfg.translation.enabled and cfg.stt.task == "transcribe",
-          f"chain {cfg.translation.enabled}, task {cfg.stt.task}")
+    # One field with three values, so "both at once" is not a state the two
+    # widgets can produce. It used to be two booleans guarded only here.
+    check("with models, the chain translates and Whisper transcribes",
+          cfg.translation.mode is TranslationMode.MODELS
+          and win._current_plan().whisper_task is WhisperTask.TRANSCRIBE,
+          f"{cfg.translation.mode} / {win._current_plan().whisper_task}")
 
     # A multilingual model is what makes Whisper's own translation possible.
     win.model_var.set("small")
-    win.trans_method.set("whisper")
+    win.trans_method.set("recogniser")
     win._switch_translate_method()
     check("choosing the recogniser leaves the language pair alone",
           win._target_code() == "de", win.trans_target.get())
@@ -504,24 +513,26 @@ def main() -> int:
     win._switch_translate_method()
     check("and switching back still has it", win._target_code() == "de",
           win.trans_target.get())
-    win.trans_method.set("whisper")
+    win.trans_method.set("recogniser")
     win._switch_translate_method()
     win._collect()
-    check("the recogniser translates", cfg.stt.task == "translate", cfg.stt.task)
-    check("and the chain is off, so nothing translates twice",
-          not cfg.translation.enabled,
-          "translating an already-English sentence from English is nonsense")
+    check("the recogniser translates",
+          cfg.translation.mode is TranslationMode.RECOGNISER,
+          str(cfg.translation.mode))
+    check("and nothing can translate twice",
+          not win._current_plan().needs_chain,
+          "one field cannot hold both ways of translating at once")
 
     # An English-only model has nothing to translate from.
     win.model_var.set("base.en")
     win._collect()
     check("an English-only model refuses the translate task",
-          cfg.stt.task == "transcribe", cfg.stt.task)
+          cfg.translation.mode is TranslationMode.OFF, str(cfg.translation.mode))
     win.trans_enabled.set(True)
     win.trans_source.set("de")
     win._refresh_translate_route()
     check("and the route line explains it",
-          "English only" in win.trans_route.cget("text"),
+          "only understands English" in win.trans_route.cget("text"),
           win.trans_route.cget("text"))
 
     # Speaking English and asking the recogniser for English is a no-op, and
@@ -531,7 +542,7 @@ def main() -> int:
     win.trans_target.set("en")
     win._refresh_translate_route()
     check("English to English by the recogniser is called out",
-          "changes nothing" in win.trans_route.cget("text"),
+          "does nothing" in win.trans_route.cget("text"),
           win.trans_route.cget("text"))
 
     # base translates badly enough to be worth warning about -- measured, not
@@ -554,8 +565,9 @@ def main() -> int:
     win.trans_method.set("models")
     win._collect()
     check("turning translation off clears both",
-          not cfg.translation.enabled and cfg.stt.task == "transcribe",
-          f"chain {cfg.translation.enabled}, task {cfg.stt.task}")
+          cfg.translation.mode is TranslationMode.OFF
+          and win._current_plan().whisper_task is WhisperTask.TRANSCRIBE,
+          str(cfg.translation.mode))
 
     print("\n[matching the voice to the target]")
     from voice2tts import voices as voices_mod
@@ -619,7 +631,7 @@ def main() -> int:
           (cfg.translation.source, cfg.translation.target) == ("en", "de"),
           f"{cfg.translation.source} -> {cfg.translation.target}")
 
-    win.trans_method.set("whisper")
+    win.trans_method.set("recogniser")
     win._switch_translate_method()
     win._collect()
     win.trans_method.set("models")
@@ -627,7 +639,8 @@ def main() -> int:
     win._collect()
     check("trying the recogniser does not destroy the target",
           cfg.translation.target == "de", cfg.translation.target)
-    check("and translation is still on afterwards", cfg.translation.enabled,
+    check("and translation is still on afterwards",
+          cfg.translation.mode is TranslationMode.MODELS,
           "a target of 'en' would make validate() silently switch it off")
 
     # 2. A no-op pair unticks the box. Doing that silently looks like the
@@ -636,10 +649,14 @@ def main() -> int:
     win.trans_source.set("en (English)")
     win.trans_target.set("en (English)")
     win._apply()
-    check("a no-op pair switches translation off", not cfg.translation.enabled)
+    check("a no-op pair switches translation off",
+          cfg.translation.mode is TranslationMode.OFF, str(cfg.translation.mode))
     check("and says why rather than just unticking",
-          "not change anything" in win.trans_status.cget("text"),
+          "does nothing" in win.trans_status.cget("text"),
           win.trans_status.cget("text"))
+    check("and the tick box follows the setting rather than the request",
+          not win.trans_enabled.get(),
+          "a ticked box over a mode of OFF is the lie this sweep is about")
     win.trans_target.set("de (German)")
 
     # 3. With no model for the pair the text stays in the SOURCE language, so
@@ -647,21 +664,29 @@ def main() -> int:
     #    accent. The voice must follow what will actually be spoken.
     win.trans_enabled.set(True)
     win.trans_source.set("en (English)")
+    win.trans_target.set("de (German)")
     check("with a model, the voice should speak the target",
-          win._voice_should_speak("en", "de") == "de"
-          if translate.find_pair("en", "de") else True)
+          win._current_plan().spoken == "de"
+          if translate.find_pair("en", "de") else True,
+          win._current_plan().spoken)
+    win.trans_target.set("xx")
     check("with no model, the voice should stay on the source",
-          win._voice_should_speak("en", "xx") == "en",
+          win._current_plan().spoken == "en",
           "otherwise it reads English in a foreign accent")
+    win.trans_source.set("de (German)")
+    win.trans_target.set("fr")
+    win.trans_method.set("recogniser")
     check("and with the recogniser it is always English",
-          (win.trans_method.set("whisper"),
-           win._voice_should_speak("de", "fr"))[1] == "en")
+          win._current_plan().spoken == "en", win._current_plan().spoken)
     win.trans_method.set("models")
+    win.trans_source.set("en (English)")
+    win.trans_target.set("de (German)")
     win.trans_enabled.set(False)
     win._refresh_translate_route()
 
     print("\n[recognition mode]")
-    check("sentence mode is the default", cfg.stt.mode == "sentence",
+    check("sentence mode is the default",
+          cfg.stt.mode is RecognitionMode.SENTENCE,
           "streaming costs half a core the whole time you are talking")
     win.stt_mode_var.set("sentence")
     win._refresh_stt_mode()
@@ -695,16 +720,37 @@ def main() -> int:
     win.mute_var.set(True)
     check("the two notes differ", sentence_note != streaming_note)
 
+    # Streaming needs the VAD to say when speech starts, so the trigger has to
+    # allow it. With push-to-talk the pair is impossible and validate() pulls it
+    # apart -- which is the next check.
+    win.mode_var.set(TriggerMode.VAD.value)
     win._collect()
-    check("the mode is collected", cfg.stt.mode == "streaming", cfg.stt.mode)
+    check("the mode is collected",
+          cfg.stt.mode is RecognitionMode.STREAMING, str(cfg.stt.mode))
     win.stt_mode_var.set("sentence")
     win._collect()
-    check("and switches back", cfg.stt.mode == "sentence", cfg.stt.mode)
-    cfg.stt.mode = "streaming"
+    check("and switches back",
+          cfg.stt.mode is RecognitionMode.SENTENCE, str(cfg.stt.mode))
+
+    # Streaming under push-to-talk used to be accepted and merely logged, so
+    # picking it changed nothing at all and said nothing about it.
+    win.stt_mode_var.set("streaming")
+    win.mode_var.set(TriggerMode.PTT.value)
+    win._collect()
+    check("streaming under push-to-talk is refused, not ignored",
+          cfg.stt.mode is RecognitionMode.SENTENCE, str(cfg.stt.mode))
+    check("and the refusal is reported rather than logged",
+          any("push-to-talk" in str(r) for r in win._repairs),
+          str([str(r) for r in win._repairs]))
+    win._show_repairs()
+
+    win.mode_var.set(TriggerMode.VAD.value)
+    cfg.stt.mode = RecognitionMode.STREAMING
     win._load_from_config()
     check("and loads back into the radio buttons",
           win.stt_mode_var.get() == "streaming", win.stt_mode_var.get())
-    cfg.stt.mode = "sentence"
+    cfg.stt.mode = RecognitionMode.SENTENCE
+    cfg.trigger.mode = TriggerMode.PTT
     win._load_from_config()
 
     print("\n[recognition language]")
@@ -1357,8 +1403,8 @@ def main() -> int:
     root.update()
 
     current = win._current_plan()
-    check("the window knows it is translating", current.mode == "translate",
-          current.mode)
+    check("the window knows it is translating",
+          current.mode is TranslationMode.MODELS, str(current.mode))
     check("and that Japanese is what will be spoken",
           current.spoken == "ja" if translate.find_pair("en", "ja") else True,
           current.spoken)

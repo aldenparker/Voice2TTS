@@ -18,9 +18,10 @@ from tkinter import messagebox, ttk
 import pystray
 
 from . import theme
-from .config import Config, load_config
+from .config import Config, Repair, load_config
 from .gui import SettingsWindow
 from .icon import make_icon
+from .modes import TriggerMode
 from .pipeline import Pipeline, State
 from .platform_win import apply_tk_scaling, listen_for_activation
 from .speakbox import SpeakBox
@@ -72,11 +73,11 @@ class TrayApp:
     # -- menu -----------------------------------------------------------------
 
     def _menu(self) -> pystray.Menu:
-        def mode_item(label: str, mode: str) -> pystray.MenuItem:
+        def mode_item(label: str, mode: TriggerMode) -> pystray.MenuItem:
             return pystray.MenuItem(
                 label,
                 lambda _i, _it: self._post(self._set_mode, mode),
-                checked=lambda _it, m=mode: self.cfg.trigger.mode == m,
+                checked=lambda _it, m=mode: self.cfg.trigger.mode is m,
                 radio=True,
             )
 
@@ -90,9 +91,9 @@ class TrayApp:
             pystray.MenuItem(
                 "Mode",
                 pystray.Menu(
-                    mode_item("Push to talk", "ptt"),
-                    mode_item("Automatic (VAD)", "vad"),
-                    mode_item("Both", "both"),
+                    mode_item("Push to talk", TriggerMode.PTT),
+                    mode_item("Automatic (VAD)", TriggerMode.VAD),
+                    mode_item("Both", TriggerMode.BOTH),
                 ),
             ),
             pystray.MenuItem("Type to speak...",
@@ -162,10 +163,30 @@ class TrayApp:
             )
         self._post(self.icon.update_menu)
 
-    def _set_mode(self, mode: str) -> None:
-        self.pipeline.set_mode(mode)
+    def _set_mode(self, mode: TriggerMode) -> None:
+        self.pipeline.set_mode(mode)   # validates, and says what it had to fix
+        self._show_repairs(self.cfg.repairs)
         self.cfg.save()
         self.icon.update_menu()
+
+    def _show_repairs(self, repairs: list[Repair]) -> None:
+        """Tell the user what the app could not do with their settings.
+
+        These used to go to the log and nowhere else, which meant a config whose
+        translation had been switched off looked exactly like one that was
+        working -- right down to the tick still being in the box. They are rare
+        by construction: a repair means something was genuinely wrong.
+        """
+        if not repairs:
+            return
+        for repair in repairs:
+            self._on_event("warning", str(repair))
+        repairs = list(repairs)
+        self.cfg.repairs = []
+        self._post(
+            messagebox.showwarning, "Voice2TTS settings",
+            "Some settings could not be used as saved:\n\n"
+            + "\n\n".join(f"\u2022 {r}" for r in repairs))
 
     def _speak_prompt(self) -> None:
         """Open the type-to-speak box, or bring it forward if already open."""
@@ -193,7 +214,10 @@ class TrayApp:
         done = threading.Event()
         self._post(self._show_review, text, decision, done)
 
-        timeout = self.cfg.text.review_timeout_s or None
+        # No `or None`: a zero here means Event.wait() never times out, so a
+        # review window lost behind a game held the pipeline open forever. The
+        # config cannot hold a zero any more, and this must not reintroduce one.
+        timeout = max(1.0, float(self.cfg.text.review_timeout_s))
         if not done.wait(timeout):
             log.info("review timed out after %ss; discarding", timeout)
             self._post(self._close_review)
@@ -424,6 +448,7 @@ class TrayApp:
             self.pipeline.apply_audio_changes()
             self.pipeline.apply_tts_changes()
             self.pipeline.set_mode(self.cfg.trigger.mode)
+            self._show_repairs(self.cfg.repairs)
         else:
             threading.Thread(target=self._start_pipeline, daemon=True).start()
 

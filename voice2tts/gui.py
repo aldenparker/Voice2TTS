@@ -27,7 +27,6 @@ from . import (
     voices,
 )
 from .config import (
-    MODES,
     WHISPER_MODELS,
     Config,
     OutputTarget,
@@ -36,6 +35,7 @@ from .config import (
 )
 from .diagnostics import diagnostics
 from .hotkey import describe
+from .modes import RecognitionMode, SttDevice, Theme, TranslationMode, TriggerMode
 from .paths import config_path, is_frozen, list_voices, log_path
 from .pipeline import Pipeline
 from .platform_win import run_at_login, set_run_at_login
@@ -557,13 +557,15 @@ class SettingsWindow(tk.Toplevel):
         )
         self.mode_var = tk.StringVar()
         labels = {
-            "ptt": "Push to talk only",
-            "vad": "Automatic (voice activity detection)",
-            "both": "Both — automatic, plus the hotkey",
+            TriggerMode.PTT: "Push to talk only",
+            TriggerMode.VAD: "Automatic (voice activity detection)",
+            TriggerMode.BOTH: "Both — automatic, plus the hotkey",
         }
-        for i, mode in enumerate(MODES):
+        # Over the enum, not a copy of its values: a mode added to modes.py that
+        # nobody offered here is how the list came to be written out four times.
+        for i, mode in enumerate(TriggerMode):
             ttk.Radiobutton(
-                tab, text=labels[mode], value=mode, variable=self.mode_var,
+                tab, text=labels[mode], value=mode.value, variable=self.mode_var,
                 command=self._on_mode_change,
             ).grid(row=1 + i, column=0, columnspan=3, sticky="w")
 
@@ -748,6 +750,25 @@ class SettingsWindow(tk.Toplevel):
         ttk.Button(tab, text="Speak", command=self._speak_test).grid(row=6, column=2)
         tab.columnconfigure(1, weight=1)
 
+    def _trans_mode(self) -> TranslationMode:
+        """The one setting the tick box and the two radio buttons stand for.
+
+        Two widgets are the right interface -- "translate" and "how" are
+        separate questions to a person -- but they are one fact, and this is the
+        only place that turns them back into it. They used to be turned into two
+        config fields that could contradict each other.
+        """
+        if not hasattr(self, "trans_enabled") or not self.trans_enabled.get():
+            return TranslationMode.OFF
+        return (TranslationMode.parse(self.trans_method.get())
+                or TranslationMode.MODELS)
+
+    def _show_trans_mode(self, mode: TranslationMode) -> None:
+        """Point the two widgets at one mode. The inverse of _trans_mode."""
+        self.trans_enabled.set(mode.translating)
+        if mode.translating:
+            self.trans_method.set(mode.value)
+
     def _current_plan(self):
         """What the app would do with the settings as they are shown.
 
@@ -760,20 +781,16 @@ class SettingsWindow(tk.Toplevel):
 
         cfg = self.cfg
         stt, translation = cfg.stt, cfg.translation
-        by_recogniser = (hasattr(self, "trans_method")
-                         and self.trans_method.get() == "whisper"
-                         and self.trans_enabled.get())
         if hasattr(self, "model_var"):
             stt = replace(
                 stt,
                 model=self.model_var.get().strip() or stt.model,
                 language=self.stt_lang_var.get().strip() or stt.language,
-                task="translate" if by_recogniser else "transcribe",
             )
         if hasattr(self, "trans_enabled"):
             translation = replace(
                 translation,
-                enabled=self.trans_enabled.get() and not by_recogniser,
+                mode=self._trans_mode(),
                 source=self._source_code(),
                 target=self._target_code(),
             )
@@ -1039,12 +1056,14 @@ class SettingsWindow(tk.Toplevel):
         # recognition. It is strictly worse than a dedicated model for quality,
         # and cannot do anything but English -- but it needs no download, which
         # makes it the right default for the one case it covers.
-        self.trans_method = tk.StringVar(value="models")
+        self.trans_method = tk.StringVar(value=TranslationMode.MODELS.value)
         ttk.Label(method, text="Using:").pack(side="left", padx=(0, 6))
-        ttk.Radiobutton(method, text="Downloaded models", value="models",
+        ttk.Radiobutton(method, text="Downloaded models",
+                        value=TranslationMode.MODELS.value,
                         variable=self.trans_method,
                         command=self._switch_translate_method).pack(side="left")
-        ttk.Radiobutton(method, text="The recogniser (English only)", value="whisper",
+        ttk.Radiobutton(method, text="The recogniser (English only)",
+                        value=TranslationMode.RECOGNISER.value,
                         variable=self.trans_method,
                         command=self._switch_translate_method).pack(
             side="left", padx=(8, 0))
@@ -1192,94 +1211,29 @@ class SettingsWindow(tk.Toplevel):
         self._check_language()
 
     def _render_route(self) -> None:
-        """Say what will happen, including every reason it might not work."""
-        from . import translate
+        """Say what will happen, including every reason it might not work.
 
-        source, target = self._source_code(), self._target_code()
-        # The widget, not the config: this describes what is selected now, so it
-        # must not wait for Apply to catch up with the Recognition tab. That tab
-        # is built after this one, so during construction there is no widget yet.
-        stt_model = (self.model_var.get() if hasattr(self, "model_var")
-                     else self.cfg.stt.model)
-        self._update_voice_button(self._voice_should_speak(source, target))
-        if not self.trans_enabled.get():
+        Renders the plan; it does not work one out. This used to be ninety lines
+        of its own reasoning about models, routes, pivots and voices, running
+        beside plan.build()'s -- and the two disagreed, which is the whole
+        reason this sweep happened. Everything it used to decide now lives in
+        plan.build() and is decided once.
+        """
+        current = self._current_plan()
+        self._update_voice_button(current.spoken if current.translating else "")
+
+        if not current.translating:
             self.trans_route.config(
                 text="Translation is off; your own words are spoken as recognised.",
-                foreground="#555")
-            return
-        # The recogniser branch first: it always produces English, so the
-        # same-language check below would report "does nothing" and hide the
-        # reason that actually matters -- an English-only recognition model.
-        if self.trans_method.get() == "whisper":
-            notes = []
-            if stt_model.endswith(".en"):
-                notes.append(f"{stt_model} hears English only, so there "
-                             "is nothing to translate -- pick a multilingual "
-                             "model on the Recognition tab")
-            elif stt_model in ("tiny", "base"):
-                # Measured on synthesized German: base returns "can you be nice
-                # to me?" for "kannst du mich hoeren?". small gets it right, at
-                # about 1.1 s per utterance on this CPU against base's 0.36 s.
-                notes.append(f"{stt_model} is too small to translate well -- "
-                             "small or better is worth the extra second")
-            if target != "en":
-                notes.append("the recogniser can only produce English")
-            elif source == "en":
-                notes.append("you are already speaking English, so this changes "
-                             "nothing")
-            self.trans_route.config(
-                text=f"{translate.language_name(source)} → English, by the "
-                     "recogniser. No download, lower quality than a dedicated "
-                     "model." + ("\nNote: " + "; ".join(notes) if notes else ""),
-                foreground="#a60" if notes else "#070")
+                foreground=self.palette.muted)
             return
 
-        if source == target:
-            self.trans_route.config(
-                text="Speaking and hearing the same language does nothing.",
-                foreground="#a00")
-            return
-
-        hops = translate.route(source, target)
-        if not hops:
-            self.trans_route.config(
-                text=f"No model for {translate.language_name(source)} to "
-                     f"{translate.language_name(target)}. Load the catalogue and "
-                     "download one below.",
-                foreground="#a00")
-            return
-
-        notes = []
-        if len(hops) > 1:
-            notes.append(f"goes through {translate.language_name(hops[0].target)}, "
-                         "which compounds errors")
-        if stt_model.endswith(".en") and source != "en":
-            notes.append(f"the {stt_model} recogniser hears English only "
-                         "-- pick a multilingual model on the Recognition tab")
-        # A voice that speaks a different language than the text produces
-        # confident gibberish, which is worse than an error.
-        unspeakable = voices.missing_phonemizer(self.voice_var.get().strip())
-        if unspeakable:
-            notes.append(unspeakable)
-
-        spoken_by_voice = self._voice_language()
-        if spoken_by_voice and spoken_by_voice != target:
-            fix = self._matching_voice(target)
-            notes.append(
-                f"the selected voice speaks "
-                f"{translate.language_name(spoken_by_voice)}, not "
-                f"{translate.language_name(target)} -- it will mispronounce "
-                "the output" + (f" (use {fix})" if fix else
-                                "; the Voice library tab can fetch one"))
-
-        route_text = " → ".join(
-            [translate.language_name(source)]
-            + [translate.language_name(hop.target) for hop in hops])
-        if notes:
-            self.trans_route.config(text=route_text + "\nNote: " + "; ".join(notes),
-                                    foreground="#a60")
-        else:
-            self.trans_route.config(text=route_text, foreground="#070")
+        notes = [problem.text for problem in current.problems]
+        text = current.summary + ("\nNote: " + " ".join(notes) if notes else "")
+        self.trans_route.config(
+            text=text,
+            foreground=("#a00" if current.serious
+                        else "#a60" if notes else "#070"))
 
     def _matching_voice(self, language: str) -> str | None:
         """An installed voice that speaks `language`, or None."""
@@ -1287,24 +1241,6 @@ class SettingsWindow(tk.Toplevel):
             return None
         return next((key for key in voices.installed_keys()
                      if voices.voice_language(key) == language), None)
-
-    def _voice_should_speak(self, source: str, target: str) -> str:
-        """The language the voice will actually be reading, or "" if unchanged.
-
-        Not simply the target. With translation on but no model for the pair,
-        the text stays in the SOURCE language -- so offering a German voice
-        there produced exactly what it sounds like: English read with a German
-        accent. The voice should only follow the target once something can
-        actually produce that language.
-        """
-        from . import translate
-
-        if not self.trans_enabled.get():
-            return ""
-        if self.trans_method.get() == "whisper":
-            # The recogniser only ever emits English.
-            return "en"
-        return target if translate.route(source, target) else source
 
     def _update_voice_button(self, wanted: str) -> None:
         """Offer the fix only when there is one to offer."""
@@ -1319,8 +1255,11 @@ class SettingsWindow(tk.Toplevel):
 
     def _use_matching_voice(self) -> None:
         """Switch to a voice that speaks the target language."""
-        wanted = ("en" if self.trans_method.get() == "whisper"
-                  else self._target_code())
+        # plan.spoken, not the target: with translation on but no model for
+        # the pair, the text stays in the SOURCE language, and offering a German
+        # voice there produced exactly what it sounds like -- English read with
+        # a German accent.
+        wanted = self._current_plan().spoken
         match = self._matching_voice(wanted)
         if match is None:
             self.trans_status.config(
@@ -1416,7 +1355,7 @@ class SettingsWindow(tk.Toplevel):
                 self.trans_status.config(text=f"Installed {label}")
                 # A model that arrives while translation is already on should
                 # start working without a restart.
-                if self.cfg.translation.enabled:
+                if self.cfg.translation.mode is TranslationMode.MODELS:
                     self.pipeline.apply_translation_changes()
 
             self._later(done)
@@ -1440,7 +1379,7 @@ class SettingsWindow(tk.Toplevel):
         if translate.remove_pair(source, target):
             self.trans_status.config(text=f"Removed {label}")
             # If the running chain was using it, it has to let go.
-            if self.cfg.translation.enabled:
+            if self.cfg.translation.mode is TranslationMode.MODELS:
                 self.pipeline.apply_translation_changes()
         else:
             self.trans_status.config(text="It was not installed.")
@@ -2640,7 +2579,7 @@ class SettingsWindow(tk.Toplevel):
                   foreground=self.palette.muted).pack(side="left")
 
     def _change_theme(self) -> None:
-        self.cfg.theme = self.theme_var.get()
+        self.cfg.theme = Theme.parse(self.theme_var.get()) or Theme.NATIVE
         self.palette = theme.apply(self.winfo_toplevel(), self.cfg.theme)
         for widget in (self.logbox, self.transcript, self.update_notes):
             theme.style_text_widget(widget, self.palette)
@@ -2714,7 +2653,7 @@ class SettingsWindow(tk.Toplevel):
         self.output_count.set(len(self._output_rows))
         self._update_cable_hint()
 
-        self.mode_var.set(c.trigger.mode)
+        self.mode_var.set(c.trigger.mode.value)
         self.hotkey_var.set(c.trigger.hotkey)
         self.clip_hotkey_var.set(c.trigger.clipboard_hotkey)
         self.stop_hotkey_var.set(c.trigger.stop_hotkey)
@@ -2732,7 +2671,7 @@ class SettingsWindow(tk.Toplevel):
         self.volume_var.set(c.tts.volume)
 
         self.model_var.set(c.stt.model)
-        self.stt_device_var.set(c.stt.device)
+        self.stt_device_var.set(c.stt.device.value)
         self.beam_var.set(c.stt.beam_size)
 
         self.review_var.set(c.text.review_before_speaking)
@@ -2751,11 +2690,9 @@ class SettingsWindow(tk.Toplevel):
         self._render_subs()
 
         self.stt_lang_var.set(c.stt.language)
-        self.stt_mode_var.set(c.stt.mode)
+        self.stt_mode_var.set(c.stt.mode.value)
         self._refresh_stt_mode()
-        self.trans_method.set(
-            "whisper" if c.stt.task == "translate" else "models")
-        self.trans_enabled.set(c.translation.enabled)
+        self._show_trans_mode(c.translation.mode)
         self.trans_source.set(self._language_label(c.translation.source))
         self.trans_target.set(self._language_label(c.translation.target))
         self._refresh_translate_list()
@@ -2790,7 +2727,7 @@ class SettingsWindow(tk.Toplevel):
             for r in self._output_rows
         ]
 
-        c.trigger.mode = self.mode_var.get()
+        c.trigger.mode = TriggerMode.parse(self.mode_var.get()) or TriggerMode.PTT
         c.trigger.hotkey = self.hotkey_var.get().strip()
         c.trigger.clipboard_hotkey = self.clip_hotkey_var.get().strip()
         c.trigger.stop_hotkey = self.stop_hotkey_var.get().strip()
@@ -2806,7 +2743,7 @@ class SettingsWindow(tk.Toplevel):
         c.tts.volume = round(float(self.volume_var.get()), 3)
 
         c.stt.model = self.model_var.get().strip()
-        c.stt.device = self.stt_device_var.get()
+        c.stt.device = SttDevice.parse(self.stt_device_var.get()) or SttDevice.AUTO
         c.stt.beam_size = int(self.beam_var.get())
 
         c.text.substitutions_enabled = self.subs_enabled_var.get()
@@ -2816,12 +2753,13 @@ class SettingsWindow(tk.Toplevel):
         c.text.review_timeout_s = max(5.0, float(self.review_timeout_var.get()))
 
         c.stt.language = self.stt_lang_var.get().strip() or "en"
-        c.stt.mode = self.stt_mode_var.get()
-        by_whisper = self.trans_method.get() == "whisper"
-        c.stt.task = "translate" if (by_whisper and self.trans_enabled.get())             else "transcribe"
-        # Exclusive: running both would translate the text twice, the second
-        # time from a language it is no longer in.
-        c.translation.enabled = self.trans_enabled.get() and not by_whisper
+        c.stt.mode = (RecognitionMode.parse(self.stt_mode_var.get())
+                      or RecognitionMode.SENTENCE)
+        # One field, so "translate twice" is not a state this can produce. It
+        # used to write two, guarded only here, and a config edited by hand or
+        # written by a profile got Whisper translating to English and then a
+        # model chain translating that again.
+        c.translation.mode = self._trans_mode()
         c.translation.source = self._source_code()
         c.translation.target = self._target_code()
 
@@ -2829,7 +2767,7 @@ class SettingsWindow(tk.Toplevel):
         c.updates.check_on_start = self.check_start_var.get()
         c.updates.interval_hours = int(self.interval_var.get())
         c.updates.include_prereleases = bool(self.beta_var.get())
-        c.validate()
+        self._repairs = c.validate()
         self.repo_var.set(c.updates.repo)  # reflect any normalisation back to the UI
         return True
 
@@ -2844,27 +2782,25 @@ class SettingsWindow(tk.Toplevel):
         active = self.pipeline.apply_text_changes()
         self.subs_status.config(text=f"{active} rule(s) active")
         self.pipeline.apply_translation_changes()
-        # validate() can switch translation off (a no-op pair), so the checkbox
-        # has to be told rather than left claiming something else.
-        if self.trans_method.get() != "whisper":
-            wanted = self.trans_enabled.get()
-            self.trans_enabled.set(self.cfg.translation.enabled)
-            if wanted and not self.cfg.translation.enabled:
-                # validate() refuses a pair that cannot do anything. Unticking
-                # the box without a word looks like the button is broken.
-                self.trans_status.config(
-                    text="Translation stays off: "
-                         f"{self._language_label(self._source_code())} to "
-                         f"{self._language_label(self._target_code())} would "
-                         "not change anything. Pick a different target.")
-        elif self.cfg.stt.task != "translate":
-            # validate() refused it -- an English-only model has nothing to
-            # translate from. Say so rather than leaving the box ticked.
-            self.trans_enabled.set(False)
+        # validate() can refuse what was asked for -- a no-op language pair, an
+        # English-only model with nothing to translate from. Point the widgets
+        # at what it actually settled on and say what it changed, rather than
+        # unticking a box without a word and looking broken.
+        self._show_trans_mode(self.cfg.translation.mode)
+        self._show_repairs()
         self._refresh_translate_route()
         # set_mode rebinds every hotkey from the config, so the clipboard and stop
         # combos are picked up along with the push-to-talk one.
         self.pipeline.set_mode(self.cfg.trigger.mode)
+
+    def _show_repairs(self) -> None:
+        """Say what validate() had to change, in the window that changed it."""
+        repairs = getattr(self, "_repairs", [])
+        for repair in repairs:
+            self.append_log("warning", str(repair))
+        if repairs:
+            self.trans_status.config(text=str(repairs[0]))
+        self._repairs = []
 
     def _save(self) -> None:
         if not self._collect():

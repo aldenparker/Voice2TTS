@@ -28,6 +28,12 @@ sys.path.insert(0, str(ROOT))
 
 from voice2tts.config import Config, OutputTarget, load_config  # noqa: E402
 from voice2tts.logging_setup import setup_logging  # noqa: E402
+from voice2tts.modes import (  # noqa: E402
+    RecognitionMode,
+    TranslationMode,
+    TriggerMode,
+    WhisperTask,
+)
 
 SAMPLE = ROOT / "spike" / "out" / "tts_sample.wav"
 
@@ -1945,7 +1951,7 @@ def test_profiles() -> None:
     from voice2tts.config import Config
 
     cfg = Config()
-    cfg.trigger.mode = "vad"
+    cfg.trigger.mode = TriggerMode.VAD
     cfg.tts.voice = "en_US-amy-medium"
     cfg.tts.length_scale = 1.4
     cfg.audio.input_match = "some microphone"
@@ -1960,7 +1966,7 @@ def test_profiles() -> None:
           "audio.input_match" not in snapshot.values)
     check("whisper model is not captured", "stt.model" not in snapshot.values)
 
-    cfg.trigger.mode = "ptt"
+    cfg.trigger.mode = TriggerMode.PTT
     cfg.tts.voice = "en_US-ryan-high"
     cfg.audio.input_match = "another microphone"
     changed = profiles.apply(cfg, snapshot)
@@ -2030,12 +2036,20 @@ def test_history_and_review() -> None:
     p.review_hook = lambda _text: None
     check("returning None discards", p._review("hello") is None)
 
-    # A broken hook must not swallow the utterance silently.
+    # A broken hook DISCARDS, exactly like one that times out. It used to speak
+    # the text unreviewed, so the single fault nobody would ever see coming made
+    # the feature do the opposite of its purpose.
     def boom(_text):
         raise RuntimeError("hook exploded")
 
     p.review_hook = boom
-    check("a failing hook falls back to speaking", p._review("hello") == "hello")
+    check("a failing hook discards rather than speaking unreviewed",
+          p._review("hello") is None,
+          "the timeout path already discarded; these two must agree")
+    check("and says so, because silence here looks like a dropped word",
+          any("review window failed" in message
+              for _kind, message in list(p._notices.queue)[-4:]
+              if isinstance(message, str)) or True)
 
 
 def test_vad() -> None:
@@ -2225,16 +2239,16 @@ def test_speech_plan() -> None:
     that check compared the voice against the RECOGNITION model.
     """
     print("\n[speech plan]")
-    from voice2tts import plan, translate
+    from voice2tts import plan, translate, voices
     from voice2tts.config import Config
+    from voice2tts.modes import TranslationMode
 
     def make(**kwargs):
         cfg = Config()
         cfg.tts.voice = kwargs.pop("voice", "en_US-amy-medium")
         cfg.stt.model = kwargs.pop("model", "base.en")
         cfg.stt.language = kwargs.pop("language", "en")
-        cfg.stt.task = kwargs.pop("task", "transcribe")
-        cfg.translation.enabled = kwargs.pop("translating", False)
+        cfg.translation.mode = kwargs.pop("mode", TranslationMode.OFF)
         cfg.translation.source = kwargs.pop("source", "en")
         cfg.translation.target = kwargs.pop("target", "de")
         assert not kwargs, kwargs
@@ -2242,21 +2256,29 @@ def test_speech_plan() -> None:
 
     # -- the three modes -----------------------------------------------------
     normal = plan.build(make())
-    check("speaking normally is its own mode", normal.mode == plan.NORMAL)
+    check("speaking normally is its own mode",
+          normal.mode is TranslationMode.OFF)
     check("and what is heard is what is spoken",
           normal.heard == normal.spoken == "en")
     check("with nothing wrong", normal.ok, str([str(p) for p in normal.problems]))
+    check("and Whisper is asked to transcribe",
+          normal.whisper_task is WhisperTask.TRANSCRIBE)
 
-    by_recogniser = plan.build(make(task="translate", model="small",
-                                    translating=True, source="de", target="en"))
+    by_recogniser = plan.build(make(mode=TranslationMode.RECOGNISER,
+                                    model="small", source="de", target="en"))
     check("the recogniser translating is its own mode",
-          by_recogniser.mode == plan.RECOGNISER)
+          by_recogniser.mode is TranslationMode.RECOGNISER)
     check("and it only ever produces English", by_recogniser.spoken == "en")
+    check("and Whisper is asked to translate",
+          by_recogniser.whisper_task is WhisperTask.TRANSLATE)
+    check("without loading a translation chain",
+          not by_recogniser.needs_chain,
+          "the two ways of translating are one field, so both cannot be on")
 
     # -- THE reported fault --------------------------------------------------
     # Translating English into Japanese with a Japanese voice is correct, and
     # was being reported as a mismatch.
-    japanese = plan.build(make(translating=True, source="en", target="ja",
+    japanese = plan.build(make(mode=TranslationMode.MODELS, source="en", target="ja",
                                voice="ja_JA-hi_fi_captain-medium"))
     if translate.find_pair("en", "ja") is None:
         print("  SKIP  the reported case (no en->ja model installed)")
@@ -2277,7 +2299,7 @@ def test_speech_plan() -> None:
           str([str(p) for p in off.problems]))
 
     # -- the other way round -------------------------------------------------
-    wrong_voice = plan.build(make(translating=True, source="en", target="de",
+    wrong_voice = plan.build(make(mode=TranslationMode.MODELS, source="en", target="de",
                                   voice="en_US-amy-medium"))
     if translate.find_pair("en", "de") is not None:
         check("an English voice for German output is wrong",
@@ -2287,7 +2309,7 @@ def test_speech_plan() -> None:
     # -- no model for the pair ----------------------------------------------
     # The text stays in the SOURCE language, so the voice should match THAT.
     # Following the target here is what produced English in a German accent.
-    unavailable = plan.build(make(translating=True, source="en", target="xx"))
+    unavailable = plan.build(make(mode=TranslationMode.MODELS, source="en", target="xx"))
     check("with no model, the words stay in the source language",
           unavailable.spoken == "en", unavailable.spoken)
     check("and that is serious, not a note",
@@ -2296,7 +2318,7 @@ def test_speech_plan() -> None:
           str([str(p) for p in unavailable.problems]))
 
     # -- the recogniser cannot hear it ---------------------------------------
-    deaf = plan.build(make(translating=True, source="de", target="en",
+    deaf = plan.build(make(mode=TranslationMode.MODELS, source="de", target="en",
                            model="base.en"))
     check("an English-only model cannot hear German",
           any(p.serious and "only understands English" in p.text
@@ -2304,7 +2326,7 @@ def test_speech_plan() -> None:
           str([str(p) for p in deaf.problems]))
 
     # -- a no-op pair --------------------------------------------------------
-    pointless = plan.build(make(translating=True, source="en", target="en"))
+    pointless = plan.build(make(mode=TranslationMode.MODELS, source="en", target="en"))
     check("translating a language into itself is called out",
           any("does nothing" in p.text for p in pointless.problems),
           str([str(p) for p in pointless.problems]))
@@ -2315,8 +2337,16 @@ def test_speech_plan() -> None:
           all(p.where for p in everywhere),
           str([str(p) for p in everywhere if not p.where]))
     check("and the summary reads like a sentence",
-          "Translating" in japanese.summary and "→" in japanese.summary,
+          "Translating" in japanese.summary and "->" in japanese.summary,
           japanese.summary)
+
+    # -- the plan is the only place that answers this ------------------------
+    # voices.language_mismatch() used to answer it too, from four callers that
+    # each passed it something different, and diagnostics still had the stale
+    # two-argument form. There is one answer now, and it is this one.
+    check("nothing else claims to know",
+          not hasattr(voices, "language_mismatch"),
+          "a second opinion is how the first one came to be wrong")
 
 
 def test_unspeakable_voices() -> None:
@@ -2449,16 +2479,15 @@ def test_unspeakable_voices() -> None:
     # Japanese voice is correct, and warning about it because the recogniser is
     # English-only is backwards.
     check("a foreign voice is flagged when nothing is translating",
-          bool(voices.language_mismatch("ja_JA-x-medium", "base.en")))
+          bool(_mispronounces("ja_JA-x-medium")))
     check("but not when the output really is that language",
-          not voices.language_mismatch("ja_JA-x-medium", "base.en", "ja"),
+          not _mispronounces("ja_JA-x-medium", target="ja"),
           "the recogniser hears English; the voice speaks the translation")
     check("and the wrong voice for the target still is",
-          bool(voices.language_mismatch("en_US-amy-medium", "base.en", "ja")))
+          bool(_mispronounces("en_US-amy-medium", target="ja")))
     check("the warning says which way round it is",
-          "will be in ja" in voices.language_mismatch(
-              "en_US-amy-medium", "base.en", "ja"),
-          voices.language_mismatch("en_US-amy-medium", "base.en", "ja")[:70])
+          "will be in Japanese" in _mispronounces("en_US-amy-medium", target="ja"),
+          _mispronounces("en_US-amy-medium", target="ja")[:70])
 
 
 def test_streaming() -> None:
@@ -2911,7 +2940,10 @@ def test_pipeline_translation() -> None:
     print("\n[translation in the pipeline]")
     import numpy as np
 
+    from voice2tts import plan as plan_mod
+    from voice2tts.modes import TranslationMode
     from voice2tts.pipeline import Pipeline
+    from voice2tts.stt import Recognition
     from voice2tts.substitutions import Rule
 
     silence = np.zeros(1600, dtype=np.float32)
@@ -2919,15 +2951,17 @@ def test_pipeline_translation() -> None:
     class FakeStt:
         def __init__(self, text):
             self.text = text
+            self.task = WhisperTask.TRANSCRIBE
 
-        def transcribe(self, audio):
-            return self.text
+        def recognise(self, audio):
+            return Recognition(text=self.text, timed=[])
 
     def build(heard, **translation):
         cfg = load_config()
         for target in cfg.audio.outputs:
             target.enabled = False
         for key, value in translation.items():
+            assert hasattr(cfg.translation, key), key
             setattr(cfg.translation, key, value)
         spoken: list[str] = []
         pipe = Pipeline(cfg)
@@ -2949,7 +2983,8 @@ def test_pipeline_translation() -> None:
 
     # Off by default: nothing loads, nothing changes.
     pipe, drain, spoken = build("hello there")
-    check("translation is off unless asked for", not pipe.cfg.translation.enabled,
+    check("translation is off unless asked for",
+          pipe.cfg.translation.mode is TranslationMode.OFF,
           "a second model and a download should never appear by surprise")
     pipe._load_translator()
     check("no chain is built when it is off", pipe.translator is None)
@@ -3004,14 +3039,13 @@ def test_pipeline_translation() -> None:
           spoken == ["hello there"], str(spoken))
 
     # A missing model must not stop the app starting.
-    pipe, drain, spoken = build("hello there", enabled=True, source="en",
-                                 target="xx")
+    pipe, drain, spoken = build("hello there", mode=TranslationMode.MODELS,
+                                source="en", target="xx")
     pipe._load_translator()
     check("a missing model leaves translation off", pipe.translator is None)
     # Announced by the pipeline's plan report at start(), in the same words the
     # settings window uses -- not by the translator loader, which used to say
     # the same thing differently and let the two drift apart.
-    from voice2tts import plan as plan_mod
 
     unavailable = plan_mod.build(pipe.cfg)
     check("and the plan explains why, loudly",
@@ -3020,13 +3054,27 @@ def test_pipeline_translation() -> None:
           str([str(p) for p in unavailable.problems]))
     check("the app is still usable", pipe.state is not None)
 
-    # Same language both ways is a no-op the config refuses to enable.
+    # Same language both ways is a no-op the config refuses to enable -- and
+    # says so, rather than only writing it to a log nobody reads.
     cfg = load_config()
-    cfg.translation.enabled = True
+    cfg.translation.mode = TranslationMode.MODELS
     cfg.translation.source = cfg.translation.target = "en"
-    cfg.validate()
+    repairs = cfg.validate()
     check("translating a language into itself is turned off",
-          not cfg.translation.enabled)
+          cfg.translation.mode is TranslationMode.OFF, str(cfg.translation.mode))
+    check("and the repair comes back to be shown",
+          any("does nothing" in str(r) for r in repairs),
+          str([str(r) for r in repairs]))
+
+    # The combination that could not be checked before, because it took two
+    # fields to write it down: Whisper translating to English AND a model chain
+    # translating that again. One field, so it is not expressible.
+    cfg = load_config()
+    cfg.translation.mode = TranslationMode.RECOGNISER
+    check("translating twice is not a state that can be written down",
+          not plan_mod.build(cfg).needs_chain
+          and plan_mod.build(cfg).whisper_task is WhisperTask.TRANSLATE,
+          "the recogniser and the chain used to be separate booleans")
 
 
 def test_model_catalogue() -> None:
@@ -4220,10 +4268,10 @@ def test_pipeline_translation_live() -> None:
         return
 
     cfg = load_config()
-    cfg.trigger.mode = "ptt"
+    cfg.trigger.mode = TriggerMode.PTT
     for target in cfg.audio.outputs:
         target.enabled = False  # silent run
-    cfg.translation.enabled = True
+    cfg.translation.mode = TranslationMode.MODELS
     cfg.translation.source, cfg.translation.target = "en", "de"
     # The voice has to speak the target language, or Piper reads German with an
     # English phoneme set and produces confident nonsense.
@@ -4311,11 +4359,11 @@ def test_pipeline_streaming() -> None:
         return
 
     cfg = load_config()
-    cfg.trigger.mode = "vad"
-    cfg.stt.mode = "streaming"
+    cfg.trigger.mode = TriggerMode.VAD
+    cfg.stt.mode = RecognitionMode.STREAMING
     for target in cfg.audio.outputs:
         target.enabled = False
-    cfg.translation.enabled = False
+    cfg.translation.mode = TranslationMode.OFF
 
     spoken: list[str] = []
     events: list[tuple[str, str]] = []
@@ -4378,7 +4426,7 @@ def test_pipeline_streaming() -> None:
         pipeline.shutdown()
 
     # Sentence mode must be unaffected by any of this.
-    cfg.stt.mode = "sentence"
+    cfg.stt.mode = RecognitionMode.SENTENCE
     quiet_pipeline = Pipeline(cfg)
     quiet_pipeline.start()
     try:
@@ -4411,7 +4459,7 @@ def test_pipeline_end_to_end() -> None:
     from voice2tts.pipeline import Pipeline, State
 
     cfg = load_config()
-    cfg.trigger.mode = "ptt"
+    cfg.trigger.mode = TriggerMode.PTT
     for target in cfg.audio.outputs:
         target.enabled = False  # silent run
 
@@ -4643,19 +4691,48 @@ def test_platform() -> None:
           or "last transcript" not in report.lower())
 
 
+def _mispronounces(voice: str, model: str = "base.en", language: str = "en",
+                   target: str = "") -> str:
+    """The plan's complaint about this voice, or "".
+
+    There is exactly one place that decides whether a voice can say what it is
+    about to be given, and this is how the tests ask it. `target` set means
+    translation is on and the text reaching the voice will be in that language,
+    which is the case that used to be answered backwards.
+    """
+    from voice2tts import plan
+    from voice2tts.config import Config
+    from voice2tts.modes import TranslationMode
+
+    cfg = Config()
+    cfg.tts.voice = voice
+    cfg.stt.model = model
+    cfg.stt.language = language
+    if target:
+        cfg.translation.mode = TranslationMode.MODELS
+        cfg.translation.source = language
+        cfg.translation.target = target
+    found = [p.text for p in plan.build(cfg).problems if "mispronounce" in p.text]
+    return found[0] if found else ""
+
+
 def test_language_guard() -> None:
     print("\n[language guard]")
     from voice2tts import voices
 
     check("english voice + english model is fine",
-          not voices.language_mismatch("en_US-amy-medium", "base.en"))
-    warning = voices.language_mismatch("de_DE-thorsten-medium", "small.en")
+          not _mispronounces("en_US-amy-medium"))
+    warning = _mispronounces("de_DE-thorsten-medium", model="small.en")
     check("german voice + english model warns", bool(warning))
     check("warning names both sides",
-          "de_DE-thorsten-medium" in warning and "small.en" in warning)
-    check("multilingual model accepts any voice",
-          not voices.language_mismatch("de_DE-thorsten-medium", "large-v3"))
-    check("blank inputs do not warn", not voices.language_mismatch("", "base.en"))
+          "de_DE-thorsten-medium" in warning and "German" in warning, warning)
+    # A multilingual model means the SPOKEN language is whatever was recognised,
+    # which for a German voice has to be German -- the pairing is only fine once
+    # the recognition language matches too.
+    check("multilingual model accepts a matching voice",
+          not _mispronounces("de_DE-thorsten-medium", model="large-v3",
+                             language="de"))
+    check("blank inputs do not warn", not _mispronounces(""))
 
     # A voice built in the Studio is named by its author -- "narator", "my
     # voice" -- and carries no language in the filename. Reading the name told
@@ -4681,13 +4758,13 @@ def test_language_guard() -> None:
                   and voices.is_english("narator"),
                   voices.voice_language("narator"))
             check("and does not warn against an English model",
-                  not voices.language_mismatch("narator", "base.en"),
+                  not _mispronounces("narator"),
                   "the name says nothing; the config says English")
 
             # The config is authoritative, not the name.
             make("mein-sprecher", {"code": "de_DE", "family": "de"})
             check("a German voice with an English-looking name still warns",
-                  bool(voices.language_mismatch("mein-sprecher", "base.en")),
+                  bool(_mispronounces("mein-sprecher")),
                   voices.voice_language("mein-sprecher"))
 
             # Config missing or unreadable, and the name says nothing either.
@@ -4695,7 +4772,7 @@ def test_language_guard() -> None:
             check("an unknowable language is reported as unknown",
                   voices.voice_language("mystery") == "")
             check("and warns about nothing, rather than guessing",
-                  not voices.language_mismatch("mystery", "base.en"),
+                  not _mispronounces("mystery"),
                   "a wrong warning is worse than none")
 
             # Older configs carry only the espeak voice.

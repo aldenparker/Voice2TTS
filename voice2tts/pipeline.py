@@ -24,12 +24,14 @@ from enum import Enum
 import numpy as np
 
 from . import devices
+from . import plan as plan_mod
 from .capture import MicCapture
 from .config import Config
 from .devices import resolve_input
 from .hotkey import HotkeyManager
+from .modes import RecognitionMode, TriggerMode
 from .output import OutputSink
-from .stt import WhisperEngine
+from .stt import Heard, WhisperEngine
 from .substitutions import Rule, Substituter
 from .tts import PiperEngine, UnspeakableVoice
 from .vad import SAMPLE_RATE, WINDOW, VadSegmenter
@@ -114,6 +116,12 @@ class Pipeline:
         self.target_substituter = Substituter()   # what is said badly
         self.translator = None                    # a translate.Chain, when on
         self.streamer = None                      # a StreamingRecognizer, when on
+        # What this run is doing: which languages, which way of translating,
+        # what is wrong with it. Rebuilt on start() and whenever a setting that
+        # could change it is applied, and read by everything that used to work
+        # the answer out for itself. Available before start() so the interface
+        # can ask about a config that is not running yet.
+        self.plan = plan_mod.build(cfg)
         # Windows on their way to the streaming thread. Bounded: if that
         # thread cannot keep up, dropping the oldest window is far better
         # than growing without limit, and falling behind is already
@@ -219,6 +227,10 @@ class Pipeline:
                 return
             self._set_state(State.LOADING)
             try:
+                # Worked out BEFORE the engines, because it decides which task
+                # Whisper is loaded with and whether a translation chain is
+                # needed at all. Everything downstream reads this one answer.
+                self.plan = plan_mod.build(self.cfg)
                 self._load_engines()
                 self._open_audio()
             except Exception as exc:
@@ -228,7 +240,8 @@ class Pipeline:
                 self._set_state(State.STOPPED)
                 raise
 
-            self._streaming_started = self.cfg.stt.mode == "streaming"
+            self._streaming_started = (
+                self.cfg.stt.mode is RecognitionMode.STREAMING)
             self._streaming_degraded = False
             self._backlog_reported = False
             self._report_plan()
@@ -253,7 +266,7 @@ class Pipeline:
 
     def _load_engines(self) -> None:
         if self.stt is None:
-            self.stt = WhisperEngine(self.cfg.stt)
+            self.stt = WhisperEngine(self.cfg.stt, task=self.plan.whisper_task)
             self._emit("info", f"Whisper on {self.stt.device}/{self.stt.compute_type}")
         if self.tts is None:
             try:
@@ -286,11 +299,10 @@ class Pipeline:
         Japanese voice was wrong for translating INTO Japanese while the
         pipeline happily did it.
         """
-        from . import plan as plan_mod
-
-        current = plan_mod.build(self.cfg)
-        self._emit("info", current.summary)
-        for problem in current.problems:
+        for line in self.plan.describe():
+            log.info("plan: %s", line)
+        self._emit("info", self.plan.summary)
+        for problem in self.plan.problems:
             self._emit("error" if problem.serious else "warning", str(problem))
 
     @property
@@ -303,7 +315,7 @@ class Pipeline:
         keep up.
         """
         return (self._streaming_started
-                and self.cfg.trigger.mode != "ptt"
+                and self.cfg.trigger.mode is not TriggerMode.PTT
                 and not self._streaming_degraded)
 
     def _load_translator(self) -> None:
@@ -316,7 +328,10 @@ class Pipeline:
         """
         self.translator = None
         cfg = self.cfg.translation
-        if not cfg.enabled:
+        # needs_chain, not "is translation on": the recogniser mode translates
+        # without a chain, and asking the wrong question here is how a config
+        # with both settings came to translate twice.
+        if not self.plan.needs_chain:
             return
         from . import translate
 
@@ -500,9 +515,18 @@ class Pipeline:
         caller decides, because it is the one that knows what the user edited.
         """
         previous = self.translator
+        self.plan = plan_mod.build(self.cfg)
         self._load_translator()
         if previous is not None and previous is not self.translator:
             previous.close()
+        if self.stt is not None and self.stt.task is not self.plan.whisper_task:
+            # Changing WHO translates changes what Whisper is asked for, and the
+            # engine holds that from load. Say so rather than looking applied.
+            self._emit("warning",
+                       "Restart the app for the change of translation method to "
+                       "take effect.")
+        for line in self.plan.describe():
+            log.info("plan: %s", line)
 
     def apply_vad_changes(self) -> None:
         """Ask the segmenter thread to rebuild, rather than swapping it here.
@@ -514,8 +538,16 @@ class Pipeline:
         if self._running.is_set():
             self._vad_dirty.set()
 
-    def set_mode(self, mode: str) -> None:
+    def set_mode(self, mode: TriggerMode) -> None:
+        """Change how speech is started, repairing anything the change breaks.
+
+        It used to assign the field and skip validate(), so switching to
+        push-to-talk while streaming left an impossible pair that app.py then
+        saved to disk.
+        """
         self.cfg.trigger.mode = mode
+        for repair in self.cfg.validate():
+            self._emit("warning", str(repair))
         if not self._running.is_set():
             return
         if self.hotkey is not None:
@@ -524,7 +556,7 @@ class Pipeline:
         self._start_hotkey()
         if self.segmenter is not None:
             self.segmenter.reset()
-        self._emit("info", f"Mode: {mode}")
+        self._emit("info", f"Mode: {mode.value}")
 
     # -- push to talk ---------------------------------------------------------
 
@@ -711,12 +743,17 @@ class Pipeline:
                 if vad_failures == 1:
                     self._emit("warning", "Speech detection hiccup; recovering")
                 if vad_failures >= _MAX_VAD_FAILURES:
+                    # set_mode, not an assignment. Assigning the field announced
+                    # push-to-talk and left the key unbound: in `vad` mode it had
+                    # never been bound in the first place, so the app went deaf
+                    # while still reporting that it was ready.
                     self._emit(
                         "error",
-                        "Speech detection keeps failing; switching to push-to-talk. "
+                        "Speech detection keeps failing; switching to "
+                        f"push-to-talk ({self.cfg.trigger.hotkey}). "
                         "See the log for details.",
                     )
-                    self.cfg.trigger.mode = "ptt"
+                    self.set_mode(TriggerMode.PTT)
                     vad_failures = 0
                 else:
                     self.segmenter.reset()
@@ -737,10 +774,22 @@ class Pipeline:
                         self._stream_active.set()
                         # Hand over the onset too, or every utterance loses its
                         # first word or so to the detection delay.
-                        for held in self.segmenter.captured():
+                        held_windows = self.segmenter.captured()
+                        for i, held in enumerate(held_windows):
                             try:
                                 self._stream_windows.put_nowait(held)
                             except queue.Full:
+                                # The first words of the utterance, gone. It used
+                                # to break out with no log at all, so the app
+                                # spoke a sentence with its opening missing and
+                                # nothing anywhere said why.
+                                log.warning(
+                                    "streaming queue full at handover; lost "
+                                    "%d of %d onset windows",
+                                    len(held_windows) - i, len(held_windows))
+                                self._emit("warning",
+                                           "Machine is behind; the start of that "
+                                           "sentence was lost")
                                 break
                     else:
                         try:
@@ -772,6 +821,11 @@ class Pipeline:
         assert self.stt is not None
         # A translator handed a clause fragment produces fluent nonsense, so
         # while translating this waits for a real sentence end.
+        #
+        # Re-read every pass rather than snapshotted here: translation can be
+        # switched on from the settings window while this thread is running, and
+        # a snapshot meant the clause fragments this exists to prevent were fed
+        # to the translator for the rest of the session.
         translating = self.translator is not None
         self.streamer = StreamingRecognizer(self.stt, sentences_only=translating)
         log.info("streaming recognition started (sentences only: %s)", translating)
@@ -857,7 +911,10 @@ class Pipeline:
         reported = False
         while self._running.is_set():
             time.sleep(1.0)
-            busy = self.state in (State.THINKING, State.SPEAKING)
+            # REVIEWING counts: it is bounded by review_timeout_s, so sitting
+            # here past the stall window means the wait itself is wedged -- and
+            # it was the one state the watchdog did not look at.
+            busy = self.state in (State.THINKING, State.SPEAKING, State.REVIEWING)
             if not busy:
                 stalled_since, reported = None, False
                 continue
@@ -963,7 +1020,12 @@ class Pipeline:
             self._emit("warning", f"Translation failed ({exc}); speaking as heard")
             return text
         if not translated.strip():
+            # Same outcome as a thrown exception -- speak the original -- so it
+            # gets the same announcement. Silence here meant the far end started
+            # hearing untranslated English with nothing to explain it.
             log.warning("translation of %r came back empty", text[:60])
+            self._emit("warning",
+                       "Translation came back empty; speaking as heard")
             return text
         self._emit("translated",
                    f"{translated}  [{(time.perf_counter() - started) * 1000:.0f} ms]")
@@ -984,10 +1046,16 @@ class Pipeline:
         assert self.stt is not None
         self._set_state(State.THINKING)
         t0 = time.perf_counter()
-        text = self.stt.transcribe(item)
-        if not text:
+        result = self.stt.recognise(item)
+        if not result:
+            # "" used to mean all three of these, so a user whose min_chars was
+            # set high, or whose mic was recording silence, saw a pipeline that
+            # listened, thought, and then did nothing at all.
+            log.info("nothing spoken: %s", result.why.value)
+            if result.why is Heard.NOISE:
+                self._emit("info", "Ignored: " + result.why.value)
             return
-        self._deliver(text, t0)
+        self._deliver(result.text, t0)
 
     def _deliver(self, text: str, t0: float) -> None:
         """Rewrite, translate, review and speak an already-recognised utterance."""
@@ -1024,14 +1092,22 @@ class Pipeline:
         self.speak(spoken, _t0=t0)
 
     def _review(self, text: str) -> str | None:
-        """Ask the UI to approve `text`. Returns the approved text, or None."""
+        """Ask the UI to approve `text`. Returns the approved text, or None.
+
+        A hook that fails discards, exactly like a hook that times out. Those
+        two paths used to disagree -- a timeout dropped the utterance, a crash
+        spoke it unreviewed -- which made the one feature whose entire purpose
+        is "nothing unreviewed gets spoken" do the opposite under a fault
+        nobody would ever see coming.
+        """
         try:
             return self.review_hook(text)
         except Exception:
-            # A broken hook must not swallow the utterance; speaking unreviewed is
-            # the lesser failure, and the traceback lands in the log.
-            log.exception("review hook failed; speaking unreviewed text")
-            return text
+            log.exception("review hook failed; discarding unreviewed text")
+            self._emit("error",
+                       "The review window failed, so nothing was spoken. Turn "
+                       "review off in Misc if this keeps happening.")
+            return None
 
     def record(self, heard: str, spoken: str, source: str = "speech") -> None:
         """Add to the in-memory history shown in the History tab."""

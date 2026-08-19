@@ -21,10 +21,15 @@ import tkinter as tk
 from dataclasses import dataclass
 from tkinter import ttk
 
+from .modes import Theme
+
 log = logging.getLogger(__name__)
 
-# native first: it is the default, and the order is what the picker shows.
-MODES = ("native", "light", "dark")
+# One definition, shared with the config, so the picker cannot offer a value
+# validate() rejects -- or accept one it does not offer, which is how "system"
+# came to survive validation while not appearing in the combo box it was
+# written to. native first: it is the default, and the order is what shows.
+MODES = Theme.values()
 
 
 @dataclass(frozen=True)
@@ -84,19 +89,21 @@ def windows_prefers_dark() -> bool:
         return False
 
 
-def resolve(mode: str) -> Palette:
-    if mode == "dark":
-        return DARK
-    if mode == "light":
-        return LIGHT
-    # "system" was an earlier name for follow-Windows; treat it as such rather
-    # than silently turning old configs native.
+def resolve(mode: Theme | str) -> Palette:
+    # Tolerates a plain string because Tk hands one back from the picker, and
+    # "system" because that was this setting's name before schema 3.
     if mode == "system":
         return DARK if windows_prefers_dark() else LIGHT
-    return NATIVE
+    match Theme.parse(mode):
+        case Theme.DARK:
+            return DARK
+        case Theme.LIGHT:
+            return LIGHT
+        case _:
+            return NATIVE
 
 
-def apply(root: tk.Misc, mode: str = "native") -> Palette:
+def apply(root: tk.Misc, mode: Theme | str = Theme.NATIVE) -> Palette:
     """Apply a theme. Returns the palette in use.
 
     In native mode nothing is restyled: Windows' own widget appearance is left

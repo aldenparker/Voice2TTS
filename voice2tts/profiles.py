@@ -21,6 +21,12 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 # Only these are captured. Anything else is machine-level and stays put.
+#
+# Deliberately NOT here: anything that decides which models get loaded --
+# stt.model, and how translation happens. Switching profile is meant to be
+# instant, and those cost a reload of Whisper or a translation chain. A profile
+# that took four seconds to apply, or half-applied, would be worse than editing
+# Settings.
 PROFILED_FIELDS = (
     "trigger.mode",
     "trigger.hotkey",
@@ -28,6 +34,10 @@ PROFILED_FIELDS = (
     "tts.voice",
     "tts.length_scale",
     "tts.volume",
+    # Paired with trigger.mode on purpose: streaming needs automatic detection,
+    # so a profile that set push-to-talk without this left an impossible pair
+    # for validate() to pull apart afterwards.
+    "stt.mode",
     "vad.threshold",
     "vad.min_silence_ms",
     "text.review_before_speaking",
@@ -45,7 +55,7 @@ class Profile:
 
     @property
     def summary(self) -> str:
-        mode = self.values.get("trigger.mode", "?")
+        mode = str(self.values.get("trigger.mode", "?"))
         voice = str(self.values.get("tts.voice", "?"))
         return f"{mode}, {voice}"
 
@@ -84,7 +94,10 @@ def apply(cfg, profile: Profile) -> list[str]:
                 changed.append(path)
         except AttributeError:
             log.debug("profile field %s missing; skipped", path)
-    cfg.validate()
+    # A profile is a partial config, so applying one can produce a combination
+    # neither half asked for. Repairs are published rather than dropped, the
+    # same way loading a file publishes them.
+    cfg.repairs = cfg.validate()
     return changed
 
 

@@ -22,6 +22,7 @@ from tkinter import messagebox, ttk
 from . import cable, devices, gpupack, voices
 from .config import Config, OutputTarget
 from .hotkey import describe
+from .modes import SttDevice, TriggerMode
 
 log = logging.getLogger(__name__)
 
@@ -345,7 +346,7 @@ class Wizard(tk.Toplevel):
                 return
             # A GPU machine can afford the larger model.
             self.cfg.stt.model = gpupack.GPU_WHISPER_MODEL
-            self.cfg.stt.device = "auto"
+            self.cfg.stt.device = SttDevice.AUTO
             self._render()
 
         self.gpu_bar.pack(anchor="w", pady=(8, 0))
@@ -424,7 +425,8 @@ class Wizard(tk.Toplevel):
             return
         self.cfg.audio.input_match = devices.strip_display(self.w_input.get())
         self.cfg.tts.voice = self.w_voice.get().strip() or self.cfg.tts.voice
-        self.cfg.trigger.mode = self.w_mode.get()
+        self.cfg.trigger.mode = (TriggerMode.parse(self.w_mode.get())
+                                 or TriggerMode.PTT)
         hotkey = self.w_hotkey.get().strip()
         if not describe(hotkey):
             self.cfg.trigger.hotkey = hotkey
@@ -452,7 +454,8 @@ class Wizard(tk.Toplevel):
         summary = [
             f"Microphone   {self.cfg.audio.input_match or '(system default)'}",
             f"Voice        {self.cfg.tts.voice}",
-            f"Mode         {self.cfg.trigger.mode}   Hotkey  {self.cfg.trigger.hotkey}",
+            f"Mode         {self.cfg.trigger.mode.value}   "
+            f"Hotkey  {self.cfg.trigger.hotkey}",
             "Outputs      " + (", ".join(
                 t.label for t in self.cfg.audio.outputs if t.enabled) or "none"),
         ]
