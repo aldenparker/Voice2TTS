@@ -336,6 +336,9 @@ fewer, longer, better-punctuated chunks.
 **Goal.** Speak English, have the other side hear German. A translation stage
 between recognition and speech, running entirely on this machine.
 
+Also in this release: **streaming recognition as a third mode**, which removes
+the floor 0.6.1 left behind. See below.
+
 **Not in scope.** Translating what *they* say back to you — that needs their
 audio, which means loopback capture and a second pipeline. Worth doing later,
 but it is a different feature wearing the same word.
@@ -356,20 +359,83 @@ has to split around it:
 That split is the first real work, and it is worth doing even if translation
 slipped: the current single stage is already doing two jobs.
 
-### Engine — OPUS-MT on CTranslate2
+### Engine — OPUS-MT on CTranslate2 ✅ spiked, and it is comfortable
 
-Recommended, and the reason is dependencies: **CTranslate2 is already here**,
-because faster-whisper runs on it. Helsinki-NLP's OPUS-MT models convert to its
-format, are roughly 75 MB per language pair, and are permissively licensed. A
-translation feature that adds no new runtime dependency, and 75 MB per language
-someone actually wants, is a very different proposition from one that adds a
-framework.
+`spike/08_translate.py` measured it end to end on en→de. **Viable with room to
+spare.**
+
+| | |
+|---|---|
+| Model load | 180 ms, once |
+| 5 words | 38 ms |
+| 13 words | 57 ms |
+| 25 words (a long utterance) | 98 ms |
+| Budget | 300 ms, and the pipeline is ~300 ms today |
+
+So a long sentence adds about a third to end-to-end latency, and a typical one
+adds a tenth. Beam size 4 costs 96 ms against beam 1's 78 ms for the same
+output on these sentences; 4 is affordable and stays the default.
+
+Quality is genuinely usable — *"The build finished, but two of the tests are
+still failing on Windows"* came back as *"Der Build ist abgeschlossen, aber zwei
+der Tests scheitern immer noch unter Windows."*
+
+The reason this is cheap is dependencies: **CTranslate2 is already here**,
+because faster-whisper runs on it.
+
+### Models — we convert and host them ourselves ✅ done
+
+The original plan was to take Argos Translate's pre-converted `.argosmodel`
+packages, because converting Helsinki-NLP's weights needs `transformers` and
+`torch` purely to rewrite files we would never train.
+
+**The licence question decided it.** Argos state terms for their *software* and
+say nothing about the model weights — not in the index, not in the package, not
+in the README. "Probably inherits CC-BY-4.0 from upstream" is not a licence, and
+a GPL application should not put a download button on a guess.
+
+So `scripts/convert_mt.py` converts Helsinki-NLP's originals at build time.
+torch and transformers are build-time only, already in the PyInstaller
+`excludes`, and never reach a user's machine. The result is better on every
+axis that was supposed to be the cost:
+
+| | Argos package | Ours |
+|---|---|---|
+| Packaged size | 151 MB | **63 MB** (int8) |
+| "can you hear me?" | 37 ms | **19 ms** |
+| A 25-word sentence | 98 ms | **68 ms** |
+| Licence | unstated | **CC-BY-4.0, shipped in the package** |
+
+Each pair ships `model/`, both tokenizers, a `LICENSE` carrying the attribution
+CC-BY requires and the Tiedemann & Thottingal citation, and a `metadata.json`.
+A `manifest.json` lists every pair with its size and sha256, so the app can show
+what is available without downloading 60 MB to find out, and the list does not
+go stale inside a shipped build.
+
+Two things that produce *fluent nonsense* rather than an error, both found by
+measurement and now guarded by tests:
+
+- **Marian keeps two tokenizers**, one per direction. Decoding output with the
+  source tokenizer does not fail — it leaves raw `▁` pieces in the text.
+- **The input needs an explicit `</s>`.** Without it the model rambles:
+  *"Hallo Hallo Hallo, können Sie hören Sie mich hören????"*
+
+Other measured facts:
+
+- **`sentencepiece` is a new runtime dependency.** 1.2 MB wheel.
+- Argos packages carry a `stanza/` sentence splitter — a torch model, dropped on
+  install. This pipeline already works one utterance at a time.
+- **`argos-net.com` answers Python's default User-Agent with 403**, which no
+  longer matters now that we host the models.
+- `ct2-opus-mt-converter` needs only numpy and yaml and would make the CI job
+  much lighter than transformers + torch, but the native OPUS-MT host 404'd on
+  the filenames tried. Worth revisiting if the conversion job gets slow.
 
 Alternatives considered:
 
 | Option | Why not |
 |---|---|
-| Whisper's own `task="translate"` | Free, but translates **to English only**. Covers "I speak X, they hear English" and nothing else. Worth wiring up anyway — it is one parameter. |
+| Whisper's own `task="translate"` | ✅ **Done** — see below. To English only, but free. |
 | NLLB-200 (distilled 600M) | 200 languages in one model, but **CC-BY-NC**. A non-commercial model inside a GPL application is a licence story we should not want. |
 | argos-translate | Wraps the same OPUS-MT/CTranslate2 stack, and adds a dependency to do it. |
 | A cloud API | Contradicts the entire premise. Nothing in this app leaves the machine. |
@@ -377,36 +443,169 @@ Alternatives considered:
 Pairs OPUS-MT does not publish directly pivot through English, at the cost of a
 second hop and its compounding errors.
 
+### The second method: Whisper translates it itself ✅ done
+
+Whisper can emit English instead of the spoken language for one extra
+parameter and no download. Measured against German synthesized by
+`de_DE-thorsten-medium` and fed back through our own `WhisperEngine`:
+
+| Model | "Hallo, kannst du mich hören?" | Per utterance, CPU |
+|---|---|---|
+| `base` | *"Hello, can you be nice to me?"* | 0.36 s |
+| `small` | *"Hello, can you hear me?"* | 1.1 s |
+| `medium` | *"Hello, can you hear me?"* | 3.1 s |
+
+So it works, but **`base` is not good enough and `medium` is not worth 3×**.
+`small` is the floor, and the Translate tab says so when a smaller one is
+selected. All three mistranslated "Build" as a German word, which a dedicated
+model working on correct English text does not.
+
+The two methods are mutually exclusive in the interface — running both would
+translate the text twice, the second time from a language it is no longer in.
+
 ### Prerequisites
 
-- [ ] **Multilingual recognition**, currently in the backlog, becomes a hard
-      dependency. The bundled `base.en` cannot hear anything but English, so
-      translating *from* another language is impossible until the recognition
-      model and a real language setting land.
-- [ ] **The voice must match the target language.** Piper voices are
+- [x] **Multilingual recognition.** The plain (non-`.en`) Whisper models are now
+      offered, along with a spoken-language picker and `auto` detection. The
+      `.en` models are still the default and still better at English; the
+      config refuses the combinations that cannot work (translating *from* a
+      language an English-only model cannot hear, or detecting the language of
+      a model that only knows one).
+- [x] **The voice must match the target language.** Piper voices are
       language-specific, and speaking German text with an English voice produces
-      confident gibberish. The existing language guard already knows how to
-      detect this mismatch; here it has to *drive* the voice choice rather than
-      warn about it.
+      confident gibberish. The Translate tab now names the mismatch *and* the
+      voice that fixes it, with one button to switch; when nothing installed
+      speaks the target language it points at the Voice library.
+
+      Worth recording: the first version of that check silently never fired.
+      `voice_language()` takes a voice key and was being passed a `Path`, and a
+      broad `except Exception` around it turned the resulting error into "" --
+      "cannot tell", which reads exactly like "no mismatch". The catch is gone;
+      the function already returns "" for anything genuinely unknown.
 
 ### Work
 
-- [ ] **Spike first.** Convert one OPUS-MT pair, measure latency for a typical
-      sentence on CPU, and listen to the result. The budget is the thing to
-      establish: the pipeline is ~300 ms from utterance to first audio today,
-      and translation has to fit inside a total that still feels live. If a
-      small model costs 150 ms this is easy; if it costs 800 ms the feature
-      needs sentence-level pipelining first.
-- [ ] Split the substitution stage into source-side and target-side lists
-- [ ] `translate.py` — model download, cache, and a `translate(text, src, dst)`
-      that is a pure function over a loaded model
-- [ ] Language pair picker, with the download surfaced like the voice library's
-- [ ] Pivot through English where a direct pair does not exist, and say so
-- [ ] Wire `task="translate"` as the zero-download path to English
+- [x] **Spike first** — `spike/08_translate.py`. Done; see the table above.
+- [x] **Decide the model licence question.** Settled: we convert Helsinki-NLP's
+      CC-BY-4.0 originals ourselves and host the result, so the terms are known
+      and the attribution travels with the model. See above.
+- [x] `scripts/convert_mt.py` — conversion, packaging, checksums, manifest
+- [ ] The download side: read the manifest, fetch, verify sha256, install
+- [ ] A CI job that runs `convert_mt.py --all` and attaches the assets to a
+      `models-*` release tag
+- [x] Split the substitution stage into source-side and target-side lists,
+      with the Words tab editing both
+- [x] Wire the chain into the pipeline, between the two rule sets
+- [x] The Translate tab: language pair, model downloads, and a route line that
+      says why a combination will not work
+- [ ] Streaming recognition as a third mode (below)
+- [x] `translate.py` — model download, cache, and translation over a loaded
+      model, with `net.py` doing the resumable, checksum-verified fetching
+- [x] Language pair picker, with the download surfaced like the voice library's
+- [x] Pivot through English where a direct pair does not exist, and say so
+- [x] Wire `task="translate"` as the zero-download path to English
 - [ ] Review-before-speaking becomes far more valuable here and should probably
       default to on when translating: an ASR error feeds a translator that will
       produce something fluent and wrong
 - [ ] Show both texts in the transcript, source above target
+
+### Streaming recognition — a third mode
+
+0.6.1 bounded the wait by cutting speech into segments; it did not remove it.
+The floor is still `max_segment_s`, because recognition cannot start until a
+segment is closed. Streaming removes that floor by recognising *while* someone
+is still speaking.
+
+**How it works.** Re-transcribe a growing buffer every second or so and compare
+consecutive passes. Whatever two passes agree on is stable and can be spoken;
+the rest is still in flux and is held. This is the LocalAgreement rule that
+whisper-streaming uses, and it works because Whisper's output for the early part
+of a buffer stops changing once enough context follows it.
+
+**Why it is a mode and not the default.** Three costs, all real:
+
+- **Compute.** The same audio is decoded many times: ~0.5x realtime,
+  continuously, for as long as someone is talking. *(Written before the spike as
+  "fine on a 5080, not fine on CPU" — the measurement says otherwise. It costs
+  the same on both, and the CPU is no worse. The cost is real; the reason given
+  for it was wrong.)*
+- **It fits speech synthesis badly.** You cannot un-speak. Once Piper has said a
+  word it is out, so only *stable* text can be spoken — and to avoid sounding
+  robotic it has to be buffered to a phrase or sentence boundary anyway, which
+  gives back part of the latency the technique bought.
+- **Prosody.** Sentences spoken in pieces lose their intonation contour. The
+  Designer's own effects chain has the same character: fine in isolation,
+  noticeable when it happens every few words.
+
+So it belongs behind a switch, alongside push-to-talk and VAD, for people who
+want the lowest possible lag and have the hardware to pay for it.
+
+#### Spiked ✅ — `spike/09_streaming.py`. It works, and it is not what I expected.
+
+LocalAgreement-2 over a growing buffer, re-transcribed every second, measured on
+28.5 s of varied synthesized English (five distinct sentences — **not** one clip
+repeated: Whisper falls into repetition loops on duplicated audio, which
+produced a 26 s decode and made the first run meaningless).
+
+| | `base.en` CPU int8 | `base.en` CUDA fp16 |
+|---|---|---|
+| Total decode | 14.0 s for 28.5 s audio (**0.49×**) | 14.5 s (**0.51×**) |
+| First word out | 2.0 s (segmented: 28.5 s) | 2.0 s |
+| Mean commit lag | 2.3 s behind the speech | 2.1 s |
+| Worst commit lag | 5.3 s | 5.2 s |
+| Words held to the end | 0 | 0 |
+
+**The GPU does not help.** 0.51× against 0.49× — within noise of each other.
+Per-pass, CUDA starts far ahead (61 ms against 336 ms on a 1 s buffer) and gives
+it all back as the buffer grows (884 ms against 816 ms at 28.5 s). Decoding a
+long transcript is a sequence of small dependent steps, so it is latency-bound
+rather than compute-bound, and the GPU has nothing to bite on. This kills the
+"only for people with the hardware" framing: the CPU keeps up just as well.
+
+**The cost grows with buffer length, and it runs away.** Fitting pass time
+against buffer:
+
+- CUDA: ~35 ms per second of buffer → a pass exceeds the 1 s interval at **29 s**
+- CPU: ~17 ms per second + 269 ms fixed → at **43 s**
+
+Past that the buffer grows faster than it can be decoded and the lag it was
+meant to remove comes back worse. So **trimming the committed prefix out of the
+buffer is mandatory, not an optimisation** — and the hard fallback below is what
+catches it when trimming is not enough.
+
+**The latency win is real but smaller than it looks.** "First word at 2 s instead
+of 28.5 s" flatters it: that comparison is against one 28.5 s segment, and 0.6.1
+already splits at `max_segment_s = 6 s`. Against what actually ships, the honest
+figures are a **mean 2.2 s** commit lag versus up to 6 s, with a **worst case of
+5.3 s** — which is barely better than the ceiling we already have. Streaming
+improves the *typical* case substantially and the *worst* case hardly at all.
+
+Which reframes the feature: it is worth building, but as a latency *smoother*,
+not a latency *floor remover*, and the interface should not promise more.
+
+- [x] **Spike it before building.** Done; see above.
+- [x] `streaming.py` — a growing buffer, a scheduled re-transcribe, and the
+      agreement rule as a pure function over two token lists, so it can be
+      tested without a model
+- [x] Speak only stable text, buffered to a phrase boundary
+- [x] **Trim the committed prefix out of the buffer.** Both the trim point and
+      the poll interval now follow the *measured* cost rather than a constant:
+      the shipped default is `small.en` once the GPU pack is installed, which
+      costs ~100 ms per second of buffer against `base.en`'s ~35 ms, and no
+      single threshold suited both.
+- [x] A hard fallback to sentence mode, which also **discards the utterance the
+      segmenter accumulated in parallel** — found in testing: without that, the
+      handover re-spoke everything already said, which is the exact fault the
+      soft endpoint was reverted for.
+- [x] Mode selector, with the cost stated next to it. Not a third *trigger*
+      mode as originally sketched: it is orthogonal to push-to-talk, so it sits
+      on Recognition as "when to speak" and pairs with any trigger that has a
+      VAD.
+- [x] Interaction with translation: confirmed as expected, so with translation
+      on, streaming holds each sentence to its full stop rather than releasing
+      clause fragments. Translation stays on sentence
+      boundaries even when recognition does not — measure before assuming
+      either way.
 
 ### Risks
 
@@ -415,7 +614,7 @@ second hop and its compounding errors.
 | Latency makes it unusable in a live call | Measure in the spike, before building anything on top |
 | An ASR error becomes a fluent mistranslation | Review-before-speaking on by default; show both texts |
 | Pivoting compounds errors | Prefer direct pairs; mark pivoted ones in the UI |
-| Model licences | OPUS-MT is permissive; NLLB is not. Check per pair and record it, as base-voice licences already are |
+| Model licences | **Open — see below.** OPUS-MT itself is CC-BY-4.0, but the Argos packages state no licence at all |
 
 ---
 

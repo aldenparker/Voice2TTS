@@ -25,6 +25,10 @@ import logging
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .dsp import Design
 
 import numpy as np
 
@@ -292,21 +296,42 @@ def write_design(model_path: Path, design, name: str = "") -> Path:
     return path
 
 
-def read_design(model_path: Path):
+def read_design(model_path: Path) -> Design | None:
     """The macro settings for a voice, or None if it is an ordinary one."""
+    return read_design_or_problem(model_path)[0]
+
+
+def read_design_or_problem(model_path: Path) -> tuple[Design | None, str]:
+    """(design, problem). The problem is "" unless a chain was meant to load.
+
+    Returned rather than logged because a designed voice speaking without its
+    chain is a DIFFERENT voice, not a quieter one -- it sounds nothing like the
+    one that was auditioned, and "it does not sound like it did yesterday" is
+    not something anybody can act on.
+
+    Speaking anyway is still right: refusing would leave no voice at all.
+    """
     from .dsp import Design
 
     path = design_path(model_path)
     if not path.is_file():
-        return None
+        return None, ""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        # A voice that speaks without its effects is much better than a voice
-        # that refuses to speak.
         log.warning("ignoring unreadable design sidecar %s: %s", path.name, exc)
-        return None
-    return Design.from_dict(data.get("design") or {})
+        return None, (
+            f"{model_path.stem} was designed in the Studio, but its effects "
+            f"chain ({path.name}) could not be read: {exc}. It will speak with "
+            "the plain voice underneath, which sounds different.")
+    try:
+        return Design.from_dict(data.get("design") or {}), ""
+    except (TypeError, ValueError) as exc:
+        log.warning("ignoring malformed design in %s: %s", path.name, exc)
+        return None, (
+            f"{model_path.stem} has an effects chain this build does not "
+            f"understand ({exc}). It will speak with the plain voice "
+            "underneath, which sounds different.")
 
 
 def remove_designed(model_path: Path) -> bool:

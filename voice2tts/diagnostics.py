@@ -35,7 +35,7 @@ def _redact(text: str) -> str:
 
 
 def diagnostics(cfg=None, pipeline=None) -> str:
-    from . import cable, devices, gpupack, voices
+    from . import cable, devices, gpupack, plan, voices
     from .cuda import cuda_available
     from .paths import cache_dir, config_path, is_frozen, log_path
 
@@ -77,21 +77,25 @@ def diagnostics(cfg=None, pipeline=None) -> str:
 
     section("Configuration")
     if cfg is not None:
-        out.append(f"mode          : {cfg.trigger.mode}")
+        # The plan, not a fresh guess at it. This section used to re-derive the
+        # languages and got it wrong the same way the settings window once did:
+        # it reported "voice/model language mismatch" without ever mentioning
+        # that translation was on, so every bug report from a translate user
+        # arrived with a red herring at the top.
+        out.extend(plan.build(cfg).describe())
         out.append(f"hotkey        : {cfg.trigger.hotkey}")
         out.append(f"input         : {cfg.audio.input_match or '(system default)'}")
         for t in cfg.audio.outputs:
             state = "on " if t.enabled else "off"
             out.append(f"output [{state}] : {t.label}  gain={t.gain}")
-        out.append(f"voice         : {cfg.tts.voice}")
-        out.append(f"whisper model : {cfg.stt.model} ({cfg.stt.device})")
+        out.append(f"whisper model : {cfg.stt.model} "
+                   f"({cfg.stt.device.value}/{cfg.stt.compute_type.value})")
         out.append(f"vad threshold : {cfg.vad.threshold}")
         out.append(f"vad silence   : {cfg.vad.min_silence_ms} ms")
         out.append(f"mute on play  : {cfg.audio.mute_mic_during_playback}")
         out.append(f"update repo   : {cfg.updates.repo or '(unset)'}")
-        warning = voices.language_mismatch(cfg.tts.voice, cfg.stt.model)
-        if warning:
-            out.append("WARNING: voice/model language mismatch")
+        for repair in cfg.repairs:
+            out.append(f"REPAIRED: {repair}")
 
     section("Runtime")
     if pipeline is not None:

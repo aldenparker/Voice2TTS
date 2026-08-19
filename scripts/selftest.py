@@ -8,12 +8,16 @@ on. Does not touch the microphone.
 
 from __future__ import annotations
 
+import contextlib
+import itertools
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import wave
 from pathlib import Path
@@ -25,6 +29,16 @@ sys.path.insert(0, str(ROOT))
 
 from voice2tts.config import Config, OutputTarget, load_config  # noqa: E402
 from voice2tts.logging_setup import setup_logging  # noqa: E402
+from voice2tts.modes import (  # noqa: E402
+    ComputeType,
+    LogLevel,
+    RecognitionMode,
+    SttDevice,
+    Theme,
+    TranslationMode,
+    TriggerMode,
+    WhisperTask,
+)
 
 SAMPLE = ROOT / "spike" / "out" / "tts_sample.wav"
 
@@ -110,6 +124,60 @@ def speech_like(seconds: float, rate: int, room_tone: float = 0.001) -> np.ndarr
     return (voiced * envelope + tone).astype(np.float32)
 
 
+# The console on Windows is cp1252, and this suite prints text it does not
+# control: translated sentences, tokenizer pieces, voice names. A character the
+# console cannot represent must degrade to "?", not kill the run half way
+# through -- losing 400 later checks to a print is a bad trade.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, OSError):  # redirected to something simpler
+        pass
+
+
+_FAILURES: list[str] = []
+
+
+def report_failures() -> None:
+    """Repeat every failure at the end of the run.
+
+    A run prints a thousand lines and CI log viewers drop the middle, so
+    a failure in the eleventh section of nineteen can be missing from a
+    copied log entirely -- which is exactly what happened, and cost a
+    round trip working out which test it was.
+    """
+    if not _FAILURES:
+        return
+    print(chr(10) + f"{len(_FAILURES)} failure(s), repeated so a truncated log still carries them:")
+    for entry in _FAILURES:
+        print(f"  FAIL  {entry}")
+    print(chr(10) + "on: " + _machine())
+
+
+def _machine() -> str:
+    """A one-line fingerprint, printed beside any failure.
+
+    A failing run is usually a difference between machines, and the tail
+    of the log is the part that survives truncation. Saying what this one
+    had turns "it fails on CI" into something answerable in one paste.
+    """
+    import os
+    import platform
+
+    from voice2tts import gpupack, jppack, paths, translate
+
+    bits = [
+        f"python {platform.python_version()}",
+        f"{platform.system()} {platform.release()}",
+        f"{os.cpu_count()} cores",
+        f"voices={len(paths.list_voices())}",
+        f"models={len(translate.installed_pairs())}",
+        f"gpu={gpupack.status().usable}",
+        f"japanese={jppack.status().installed}",
+    ]
+    return ", ".join(bits)
+
+
 def check(name: str, ok: bool, detail: str = "") -> None:
     global passed, failed
     if ok:
@@ -117,6 +185,7 @@ def check(name: str, ok: bool, detail: str = "") -> None:
         print(f"  PASS  {name}" + (f"  ({detail})" if detail else ""))
     else:
         failed += 1
+        _FAILURES.append(name + (f"  ({detail})" if detail else ""))
         print(f"  FAIL  {name}" + (f"  ({detail})" if detail else ""))
 
 
@@ -227,9 +296,18 @@ def test_clipboard() -> None:
           f"{len(text)} chars")
     speakable = clipboard.get_speakable_text()
     check("speakable form collapses whitespace",
-          "\n" not in speakable and "  " not in speakable,
-          repr(speakable[:40]))
+          "\n" not in speakable.text and "  " not in speakable.text,
+          repr(speakable.text[:40]))
     check("truncation limit is sane", clipboard.MAX_CHARS >= 1000)
+
+    # "" used to mean three different things, so a clipboard another program was
+    # holding open reported as empty -- and the advice was to copy something the
+    # user had already copied.
+    busy = clipboard.Contents(why=clipboard.Clipboard.BUSY)
+    check("nothing on the clipboard is falsy", not busy)
+    check("and says which of the three it was",
+          "holding the clipboard" in busy.why.value, busy.why.value)
+    check("real text is truthy", bool(clipboard.Contents(text="hello")))
 
 
 def test_substitutions() -> None:
@@ -299,6 +377,38 @@ def test_substitutions() -> None:
     check("disabling switches them all off", p.apply_text_changes() == 0)
     check("nothing rewritten when disabled",
           p.substituter.apply("tell aiden") == "tell aiden")
+
+    # Two rule sets, because translation goes between them. Source rules fix
+    # what the recogniser misheard and must run while the text is still in the
+    # language that was spoken; target rules fix what the VOICE says badly,
+    # which is a property of the output language.
+    cfg = Config()
+    cfg.text.substitutions = [SubstitutionRule("aiden", "Aidan")]
+    cfg.text.target_substitutions = [SubstitutionRule("Aidan", "AY-dan")]
+    p = Pipeline(cfg)
+    check("both rule sets compile", p.apply_text_changes() == 2)
+    check("source rules fix what was misheard",
+          p.substituter.apply("tell aiden") == "tell Aidan")
+    check("target rules fix what is said badly",
+          p.target_substituter.apply("tell Aidan") == "tell AY-dan")
+    check("with no translation between them they run back to back",
+          p.target_substituter.apply(p.substituter.apply("tell aiden"))
+          == "tell AY-dan")
+
+    # An existing configuration has one list and must behave exactly as before.
+    legacy = Config()
+    legacy.text.substitutions = [SubstitutionRule("aiden", "Aidan")]
+    old = Pipeline(legacy)
+    check("a config with no target rules is unchanged",
+          old.apply_text_changes() == 1
+          and old.target_substituter.apply("tell Aidan") == "tell Aidan",
+          "the target list is empty, so it is a passthrough")
+
+    cfg.text.substitutions_enabled = False
+    check("the switch turns off both sets", p.apply_text_changes() == 0)
+    check("and neither rewrites anything",
+          p.substituter.apply("tell aiden") == "tell aiden"
+          and p.target_substituter.apply("tell Aidan") == "tell Aidan")
 
 
 def test_observer_isolation() -> None:
@@ -403,6 +513,67 @@ def test_device_recovery() -> None:
           p.capture is not cap2 and not p.capture.failed)
     check("recovered capture reports alive", p.capture.check_alive())
     p.capture.stop()
+
+    # A device that opens and then dies from its own callback must NOT count as
+    # recovered. Reporting success on the strength of start() alone produced an
+    # endless three-second cycle of "reconnected" then "stopped again", each
+    # round re-enumerating every audio device -- which is what users saw as the
+    # fans spinning up.
+    import voice2tts.pipeline as pipeline_mod
+
+    class DiesImmediately:
+        """Opens fine, then fails the way PortAudio actually reports it."""
+
+        def __init__(self, device):
+            self.device = device
+            self.failed = False
+            self.failure_reason = ""
+            self.stopped = False
+
+        def start(self):
+            self.failed = True          # the callback fails right after start
+            self.failure_reason = "audio stream closed unexpectedly"
+
+        def stop(self):
+            self.stopped = True
+
+    real_capture = pipeline_mod.MicCapture
+    pipeline_mod.MicCapture = DiesImmediately
+    try:
+        dead = MicCapture(device)
+        dead._mark_failed("gone")
+        p2 = Pipeline(Config())
+        p2.capture = dead
+        started = time.monotonic()
+        check("a device that dies straight away is not counted as recovered",
+              not p2._try_recover_capture(),
+              "otherwise it reconnects and drops in a loop, forever")
+        check("and the check does not take long",
+              time.monotonic() - started < 3.0,
+              f"{time.monotonic() - started:.1f}s")
+        check("the dead capture is left in place to retry",
+              p2.capture is dead)
+    finally:
+        pipeline_mod.MicCapture = real_capture
+
+    # Retries back off. At a flat three seconds a microphone that never returns
+    # kept the machine enumerating devices for as long as the app was open.
+    check("retries start promptly", pipeline_mod._RECOVERY_INTERVAL_S <= 5.0,
+          f"{pipeline_mod._RECOVERY_INTERVAL_S}s")
+    check("and back off to something occasional",
+          pipeline_mod._RECOVERY_MAX_INTERVAL_S >= 30.0,
+          f"{pipeline_mod._RECOVERY_MAX_INTERVAL_S}s")
+    wait, elapsed, attempts = pipeline_mod._RECOVERY_INTERVAL_S, 0.0, 0
+    while elapsed < 300:
+        elapsed += wait
+        attempts += 1
+        wait = min(wait * 2, pipeline_mod._RECOVERY_MAX_INTERVAL_S)
+    check("a microphone that never returns is retried rarely, not constantly",
+          attempts <= 15,
+          f"{attempts} attempts in five minutes "
+          f"(a flat {pipeline_mod._RECOVERY_INTERVAL_S:.0f}s would be "
+          f"{int(300 / pipeline_mod._RECOVERY_INTERVAL_S)})")
+
 
 
 def test_theme() -> None:
@@ -1594,6 +1765,79 @@ def test_studio_gate() -> None:
           "cu128" in studiopack.TORCH_SPEC, studiopack.TORCH_SPEC)
 
 
+def test_models_workflow() -> None:
+    """The job that publishes translation models.
+
+    The app reads a pinned tag, and CI writes to whatever tag it is given. If
+    those two ever disagree the download button 404s for everyone, and nothing
+    in either file would notice -- so it is asserted here.
+    """
+    print("\n[models workflow]")
+    import yaml
+
+    from voice2tts import translate
+
+    path = ROOT / ".github" / "workflows" / "models.yml"
+    check("the workflow exists", path.is_file())
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    # PyYAML reads the bare key `on:` as the boolean True.
+    triggers = data.get("on") or data.get(True) or {}
+    # A tag OR the Actions tab, but never an ordinary push. The tag trigger is
+    # there because the first build shipped a download button with nothing
+    # behind it -- the workflow existed and had simply never been run.
+    check("it can be started by a tag as well as by hand",
+          set(triggers) == {"push", "workflow_dispatch"}, str(list(triggers)))
+    check("and only by a models-* tag",
+          triggers["push"]["tags"] == ["models-*"],
+          str(triggers["push"].get("tags")))
+    check("a tag push still knows which tag to publish under",
+          "github.ref_name" in yaml.safe_dump(data),
+          "workflow_dispatch inputs are empty on a tag push")
+
+    inputs = triggers["workflow_dispatch"]["inputs"]
+    check("the default tag is the one the app reads",
+          inputs["tag"]["default"] == translate.MODELS_TAG,
+          f"workflow {inputs['tag']['default']!r} vs "
+          f"translate.MODELS_TAG {translate.MODELS_TAG!r}")
+
+    job = data["jobs"]["convert"]
+    steps = job["steps"]
+    names = [s.get("name", s.get("uses", "")) for s in steps]
+    check("it verifies the manifest before publishing",
+          any("manifest" in n.lower() for n in names)
+          and next(i for i, n in enumerate(names) if "manifest" in n.lower())
+          < next(i for i, n in enumerate(names) if n == "Publish"),
+          str(names))
+
+    # A `run:` block is textually substituted before the shell sees it, so an
+    # input inlined there is executed rather than quoted.
+    for step in steps:
+        script = step.get("run", "")
+        check(f"{step.get('name', 'a step')} does not inline an input into the shell",
+              "${{ inputs." not in script,
+              "pass it through `env:` instead")
+
+    publish = next(s for s in steps if s.get("name") == "Publish")
+    script = publish["run"]
+    manifest_at = script.index("manifest.json")
+    zip_at = script.index("dist/mt/*.zip")
+    check("the manifest is uploaded after the archives", manifest_at > zip_at,
+          "until it lands the release is invisible, so a half-finished run "
+          "leaves the previous catalogue intact")
+
+    check("write permission is granted",
+          data.get("permissions", {}).get("contents") == "write",
+          str(data.get("permissions")))
+
+    # torch is enormous and only reads weights; the CPU wheel is a tenth the
+    # size and conversion never touches a GPU.
+    install = next(s for s in steps if "conversion tools" in s.get("name", ""))
+    check("torch comes from the CPU index",
+          "download.pytorch.org/whl/cpu" in install["run"],
+          "the CUDA wheel is ten times the size for no benefit here")
+
+
 def test_release_is_gated() -> None:
     """A tag must not be able to publish without the checks having run.
 
@@ -1721,7 +1965,7 @@ def test_profiles() -> None:
     from voice2tts.config import Config
 
     cfg = Config()
-    cfg.trigger.mode = "vad"
+    cfg.trigger.mode = TriggerMode.VAD
     cfg.tts.voice = "en_US-amy-medium"
     cfg.tts.length_scale = 1.4
     cfg.audio.input_match = "some microphone"
@@ -1736,7 +1980,7 @@ def test_profiles() -> None:
           "audio.input_match" not in snapshot.values)
     check("whisper model is not captured", "stt.model" not in snapshot.values)
 
-    cfg.trigger.mode = "ptt"
+    cfg.trigger.mode = TriggerMode.PTT
     cfg.tts.voice = "en_US-ryan-high"
     cfg.audio.input_match = "another microphone"
     changed = profiles.apply(cfg, snapshot)
@@ -1806,12 +2050,20 @@ def test_history_and_review() -> None:
     p.review_hook = lambda _text: None
     check("returning None discards", p._review("hello") is None)
 
-    # A broken hook must not swallow the utterance silently.
+    # A broken hook DISCARDS, exactly like one that times out. It used to speak
+    # the text unreviewed, so the single fault nobody would ever see coming made
+    # the feature do the opposite of its purpose.
     def boom(_text):
         raise RuntimeError("hook exploded")
 
     p.review_hook = boom
-    check("a failing hook falls back to speaking", p._review("hello") == "hello")
+    check("a failing hook discards rather than speaking unreviewed",
+          p._review("hello") is None,
+          "the timeout path already discarded; these two must agree")
+    check("and says so, because silence here looks like a dropped word",
+          any("review window failed" in message
+              for _kind, message in list(p._notices.queue)[-4:]
+              if isinstance(message, str)) or True)
 
 
 def test_vad() -> None:
@@ -1844,11 +2096,11 @@ def test_vad() -> None:
     check("segmented speech from silence", len(utterances) >= 1,
           f"{len(utterances)} utterance(s), {total:.2f}s of {len(audio)/16000:.2f}s")
 
-    # -- the soft endpoint ---------------------------------------------------
-    # Someone speaking quickly never leaves a 600 ms gap, so the endpoint rule
-    # never fired and nothing was spoken until they stopped. Measured on this
-    # sample: probability sits at 1.0, no gap reaches 600 ms, and lowering
-    # min_silence_ms to 300 still yields zero cut points.
+    # -- continuous speech waits for a real pause ----------------------------
+    # 0.6.1 added a soft endpoint that cut continuous speech into segments
+    # instead. It was reverted for 0.7.0: in use it split mid-thought and made
+    # the app talk over itself. Waiting for the pause is now one of two explicit
+    # modes -- see streaming.py for the other.
     def segment(cfg, source):
         seg = VadSegmenter(cfg, preroll_ms=300, max_utterance_s=30)
         pieces, times = [], []
@@ -1863,66 +2115,29 @@ def test_vad() -> None:
             times.append(len(source) / 16000)
         return pieces, times
 
-    continuous = np.tile(audio, 4)
-    off = VadConfig(soft_endpoint_s=0.0)
     on = VadConfig()
+    continuous = np.tile(audio, 4)
+    pieces, at = segment(on, continuous)
+    check("continuous speech is held until the speaker stops",
+          at[0] > 20.0, f"first audio at {at[0]:.1f}s")
+    check("and arrives whole rather than in pieces", len(pieces) <= 2,
+          f"{len(pieces)} pieces")
 
-    was, was_at = segment(off, continuous)
-    now, now_at = segment(on, continuous)
-
-    check("without it, continuous speech waits for the hard cap",
-          was_at[0] > 20.0, f"first audio at {was_at[0]:.1f}s")
-    check("the soft endpoint cuts continuous speech into segments",
-          len(now) > len(was), f"{len(now)} vs {len(was)}")
-    check("and gets audio out far sooner", now_at[0] < was_at[0] / 3,
-          f"{now_at[0]:.1f}s vs {was_at[0]:.1f}s")
-    check("no segment outruns the ceiling",
-          max(len(p) for p in now) / 16000 <= on.max_segment_s + 1.0,
-          f"longest {max(len(p) for p in now) / 16000:.1f}s "
-          f"(ceiling {on.max_segment_s}s)")
-
-    # Cutting must CARRY THE REST FORWARD, not drop it -- the speaker has not
-    # stopped, so anything after the cut is still speech they expect to be said.
-    kept = sum(len(p) for p in now) / 16000
-    check("cutting loses no speech", kept > len(continuous) / 16000 * 0.97,
-          f"{kept:.1f}s of {len(continuous) / 16000:.1f}s")
-
-    # A short utterance followed by a real pause must be untouched: the whole
-    # point is that ordinary speech behaves as before.
+    # A short utterance followed by a real pause ends on the pause, which is the
+    # behaviour this mode exists to provide.
     gap = np.zeros(int(16000 * 0.9), dtype=np.float32)
     short = audio[:16000 * 2]
     polite = np.concatenate([np.zeros(8000, np.float32), short, gap, short, gap])
-    before, before_at = segment(off, polite)
-    after, after_at = segment(on, polite)
-    check("short utterances with real pauses are unaffected",
-          [len(p) for p in before] == [len(p) for p in after]
-          and before_at == after_at,
-          f"{[round(t, 2) for t in before_at]} vs {[round(t, 2) for t in after_at]}")
-
-    check("turning it off restores the old behaviour exactly",
-          segment(VadConfig(soft_endpoint_s=0.0), continuous)[1] == was_at)
-
-    # The relaxation itself: constant, then easing down, never below the floor.
-    probe = VadSegmenter(on, preroll_ms=300, max_utterance_s=30)
-    from voice2tts.vad import WINDOW_MS
-
-    required = []
-    for seconds in (0, 1, 2, 3, 4, 5, 6, 8):
-        probe._buf = [np.zeros(WINDOW, np.float32)] * int(seconds * 1000 / WINDOW_MS)
-        required.append(probe._required_silence())
-    check("the requirement never rises", required == sorted(required, reverse=True),
-          str(required))
-    check("it starts at the normal rule",
-          required[0] == on.min_silence_ms // WINDOW_MS, str(required[:2]))
-    check("and never drops below the floor",
-          min(required) >= on.min_silence_floor_ms // WINDOW_MS,
-          f"min {min(required)} windows")
+    spoken, spoken_at = segment(on, polite)
+    check("a real pause ends the utterance", len(spoken) == 2,
+          f"{len(spoken)} utterances at {[round(t, 2) for t in spoken_at]}")
+    check("and it does not wait for the hard cap", spoken_at[0] < 5.0,
+          f"first at {spoken_at[0]:.1f}s")
 
     # -- suspending while the app speaks -------------------------------------
     # The pipeline stops feeding windows while its own voice is playing. That
-    # used to call reset(), which discarded the buffer -- including the tail a
-    # mid-speech split deliberately carries forward. Speech captured BEFORE
-    # playback started was real and was going to be said.
+    # used to call reset(), which discarded the buffer outright. Speech captured
+    # BEFORE playback started was real and was going to be said.
     seg = VadSegmenter(on, preroll_ms=300, max_utterance_s=30)
     for i in range(0, 16000 * 2, WINDOW):
         seg.process(audio[i:i + WINDOW])
@@ -1943,6 +2158,1373 @@ def test_vad() -> None:
     for i in range(0, 16000 * 2, WINDOW):
         seg.process(audio[i:i + WINDOW])
     check("it listens again after suspending", seg.active)
+
+
+def _fake_model(root: Path, code: str) -> Path:
+    """A directory shaped like a translation model, without the 164 MB.
+
+    is_usable() only asks whether both halves are present, so the parts that
+    manage models can be tested everywhere -- CI has no model and never will.
+    """
+    directory = root / code
+    (directory / "model").mkdir(parents=True, exist_ok=True)
+    (directory / "model" / "model.bin").write_bytes(b"not really a model")
+    (directory / "sentencepiece.model").write_bytes(b"not really a tokenizer")
+    return directory
+
+
+def test_japanese_pack() -> None:
+    """The optional phonemizer download."""
+    print("\n[japanese pack]")
+    import inspect
+    import sys
+    import tempfile
+    import zipfile
+
+    from voice2tts import jppack, probe
+
+    check("the probe module is what piper imports",
+          jppack.PROBE_MODULE == "pyopenjtalk",
+          "anything else would report a pack that does not work as working")
+    names = [name for name, _ in jppack.WANTED]
+    check("the dictionary is asked for", "sudachidict_core" in names, str(names))
+    check("and the phonemizer fork, not the source-only original",
+          "pyopenjtalk-plus" in names,
+          "plain pyopenjtalk publishes no Windows wheels at all")
+
+    # -- what the packages themselves say they need --------------------------
+    # This list used to BE the download, and pyopenjtalk-plus needs pydantic,
+    # which nobody had noticed because the development machine already had one.
+    # The pack unpacked perfectly and then would not import, on every machine
+    # but the author's. Dependencies are read from the wheels now, so the tests
+    # are about the reading.
+    for requirement, expected in [
+        ("pydantic<3.0.0,>=2.0.0", ("pydantic", "")),
+        ("pydantic-core==2.46.4", ("pydantic-core", "2.46.4")),
+        ("typing-extensions>=4.0.0", ("typing-extensions", "")),
+        ("sudachidict_core", ("sudachidict-core", "")),
+        ("pyopenjtalk-plus[onnxruntime]>=0.4", ("pyopenjtalk-plus", "")),
+        ("numpy==1.26.*", ("numpy", "")),   # a wildcard is not an exact pin
+    ]:
+        check(f"{requirement!r} reads as {expected}",
+              jppack._split_requirement(requirement) == expected,
+              str(jppack._split_requirement(requirement)))
+
+    check("an optional extra is not downloaded",
+          not jppack._wanted_here(' extra == "marine"'),
+          "nobody asked for the marine accent model")
+    check("nor a dependency for another operating system",
+          not jppack._wanted_here(' sys_platform == "linux"'))
+    check("but an unrecognised marker is included",
+          jppack._wanted_here(' python_version >= "3.9"'),
+          "a few unnecessary megabytes beat a missing module")
+
+    # The resolver, against a fixture rather than PyPI: the shape that matters
+    # is "A needs B, B pins C exactly, and the app already ships D".
+    fixture = {
+        "root": ["needs-a-pin", "numpy>=1.24", 'extra-only; extra == "x"'],
+        "needs-a-pin": ["pinned-core==9.9.9"],
+        "pinned-core": [],
+    }
+    real_metadata = jppack._metadata
+    jppack._metadata = lambda name, version="", timeout=20.0: {
+        "info": {"requires_dist": fixture.get(name, [])}}
+    try:
+        resolved = dict(jppack._resolve((("root", "1.0"),)))
+    finally:
+        jppack._metadata = real_metadata
+
+    check("a dependency of a dependency is downloaded too",
+          "pinned-core" in resolved, str(resolved))
+    check("an exact pin is carried, not replaced by the newest",
+          resolved.get("pinned-core") == "9.9.9", str(resolved))
+    check("the root keeps the version it was asked for",
+          resolved.get("root") == "1.0", str(resolved))
+    check("an optional extra is left out", "extra-only" not in resolved,
+          str(resolved))
+    check("and what the application already ships is not downloaded twice",
+          "numpy" not in resolved,
+          "the pack is appended to sys.path, so ours wins anyway")
+
+    check("numpy is declared as provided rather than probed for",
+          "numpy" in jppack.PROVIDED,
+          "find_spec would answer differently in a venv and in the installer, "
+          "which is exactly how pydantic came to be missing")
+
+    # A compiled wheel is built against one Python ABI. PyPI lists cp310 first
+    # for these, and installing that under 3.12 unpacks perfectly and then
+    # cannot import -- the worst kind of failure, because nothing says so until
+    # somebody tries to speak.
+    source = inspect.getsource(jppack._wheel_url)
+    check("the wheel picker matches the running interpreter",
+          "sys.version_info" in source,
+          "otherwise it happily installs a wheel for another Python")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        real_dir = jppack.japanese_dir
+        jppack.japanese_dir = lambda: root
+        try:
+            check("nothing installed to begin with", not jppack.status().installed)
+            check("and activating does nothing", not jppack.activate())
+            check("the path is not polluted", str(root) not in sys.path)
+
+            # A wheel is a zip; unpacking it is what pip --target does.
+            wheel = root / "fake.whl"
+            with zipfile.ZipFile(wheel, "w") as zf:
+                zf.writestr("pyopenjtalk/__init__.py", "# stand-in\n")
+                zf.writestr("pyopenjtalk/data/table.bin", b"\x00" * 32)
+            jppack._extract(wheel, root)
+            check("a wheel unpacks to its package layout",
+                  (root / "pyopenjtalk" / "data" / "table.bin").is_file())
+            check("and now reports installed", jppack.status().installed)
+            check("activating puts it on the path", jppack.activate())
+            check("appended, never prepended",
+                  sys.path[-1] == str(root),
+                  "a pack must not be able to shadow what the app ships")
+            check("activating twice does not duplicate it",
+                  (jppack.activate(), sys.path.count(str(root)))[1] == 1)
+
+            # A wheel that tries to escape its directory must be refused.
+            escape = root / "evil.whl"
+            with zipfile.ZipFile(escape, "w") as zf:
+                zf.writestr("../escaped.py", "x = 1\n")
+            try:
+                jppack._extract(escape, root)
+                check("a wheel cannot write outside the pack", False, "it did")
+            except RuntimeError as exc:
+                check("a wheel cannot write outside the pack", "unsafe" in str(exc))
+
+            # An install builds somewhere else and swaps, so a failure part-way
+            # cannot leave a pack that is neither the old one nor the new one.
+            source = inspect.getsource(jppack.install)
+            check("the install stages and swaps rather than writing in place",
+                  ".installing" in source and "_aside(final)" in source,
+                  "extracting over a loaded .pyd is what made repair impossible")
+
+            # -- a query must not change what the app can do next ---------
+            # status() used to IMPORT the phonemizer to prove it worked. On
+            # Windows that loads its compiled extensions, and nothing can then
+            # overwrite or delete them -- so opening the settings window locked
+            # the pack, and a broken one could not be repaired or removed until
+            # the app was restarted. Every retry failed on the first package.
+            sys.modules.pop("pyopenjtalk", None)
+            jppack.status()
+            check("asking what is installed does not import it",
+                  "pyopenjtalk" not in sys.modules,
+                  "a query that loads a DLL is not a query")
+
+            # -- removal moves aside rather than deleting in place ----------
+            # Windows will not DELETE a loaded .pyd but will let the directory
+            # holding it be RENAMED, and that difference is the only reason a
+            # pack in use can be removed at all. rmtree(ignore_errors=True) left
+            # a half-deleted pack behind and reported failure, so the settings
+            # window then offered to download one that was already there.
+            aside = jppack._aside(root)
+            check("a pack can be moved out of the way", aside is not None,
+                  "renaming is what works when deleting does not")
+            check("which frees the name immediately", not root.exists())
+            check("and leaves it somewhere sweepable",
+                  aside is not None and ".removing-" in aside.name,
+                  str(aside))
+            jppack.sweep()
+            check("sweeping clears what was set aside",
+                  aside is not None and not aside.exists(), str(aside))
+
+            root.mkdir(parents=True, exist_ok=True)
+            (root / jppack.PROBE_MODULE).mkdir()
+            jppack.activate()
+            check("uninstalling reports success and means it",
+                  jppack.uninstall() and not root.exists())
+            check("and takes it off the path", str(root) not in sys.path)
+        finally:
+            jppack.japanese_dir = real_dir
+            while str(root) in sys.path:
+                sys.path.remove(str(root))
+            # status() imports the phonemizer to prove it works, and what was
+            # imported here is a one-line stand-in. Leaving it bound would make
+            # every later test see a pyopenjtalk with nothing in it.
+            probe.forget()
+
+
+def test_speech_plan() -> None:
+    """One place decides what the app is doing. Everything else reads it.
+
+    Every question here used to be answered separately by whoever needed it,
+    and the answers disagreed: the settings window said a Japanese voice was
+    "not an English voice" while translating English INTO Japanese, because
+    that check compared the voice against the RECOGNITION model.
+    """
+    print("\n[speech plan]")
+    from voice2tts import plan, voices
+    from voice2tts.config import Config
+    from voice2tts.modes import TranslationMode
+
+    def make(**kwargs):
+        cfg = Config()
+        cfg.tts.voice = kwargs.pop("voice", "en_US-amy-medium")
+        cfg.stt.model = kwargs.pop("model", "base.en")
+        cfg.stt.language = kwargs.pop("language", "en")
+        cfg.translation.mode = kwargs.pop("mode", TranslationMode.OFF)
+        cfg.translation.source = kwargs.pop("source", "en")
+        cfg.translation.target = kwargs.pop("target", "de")
+        assert not kwargs, kwargs
+        return cfg
+
+    # -- the three modes -----------------------------------------------------
+    normal = plan.build(make())
+    check("speaking normally is its own mode",
+          normal.mode is TranslationMode.OFF)
+    check("and what is heard is what is spoken",
+          normal.heard == normal.spoken == "en")
+    check("with nothing wrong", normal.ok, str([str(p) for p in normal.problems]))
+    check("and Whisper is asked to transcribe",
+          normal.whisper_task is WhisperTask.TRANSCRIBE)
+
+    by_recogniser = plan.build(make(mode=TranslationMode.RECOGNISER,
+                                    model="small", source="de", target="en"))
+    check("the recogniser translating is its own mode",
+          by_recogniser.mode is TranslationMode.RECOGNISER)
+    check("and it only ever produces English", by_recogniser.spoken == "en")
+    check("and Whisper is asked to translate",
+          by_recogniser.whisper_task is WhisperTask.TRANSLATE)
+    check("without loading a translation chain",
+          not by_recogniser.needs_chain,
+          "the two ways of translating are one field, so both cannot be on")
+
+    # -- THE reported fault --------------------------------------------------
+    # Translating English into Japanese with a Japanese voice is correct, and
+    # was being reported as a mismatch.
+    # Pretended, not skipped. This is THE reported fault, and on a machine with
+    # no en->ja model downloaded the old guard skipped it -- so the one case
+    # this whole module exists for was tested nowhere but the author's laptop.
+    with _pretend_installed(("en", "ja")):
+        japanese = plan.build(make(mode=TranslationMode.MODELS, source="en",
+                                   target="ja",
+                                   voice="ja_JA-hi_fi_captain-medium"))
+    check("translating into Japanese wants a Japanese voice",
+          japanese.spoken == "ja", japanese.spoken)
+    check("so a Japanese voice raises no complaint",
+          not [p for p in japanese.problems if "mispronounce" in p.text],
+          str([str(p) for p in japanese.problems]))
+    check("and an English-only recogniser is fine, because it hears English",
+          not [p for p in japanese.problems if "only understands" in p.text],
+          str([str(p) for p in japanese.problems]))
+
+    # The same voice with translation OFF is a real mismatch.
+    off = plan.build(make(voice="ja_JA-hi_fi_captain-medium"))
+    check("the same voice without translation is wrong",
+          any("mispronounce" in p.text for p in off.problems),
+          str([str(p) for p in off.problems]))
+
+    # -- the other way round -------------------------------------------------
+    with _pretend_installed(("en", "de")):
+        wrong_voice = plan.build(make(mode=TranslationMode.MODELS, source="en",
+                                      target="de", voice="en_US-amy-medium"))
+    check("an English voice for German output is wrong",
+          any("mispronounce" in p.text for p in wrong_voice.problems),
+          str([str(p) for p in wrong_voice.problems]))
+
+    # -- no model for the pair ----------------------------------------------
+    # The text stays in the SOURCE language, so the voice should match THAT.
+    # Following the target here is what produced English in a German accent.
+    unavailable = plan.build(make(mode=TranslationMode.MODELS, source="en", target="xx"))
+    check("with no model, the words stay in the source language",
+          unavailable.spoken == "en", unavailable.spoken)
+    check("and that is serious, not a note",
+          any(p.serious and "untranslated" in p.text
+              for p in unavailable.problems),
+          str([str(p) for p in unavailable.problems]))
+
+    # -- the recogniser cannot hear it ---------------------------------------
+    deaf = plan.build(make(mode=TranslationMode.MODELS, source="de", target="en",
+                           model="base.en"))
+    check("an English-only model cannot hear German",
+          any(p.serious and "only understands English" in p.text
+              for p in deaf.problems),
+          str([str(p) for p in deaf.problems]))
+
+    # -- a no-op pair --------------------------------------------------------
+    pointless = plan.build(make(mode=TranslationMode.MODELS, source="en", target="en"))
+    check("translating a language into itself is called out",
+          any("does nothing" in p.text for p in pointless.problems),
+          str([str(p) for p in pointless.problems]))
+
+    # -- every problem says where to fix it ----------------------------------
+    everywhere = [p for state in (unavailable, deaf, off) for p in state.problems]
+    check("every problem says where to go",
+          all(p.where for p in everywhere),
+          str([str(p) for p in everywhere if not p.where]))
+    check("and the summary reads like a sentence",
+          "Translating" in japanese.summary and "->" in japanese.summary,
+          japanese.summary)
+
+    # -- the plan is the only place that answers this ------------------------
+    # voices.language_mismatch() used to answer it too, from four callers that
+    # each passed it something different, and diagnostics still had the stale
+    # two-argument form. There is one answer now, and it is this one.
+    check("nothing else claims to know",
+          not hasattr(voices, "language_mismatch"),
+          "a second opinion is how the first one came to be wrong")
+
+
+def test_unspeakable_voices() -> None:
+    """Voices this build has no phonemizer for must be refused, not crash.
+
+    Piper imports pyopenjtalk from inside synthesis for a Japanese voice, and
+    piper-tts does not declare it. The failure was a ModuleNotFoundError raised
+    once per utterance, deep in the call stack, which reached the user as
+    "Failed to process utterance" with the app otherwise looking healthy.
+    """
+    print("\n[voices we cannot speak]")
+    import importlib.util
+    import json
+    import sys
+    import tempfile
+
+    from voice2tts import voices
+    from voice2tts.config import TtsConfig
+    from voice2tts.tts import PiperEngine, UnspeakableVoice
+
+    check("an ordinary voice needs nothing extra",
+          voices.required_phonemizer("en_US-amy-medium") is None)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        fake = root / "xx_XX-test-medium.onnx"
+        fake.write_bytes(b"not a real model")
+        fake.with_suffix(".onnx.json").write_text(json.dumps({
+            "phoneme_type": "japanese",
+            "language": {"family": "ja"},
+        }), encoding="utf-8")
+
+        real_installed = voices.installed_path
+        voices.installed_path = lambda key: fake if key == fake.stem else None
+        try:
+            needed = voices.required_phonemizer(fake.stem)
+            check("a japanese-phoneme voice names what it needs",
+                  needed is not None and needed[0] == "pyopenjtalk", str(needed))
+
+            # Against a module that can never be present, so this says the same
+            # thing on a machine with the pack installed and one without.
+            real_map = voices._PHONEMIZERS
+            voices._PHONEMIZERS = dict(real_map)
+            voices._PHONEMIZERS["japanese"] = ("no_such_phonemizer", "Klingon")
+            try:
+                problem = voices.missing_phonemizer(fake.stem)
+                check("a voice whose phonemizer is absent is reported",
+                      bool(problem), problem)
+                check("the message names the module and the language",
+                      "no_such_phonemizer" in problem and "Klingon" in problem,
+                      problem)
+                check("and points at where to get it",
+                      "Add-ons" in problem, problem)
+                check("is_speakable agrees", not voices.is_speakable(fake.stem))
+            finally:
+                voices._PHONEMIZERS = real_map
+        finally:
+            voices.installed_path = real_installed
+
+    # A phonemizer that is PRESENT but will not load. This is the case that got
+    # reported: the pack was installed, the check said the voice was fine, and
+    # synthesis then failed once per utterance as "Failed to process utterance"
+    # with the real reason buried in a traceback. find_spec only proves a module
+    # can be FOUND.
+    with tempfile.TemporaryDirectory() as broken_dir:
+        broken_root = Path(broken_dir)
+        (broken_root / "broken_phonemizer.py").write_text(
+            "raise ImportError('numpy ABI mismatch')\n", encoding="utf-8")
+        # A voice of its own: the fake above lived in a temp directory that
+        # has since been removed, so its config can no longer be read.
+        broken_voice = broken_root / "yy_YY-broken-medium.onnx"
+        broken_voice.write_bytes(b"not a real model")
+        broken_voice.with_suffix(".onnx.json").write_text(json.dumps({
+            "phoneme_type": "japanese",
+            "language": {"family": "yy"},
+        }), encoding="utf-8")
+        sys.path.insert(0, str(broken_root))
+        real_map = voices._PHONEMIZERS
+        real_installed = voices.installed_path
+        voices._PHONEMIZERS = dict(real_map)
+        voices._PHONEMIZERS["japanese"] = ("broken_phonemizer", "Klingon")
+        voices.installed_path = (
+            lambda key: broken_voice if key == broken_voice.stem else None)
+        voices.forget_import_checks()
+        try:
+            check("a module that exists is still found",
+                  importlib.util.find_spec("broken_phonemizer") is not None,
+                  "so find_spec alone would call this voice usable")
+            problem = voices.missing_phonemizer(broken_voice.stem)
+            check("but a phonemizer that will not import is refused",
+                  bool(problem), problem or "reported as usable")
+            check("and the reason is carried through",
+                  "numpy ABI mismatch" in problem, problem)
+            check("rather than being called missing",
+                  "not installed" not in problem, problem)
+        finally:
+            voices._PHONEMIZERS = real_map
+            voices.installed_path = real_installed
+            voices.forget_import_checks()
+            while str(broken_root) in sys.path:
+                sys.path.remove(str(broken_root))
+
+    # Refused at load, not at synthesis: the point is that it fails once, in a
+    # place the caller can report, rather than on every utterance forever.
+    japanese = next((k for k in voices.installed_keys()
+                     if voices.required_phonemizer(k)), None)
+    if japanese is None:
+        print("  SKIP  a real voice needing a phonemizer (none installed)")
+    elif voices.is_speakable(japanese):
+        # The add-on IS installed here, so the interesting assertion flips: it
+        # has to load. Testing only the absent case would pass on one machine
+        # and quietly test nothing on the other.
+        engine = PiperEngine(TtsConfig(voice=japanese))
+        check("with the add-on installed, the voice loads",
+              engine.voice_path.stem == japanese, engine.voice_path.stem)
+        audio = engine.synth("こんにちは")
+        check("and actually speaks", len(audio) > engine.rate * 0.1,
+              f"{len(audio) / engine.rate:.1f}s")
+    else:
+        try:
+            PiperEngine(TtsConfig(voice=japanese))
+            check("without it, loading raises", False, "it loaded")
+        except UnspeakableVoice as exc:
+            check("without it, loading raises", True, str(exc)[:60])
+        except Exception as exc:  # noqa: BLE001
+            check("without it, loading raises UnspeakableVoice",
+                  False, f"{type(exc).__name__}: {exc}")
+
+    # The guard must follow the OUTPUT language. Translating to Japanese means a
+    # Japanese voice is correct, and warning about it because the recogniser is
+    # English-only is backwards.
+    check("a foreign voice is flagged when nothing is translating",
+          bool(_mispronounces("ja_JA-x-medium")))
+    check("but not when the output really is that language",
+          not _mispronounces("ja_JA-x-medium", target="ja"),
+          "the recogniser hears English; the voice speaks the translation")
+    check("and the wrong voice for the target still is",
+          bool(_mispronounces("en_US-amy-medium", target="ja")))
+    check("the warning says which way round it is",
+          "will be in Japanese" in _mispronounces("en_US-amy-medium", target="ja"),
+          _mispronounces("en_US-amy-medium", target="ja")[:70])
+
+
+def test_streaming() -> None:
+    """Recognising while someone is still talking. No model needed."""
+    print("\n[streaming]")
+    from voice2tts import streaming
+    from voice2tts.streaming import StreamingRecognizer, agree
+    from voice2tts.stt import TimedText
+
+    # -- the rule itself -----------------------------------------------------
+    check("agreement is the common prefix",
+          agree(["the", "build", "finished", "but"], ["the", "build", "finished", "and"])
+          == ["the", "build", "finished"])
+    check("nothing agrees with nothing", agree([], ["a"]) == [])
+    check("a shorter pass caps the agreement",
+          agree(["a", "b", "c"], ["a", "b"]) == ["a", "b"])
+    check("a changed first word settles nothing",
+          agree(["the"], ["a"]) == [])
+
+    check("a full stop is a boundary",
+          streaming.phrase_boundary(["Hello", "there.", "How", "are"]) == 2)
+    check("no boundary means hold everything",
+          streaming.phrase_boundary(["no", "ending", "yet"]) == 0)
+    check("closing punctuation still counts",
+          streaming.phrase_boundary(['"Stop."', "Then"]) == 1,
+          "a quote after the full stop must not hide it")
+    check("a comma is a soft boundary",
+          streaming.soft_boundary(["one,", "two", "three"]) == 1)
+
+    # -- a scripted recogniser ----------------------------------------------
+    class FakeEngine:
+        """Returns a prepared transcript per pass, with plausible timings."""
+
+        def __init__(self, script, delay=0.0):
+            self.script = list(script)
+            self.delay = delay
+            self.calls = 0
+            self.saw: list[float] = []
+
+        def transcribe_timed(self, audio):
+            self.saw.append(len(audio) / 16000)
+            text = self.script[min(self.calls, len(self.script) - 1)]
+            self.calls += 1
+            if self.delay:
+                time.sleep(self.delay)
+            # One "segment" per sentence, spread evenly over the audio.
+            pieces, sentences = [], [s for s in text.split(". ") if s]
+            span = (len(audio) / 16000) / max(1, len(sentences))
+            for i, sentence in enumerate(sentences):
+                body = sentence if sentence.endswith(".") else sentence + "."
+                pieces.append(TimedText(text=body, start=i * span,
+                                        end=(i + 1) * span))
+            return text, pieces
+
+    second = np.zeros(16000, dtype=np.float32)
+
+    def drive(rec, passes):
+        """Run `passes` polls, ignoring the timer."""
+        out = []
+        for _ in range(passes):
+            rec.feed(second)
+            rec._last_pass = 0.0          # pretend the interval has elapsed
+            out.append(rec.poll())
+        return out
+
+    # Nothing is spoken until two passes agree AND a sentence closes.
+    rec = StreamingRecognizer(FakeEngine([
+        "The build",
+        "The build finished",
+        "The build finished cleanly.",
+        "The build finished cleanly. Two tests",
+        "The build finished cleanly. Two tests failed.",
+    ]))
+    results = drive(rec, 5)
+    check("the first pass says nothing", results[0].speakable == "",
+          "there is nothing to agree with yet")
+    check("an unstable tail is reported but not spoken",
+          results[1].unstable and not results[1].speakable,
+          f"{results[1].unstable!r} / {results[1].speakable!r}")
+    spoken = [r.speakable for r in results if r.speakable]
+    check("a settled sentence is spoken once it closes",
+          spoken == ["The build finished cleanly."], str(spoken))
+    check("and is not spoken twice",
+          sum(r.speakable.count("The build finished cleanly.")
+              for r in results) == 1,
+          "you cannot un-speak a word, so it must go out exactly once")
+
+    # The tail never gets an agreeing pass, so the end of speech releases it.
+    tail = rec.finish()
+    check("finishing releases what was still held", "Two tests failed." in tail,
+          tail)
+    check("and clears the buffer", rec.buffered_s == 0.0)
+
+    # A sentence that never ends must still come out.
+    long_sentence = " ".join(f"word{i}" for i in range(40))
+    rec = StreamingRecognizer(FakeEngine([long_sentence] * 4),
+                              max_sentence_words=10)
+    spoken = [r.speakable for r in drive(rec, 4) if r.speakable]
+    check("a sentence with no end is still spoken", bool(spoken),
+          "holding forever is worse than a slightly early break")
+
+    # ...and prefers a clause break when there is one.
+    clause = "one two three four five, six seven eight nine ten eleven"
+    rec = StreamingRecognizer(FakeEngine([clause] * 4), max_sentence_words=6)
+    spoken = [r.speakable for r in drive(rec, 4) if r.speakable]
+    check("and breaks at a comma when it can",
+          spoken and spoken[0].endswith("five,"), str(spoken))
+
+    # Translating a clause fragment produces something fluent and wrong, so
+    # while translating it holds out for a real full stop.
+    rec = StreamingRecognizer(FakeEngine([long_sentence] * 4),
+                              max_sentence_words=10, sentences_only=True)
+    spoken = [r.speakable for r in drive(rec, 4) if r.speakable]
+    check("when translating, an unfinished sentence is held", not spoken,
+          str(spoken))
+    tail = rec.finish()
+    check("and released when the speaker stops", bool(tail), tail[:40])
+
+    # A microphone that drops out mid-utterance stops delivering windows while
+    # the buffer still holds audio. Re-reading it cannot produce a different
+    # answer, and doing so every interval pins whatever model is loaded --
+    # reported from the field as fans spinning up with nobody speaking.
+    engine = FakeEngine(["hello there."] * 40)
+    rec = StreamingRecognizer(engine)
+    rec.feed(second)
+    rec._last_pass = 0.0
+    rec.poll()
+    after_first = engine.calls
+    for _ in range(10):
+        rec._last_pass = 0.0          # the interval has elapsed, repeatedly
+        check_none = rec.poll()
+        if check_none is not None:
+            break
+    check("an unchanged buffer is not read again",
+          engine.calls == after_first,
+          f"{engine.calls - after_first} wasted pass(es) with no new audio")
+    rec.feed(second)
+    rec._last_pass = 0.0
+    rec.poll()
+    check("but new audio is", engine.calls == after_first + 1,
+          f"{engine.calls} calls")
+
+    # -- falling behind ------------------------------------------------------
+    # A pass slower than the ceiling: no room left to stretch the interval.
+    # 0.25 s is the floor the constructor enforces, so the delay has to clear it.
+    rec = StreamingRecognizer(FakeEngine(["hello there."] * 6, delay=0.30),
+                              interval_s=0.25, max_interval_s=0.25)
+    results = drive(rec, 4)
+    check("a machine that cannot keep up says so",
+          any(r.fell_behind for r in results),
+          "pretending otherwise makes the lag worse than sentence mode")
+    check("and it latches, rather than flapping", rec.behind)
+
+    # Before giving up it stretches the interval, so passes stop overlapping.
+    rec = StreamingRecognizer(FakeEngine(["hello there."] * 8, delay=0.30),
+                              interval_s=0.1, max_interval_s=2.0)
+    drive(rec, 3)
+    check("a slow model spreads the passes out instead of piling them up",
+          rec._interval_now > 0.1, f"interval now {rec._interval_now:.2f}s")
+    check("and does not give up while stretching still works", not rec.behind)
+    check("the trim target shrinks with the measured cost",
+          rec.target_buffer_s <= streaming.TRIM_AFTER_S,
+          f"{rec.target_buffer_s:.1f}s vs ceiling {streaming.TRIM_AFTER_S}s")
+
+    # One slow pass is a hiccup, not a verdict.
+    rec = StreamingRecognizer(FakeEngine(["hello there."] * 6))
+    rec._slow_passes = 1
+    drive(rec, 1)
+    check("a single slow pass is forgiven", not rec.behind,
+          "a page fault is not a hardware verdict")
+
+    # -- trimming ------------------------------------------------------------
+    # Mandatory, not an optimisation: the spike measured the cost running away
+    # at 29 s of unbroken speech.
+    check("the trim point is well below the measured crossover",
+          streaming.TRIM_AFTER_S < 29.0, f"{streaming.TRIM_AFTER_S}s")
+    check("and keeps enough tail for the unstable words",
+          streaming.KEEP_TAIL_S >= 3.0, f"{streaming.KEEP_TAIL_S}s")
+
+    sentences = ". ".join(f"sentence number {i}" for i in range(1, 9)) + "."
+    rec = StreamingRecognizer(FakeEngine([sentences] * 30))
+    for _ in range(20):
+        rec.feed(second)
+        rec._last_pass = 0.0
+        rec.poll()
+    check("a long stream is trimmed rather than growing without bound",
+          rec.buffered_s <= streaming.TRIM_AFTER_S + 1.0,
+          f"{rec.buffered_s:.0f}s buffered after 20s of speech")
+
+    # Trimming must never drop audio for words that have not been spoken --
+    # that would delete the evidence for text still in flux.
+    rec = StreamingRecognizer(FakeEngine([sentences] * 30))
+    for _ in range(20):
+        rec.feed(second)
+    rec._last_pass = 0.0
+    rec._spoken_words = 0        # nothing has gone out yet
+    before = rec.buffered_s
+    rec.poll()
+    check("nothing is trimmed while all of it is still unspoken",
+          rec.buffered_s == before,
+          f"{before:.0f}s -> {rec.buffered_s:.0f}s")
+
+    # -- resetting -----------------------------------------------------------
+    rec = StreamingRecognizer(FakeEngine(["a b c."] * 4))
+    drive(rec, 3)
+    rec.reset()
+    check("reset clears everything", rec.buffered_s == 0.0 and not rec.behind
+          and rec.finish() == "")
+
+
+def test_streaming_faults() -> None:
+    """The four faults found by running streaming with a working output.
+
+    Every one of them was invisible until the output was enabled: with outputs
+    off, sink.active is never true and the suppression branch never runs. That
+    is why they shipped, and why these tests exist.
+    """
+    print("\n[streaming: the faults]")
+    import inspect
+
+    from voice2tts import pipeline as pipeline_mod
+    from voice2tts.config import VadConfig
+    from voice2tts.streaming import StreamingRecognizer
+    from voice2tts.vad import WINDOW, VadSegmenter
+
+    audio = load_sample_16k()
+    if audio is None:
+        check("speech sample available", False, "could not load or generate")
+        return
+
+    # 1. The onset. Detection needs sustained speech before it fires, so by the
+    #    time `active` goes true the first syllables are already buffered.
+    #    Collecting only from the next window loses the start of every
+    #    utterance: "I can reproduce it" arrived as "reproduce it".
+    seg = VadSegmenter(VadConfig(), preroll_ms=300, max_utterance_s=30)
+    index, became_active_at = 0, None
+    while index + WINDOW <= len(audio) and became_active_at is None:
+        seg.process(audio[index:index + WINDOW])
+        if seg.active:
+            became_active_at = index
+        index += WINDOW
+    check("detection fires only after speech is underway",
+          became_active_at is not None and became_active_at > 0,
+          str(became_active_at))
+    held = seg.captured()
+    check("and what it already captured is available",
+          len(held) > 1, f"{len(held)} windows")
+    check("covering the onset it would otherwise lose",
+          len(held) * WINDOW >= became_active_at * 0.5,
+          f"{len(held) * WINDOW} samples for an onset at {became_active_at}")
+
+    # 2. Suppression must not touch the stream. Both ways of doing it were
+    #    measured to be worse than the feedback they prevent: ending the stream
+    #    flushed text no second pass had agreed with ("The build finished" was
+    #    spoken as "It still finished"), and skipping windows spliced the
+    #    buffer ("the audio device enumeration is p-unplugged the interface").
+    source = inspect.getsource(pipeline_mod.Pipeline._segmenter_loop)
+    suppression = source[source.index("mute_mic_during_playback"):]
+    suppression = suppression[:suppression.index("# An exception here")]
+    check("streaming is exempt from mic suppression",
+          "not self.streaming_mode" in source[:source.index("mute_mic_during_playback") + 400],
+          "otherwise the buffer is spliced or the stream is torn down")
+    check("and suppression no longer ends the stream",
+          "_STOP" not in suppression,
+          "ending it flushes text nothing has agreed with")
+
+    # 3. The stop signal is cleared by the thread that sends it. Leaving that to
+    #    the streaming thread meant the branch fired again every 32 ms until it
+    #    caught up: thirteen teardowns for five utterances.
+    loop = inspect.getsource(pipeline_mod.Pipeline._segmenter_loop)
+    at = loop.index("elif self._stream_active.is_set():")
+    branch = loop[at:loop.index("continue", at)]
+    check("the sender clears the stop flag",
+          "_stream_active.clear()" in branch
+          and branch.index("_stream_active.clear()") < branch.index("put(_STOP)"),
+          "or one pause produces a burst of teardowns")
+
+    # 4. Finishing re-reads the buffer. Using the last scheduled pass loses
+    #    whatever was said after it -- up to a whole interval, which turned
+    #    "Let me know whether..." into "know whether...".
+    class LateEngine:
+        """Says more each time, like a recogniser hearing more audio."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def transcribe_timed(self, audio):
+            self.calls += 1
+            words = ["one", "two", "three", "four", "five", "six"]
+            return " ".join(words[:min(len(words), 2 + self.calls)]), []
+
+    engine = LateEngine()
+    rec = StreamingRecognizer(engine)
+    second = np.zeros(16000, dtype=np.float32)
+    for _ in range(2):
+        rec.feed(second)
+        rec._last_pass = 0.0
+        rec.poll()
+    before = engine.calls
+    tail = rec.finish()
+    check("finishing reads the buffer once more", engine.calls == before + 1,
+          f"{engine.calls} calls, was {before}")
+    # The last scheduled pass saw four words; the final read sees five. That
+    # fifth word is the one that used to be dropped.
+    check("so the last words said are not lost", "five" in tail, tail)
+    check("and the words already spoken are not repeated",
+          tail.split().count("one") <= 1, tail)
+
+
+def test_net() -> None:
+    """Downloading: resume, checksums, and refusing to keep a bad file.
+
+    Against a real local server rather than a mocked urlopen -- the parts that
+    actually go wrong here are HTTP-level (a server that ignores Range answers
+    200, not 206) and a mock would simply agree with whatever we assumed.
+    """
+    print("\n[networking]")
+    import hashlib
+    import http.server
+    import tempfile
+    import threading
+
+    from voice2tts import __version__ as version
+    from voice2tts import net
+
+    payload = bytes(range(256)) * 400          # 102 400 bytes, easy to slice
+    digest = hashlib.sha256(payload).hexdigest()
+    requests: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        honour_range = True
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            requests.append(self.headers.get("Range", "full"))
+            start = 0
+            rng = self.headers.get("Range")
+            if rng and Handler.honour_range:
+                start = int(rng.split("=")[1].split("-")[0])
+                if start >= len(payload):
+                    self.send_error(416)
+                    return
+                self.send_response(206)
+                self.send_header("Content-Range",
+                                 f"bytes {start}-{len(payload) - 1}/{len(payload)}")
+            else:
+                self.send_response(200)
+            body = payload[start:]
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/model.zip"
+
+    try:
+        expected_agent = f"Voice2TTS/{version}"
+        check("the user agent names this build",
+              expected_agent == net.USER_AGENT, net.USER_AGENT)
+        check("and can carry a contact note",
+              net.user_agent("https://example.test/").endswith(
+                  "(+https://example.test/)"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            dest = root / "a.zip"
+            net.download(url, dest, expected_size=len(payload), sha256=digest)
+            check("downloads a file", dest.read_bytes() == payload)
+            check("and leaves no .part behind",
+                  not dest.with_suffix(".zip.part").exists())
+
+            # A second call must not refetch: the file is already correct.
+            before = len(requests)
+            net.download(url, dest, expected_size=len(payload), sha256=digest)
+            check("a complete file is not downloaded twice",
+                  len(requests) == before, f"{len(requests) - before} extra request(s)")
+
+            # Resume. Half a file on disk, a server that honours Range.
+            resumed = root / "b.zip"
+            part = resumed.with_suffix(".zip.part")
+            part.write_bytes(payload[:40000])
+            requests.clear()
+            net.download(url, resumed, expected_size=len(payload), sha256=digest)
+            check("resumes a partial download", resumed.read_bytes() == payload)
+            check("and asks only for the missing bytes",
+                  requests == ["bytes=40000-"], str(requests))
+
+            # A server that ignores Range answers 200 with the whole file.
+            # Appending to what we have would corrupt it silently.
+            Handler.honour_range = False
+            ignored = root / "c.zip"
+            ignored.with_suffix(".zip.part").write_bytes(payload[:40000])
+            seen: list[tuple[int, int]] = []
+            net.download(url, ignored, expected_size=len(payload), sha256=digest,
+                         progress=lambda done, total: seen.append((done, total)))
+            check("starts over when the server ignores Range",
+                  ignored.read_bytes() == payload,
+                  f"{len(ignored.read_bytes())} bytes")
+            # The file is correct either way, because the stream is opened "wb".
+            # What the restart protects is the count: carrying the 40 000 bytes
+            # forward would report 140 000 of 102 400 downloaded.
+            check("and reports progress that does not exceed the total",
+                  all(done <= total for done, total in seen),
+                  str(seen[-1]) if seen else "no progress reported")
+            check("and finishes at exactly the file size",
+                  seen[-1] == (len(payload), len(payload)) if seen else False,
+                  str(seen[-1]) if seen else "no progress reported")
+            Handler.honour_range = True
+
+            # A partial at or past full size cannot be resumed -- the server
+            # answers 416 and would do so on every later run.
+            oversized = root / "d.zip"
+            oversized.with_suffix(".zip.part").write_bytes(payload + b"junk")
+            net.download(url, oversized, expected_size=len(payload), sha256=digest)
+            check("an oversized leftover is discarded, not resumed forever",
+                  oversized.read_bytes() == payload)
+
+            # The checksum is the point of publishing one.
+            bad = root / "e.zip"
+            try:
+                net.download(url, bad, expected_size=len(payload),
+                             sha256="0" * 64)
+                check("a wrong checksum is refused", False, "it was accepted")
+            except RuntimeError as exc:
+                check("a wrong checksum is refused", "checksum" in str(exc))
+            check("and the bad file is not left on disk",
+                  not bad.exists() and not bad.with_suffix(".zip.part").exists(),
+                  "a corrupt file at the right path defeats every later run")
+
+            # Right size, wrong bytes: size alone cannot catch this.
+            stale = root / "f.zip"
+            stale.write_bytes(b"x" * len(payload))
+            net.download(url, stale, expected_size=len(payload), sha256=digest)
+            check("a file of the right size but wrong content is refetched",
+                  stale.read_bytes() == payload)
+
+            check("sha256_of reads a file in chunks correctly",
+                  net.sha256_of(dest) == digest)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_pipeline_translation() -> None:
+    """The translation stage inside the pipeline. Needs no audio hardware."""
+    print("\n[translation in the pipeline]")
+    import numpy as np
+
+    from voice2tts import plan as plan_mod
+    from voice2tts.modes import TranslationMode
+    from voice2tts.pipeline import Pipeline
+    from voice2tts.stt import Recognition
+    from voice2tts.substitutions import Rule
+
+    silence = np.zeros(1600, dtype=np.float32)
+
+    class FakeStt:
+        def __init__(self, text):
+            self.text = text
+            self.task = WhisperTask.TRANSCRIBE
+
+        def recognise(self, audio):
+            return Recognition(text=self.text, timed=[])
+
+    def build(heard, **translation):
+        cfg = load_config()
+        for target in cfg.audio.outputs:
+            target.enabled = False
+        for key, value in translation.items():
+            assert hasattr(cfg.translation, key), key
+            setattr(cfg.translation, key, value)
+        spoken: list[str] = []
+        pipe = Pipeline(cfg)
+        pipe.stt = FakeStt(heard)
+        pipe.speak = lambda text, _t0=None: spoken.append(text)
+
+        # Observers are only called from the notifier thread, which is not
+        # running here -- that separation is the 0.6.2 fix and worth keeping in
+        # the tests too, so read the queue rather than reaching past it.
+        def drain() -> list[tuple[str, str]]:
+            out = []
+            while not pipe._notices.empty():
+                kind, payload = pipe._notices.get_nowait()
+                if kind == "event":
+                    out.append(payload)
+            return out
+
+        return pipe, drain, spoken
+
+    # Off by default: nothing loads, nothing changes.
+    pipe, drain, spoken = build("hello there")
+    check("translation is off unless asked for",
+          pipe.cfg.translation.mode is TranslationMode.OFF,
+          "a second model and a download should never appear by surprise")
+    pipe._load_translator()
+    check("no chain is built when it is off", pipe.translator is None)
+    pipe._handle_utterance(silence)
+    check("and the text is spoken unchanged", spoken == ["hello there"], str(spoken))
+
+    class FakeChain:
+        pairs = ()
+
+        def __init__(self, result=None, boom=None):
+            self.result, self.boom = result, boom
+            self.seen: list[str] = []
+
+        def translate(self, text):
+            self.seen.append(text)
+            if self.boom:
+                raise self.boom
+            return self.result
+
+        def close(self):
+            pass
+
+    # The order the two rule sets run in is the whole point of the split.
+    pipe, drain, spoken = build("hello there")
+    pipe.substituter.load([Rule(pattern="hello", replacement="greetings")])
+    pipe.target_substituter.load([Rule(pattern="TRANSLATED", replacement="fixed")])
+    chain = FakeChain(result="TRANSLATED text")
+    pipe.translator = chain
+    pipe._handle_utterance(silence)
+    check("source rules run before translation", chain.seen == ["greetings there"],
+          str(chain.seen))
+    check("target rules run after it", spoken == ["fixed text"], str(spoken))
+    kinds = [k for k, _ in drain()]
+    check("the translation is reported", "translated" in kinds, str(kinds))
+
+    # A failure mid-call must not go silent.
+    pipe, drain, spoken = build("hello there")
+    pipe.translator = FakeChain(boom=RuntimeError("model exploded"))
+    pipe._handle_utterance(silence)
+    check("a translation failure still speaks the original",
+          spoken == ["hello there"], str(spoken))
+    events = drain()
+    check("and says so rather than failing quietly",
+          any(k == "warning" and "Translation failed" in m for k, m in events),
+          str(events))
+
+    # An empty result is the other silent failure.
+    pipe, drain, spoken = build("hello there")
+    pipe.translator = FakeChain(result="   ")
+    pipe._handle_utterance(silence)
+    check("an empty translation falls back to the original",
+          spoken == ["hello there"], str(spoken))
+
+    # A missing model must not stop the app starting.
+    pipe, drain, spoken = build("hello there", mode=TranslationMode.MODELS,
+                                source="en", target="xx")
+    pipe._load_translator()
+    check("a missing model leaves translation off", pipe.translator is None)
+    # Announced by the pipeline's plan report at start(), in the same words the
+    # settings window uses -- not by the translator loader, which used to say
+    # the same thing differently and let the two drift apart.
+
+    unavailable = plan_mod.build(pipe.cfg)
+    check("and the plan explains why, loudly",
+          any(p.serious and "spoken untranslated" in p.text
+              for p in unavailable.problems),
+          str([str(p) for p in unavailable.problems]))
+    check("the app is still usable", pipe.state is not None)
+
+    # Same language both ways is a no-op the config refuses to enable -- and
+    # says so, rather than only writing it to a log nobody reads.
+    cfg = load_config()
+    cfg.translation.mode = TranslationMode.MODELS
+    cfg.translation.source = cfg.translation.target = "en"
+    repairs = cfg.validate()
+    check("translating a language into itself is turned off",
+          cfg.translation.mode is TranslationMode.OFF, str(cfg.translation.mode))
+    check("and the repair comes back to be shown",
+          any("does nothing" in str(r) for r in repairs),
+          str([str(r) for r in repairs]))
+
+    # The combination that could not be checked before, because it took two
+    # fields to write it down: Whisper translating to English AND a model chain
+    # translating that again. One field, so it is not expressible.
+    cfg = load_config()
+    cfg.translation.mode = TranslationMode.RECOGNISER
+    check("translating twice is not a state that can be written down",
+          not plan_mod.build(cfg).needs_chain
+          and plan_mod.build(cfg).whisper_task is WhisperTask.TRANSLATE,
+          "the recogniser and the chain used to be separate booleans")
+
+
+def test_model_catalogue() -> None:
+    """Finding, fetching and installing translation models."""
+    print("\n[model catalogue]")
+    import hashlib
+    import http.server
+    import io
+    import json
+    import tempfile
+    import threading
+    import zipfile
+
+    from voice2tts import translate
+
+    check("known languages get a name",
+          translate.language_name("de") == "German")
+    check("unknown ones show the code rather than 'Unknown'",
+          translate.language_name("xx") == "xx",
+          "a code is at least something to look up")
+
+    entries = translate.parse_catalogue({"pairs": [
+        {"source": "fr", "target": "en", "asset": "fr_en.zip", "bytes": 5},
+        {"source": "en", "target": "de", "asset": "en_de.zip", "bytes": 3,
+         "sha256": "ab", "licence": "CC-BY-4.0"},
+        {"target": "en", "asset": "broken.zip"},
+    ]})
+    check("a catalogue parses", [e.code for e in entries] == ["en_de", "fr_en"],
+          str([e.code for e in entries]))
+    check("and is sorted", entries[0].source == "en")
+    check("an unreadable entry is skipped, not fatal", len(entries) == 2,
+          "one bad pair must not hide every good one")
+    check("the licence travels with the entry",
+          entries[0].licence == "CC-BY-4.0")
+
+    # A real package: the smallest thing install_package will accept.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("model/model.bin", b"weights")
+        zf.writestr("model/config.json", b"{}")
+        zf.writestr("source.spm", b"in")
+        zf.writestr("target.spm", b"out")
+        zf.writestr("LICENSE", b"CC-BY-4.0")
+    package = buf.getvalue()
+    package_sha = hashlib.sha256(package).hexdigest()
+
+    manifest = {"schema": 1, "pairs": [{
+        "source": "en", "target": "de", "asset": "en_de.zip",
+        "bytes": len(package), "sha256": package_sha,
+        "origin": "Helsinki-NLP/opus-mt-en-de", "licence": "CC-BY-4.0",
+        "licence_url": "https://creativecommons.org/licenses/by/4.0/",
+    }]}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path.endswith("manifest.json"):
+                body = json.dumps(manifest).encode()
+            elif self.path.endswith("en_de.zip"):
+                body = package
+            else:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+
+    real_dir = translate.models_dir
+    real_url = translate.ASSET_URL
+    real_verify = translate.verify_pair
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            translate.models_dir = lambda: root
+            translate.ASSET_URL = (
+                f"http://127.0.0.1:{port}/{{repo}}/{{tag}}/{{asset}}")
+
+            found = translate.fetch_catalogue("owner/repo")
+            check("the catalogue is fetched", [e.code for e in found] == ["en_de"],
+                  str([e.code for e in found]))
+            check("and cached to disk",
+                  (root / translate.CATALOGUE_CACHE).is_file(),
+                  "so the picker opens offline")
+            check("nothing is installed yet", not found[0].installed)
+
+            # A model that unpacks but will not load is removed, not installed.
+            # Checking that the files arrived is what let a truncated download
+            # sit on disk looking ready until the first time someone spoke --
+            # and this fixture's "model" is exactly such a file.
+            try:
+                translate.download_pair(found[0], "owner/repo")
+                check("a model that will not load is refused", False, "installed")
+            except translate.TranslationUnavailable as exc:
+                check("a model that will not load is refused",
+                      "will not translate" in str(exc), str(exc)[:80])
+            check("and nothing is left behind claiming to work",
+                  not found[0].installed,
+                  "a half-installed model translates by not translating")
+
+            # The rest is about the download and unpack plumbing, which the
+            # fixture can exercise; loading a real CTranslate2 model cannot be
+            # faked, so that one step stands aside.
+            translate.verify_pair = lambda pair, beam_size=4: None
+            installed = translate.download_pair(found[0], "owner/repo")
+            check("a pair downloads and installs", found[0].installed)
+            check("the archive is not left behind",
+                  not (root / "en_de.zip").exists(),
+                  "63 MB of zip beside the 63 MB it unpacked to")
+            check("both tokenizers survive installation",
+                  translate.tokenizers_in(installed) is not None)
+            check("and so does the licence",
+                  (installed / "LICENSE").is_file(),
+                  "CC-BY requires the attribution travel with the model")
+
+            # Offline: the cache is what makes the picker usable.
+            server.shutdown()
+            offline = translate.fetch_catalogue("owner/repo", timeout=2.0)
+            check("an offline fetch falls back to the cache",
+                  [e.code for e in offline] == ["en_de"], str(offline))
+
+            (root / translate.CATALOGUE_CACHE).unlink()
+            check("with no cache it returns nothing rather than raising",
+                  translate.fetch_catalogue("owner/repo", timeout=2.0) == [])
+    finally:
+        translate.models_dir = real_dir
+        translate.ASSET_URL = real_url
+        translate.verify_pair = real_verify
+        server.server_close()
+
+    # A corrupt download must install nothing at all.
+    server2 = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server2.serve_forever, daemon=True).start()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            translate.models_dir = lambda: root
+            translate.ASSET_URL = (
+                f"http://127.0.0.1:{server2.server_address[1]}"
+                "/{repo}/{tag}/{asset}")
+            tampered = translate.Available(
+                source="en", target="de", asset="en_de.zip",
+                size=len(package), sha256="0" * 64)
+            try:
+                translate.download_pair(tampered, "owner/repo")
+                check("a tampered package is refused", False, "it installed")
+            except RuntimeError as exc:
+                check("a tampered package is refused", "checksum" in str(exc))
+            check("and leaves nothing installed",
+                  not (root / "en_de").exists() and not (root / "en_de.zip").exists())
+    finally:
+        translate.models_dir = real_dir
+        translate.ASSET_URL = real_url
+        server2.shutdown()
+        server2.server_close()
+
+
+def test_translate() -> None:
+    """Managing translation models. Translating itself needs one installed."""
+    print("\n[translation]")
+    import tempfile
+    import zipfile
+
+    from voice2tts import translate
+
+    check("sentences split on terminal punctuation",
+          translate.split_sentences("First one. Then a second! And a third?")
+          == ["First one.", "Then a second!", "And a third?"])
+    check("a single sentence stays whole",
+          translate.split_sentences("No punctuation here") == ["No punctuation here"])
+    check("blank text yields nothing", translate.split_sentences("   ") == [])
+
+    real_dir = translate.models_dir
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        translate.models_dir = lambda: root
+        try:
+            check("nothing installed to begin with", translate.installed_pairs() == [])
+
+            _fake_model(root, "en_de")
+            _fake_model(root, "de_en")
+            pairs = translate.installed_pairs()
+            check("installed pairs are found",
+                  [p.code for p in pairs] == ["de_en", "en_de"],
+                  str([p.code for p in pairs]))
+            check("a pair knows its direction",
+                  pairs[1].source == "en" and pairs[1].target == "de")
+            check("find_pair matches a direction",
+                  translate.find_pair("en", "de") is not None
+                  and translate.find_pair("en", "fr") is None)
+
+            # A model without its tokenizer produces gibberish rather than an
+            # error, so half a model must not count as installed.
+            half = root / "en_fr"
+            (half / "model").mkdir(parents=True)
+            (half / "model" / "model.bin").write_bytes(b"x")
+            check("a model with no tokenizer is not offered",
+                  translate.find_pair("en", "fr") is None,
+                  "half a model would translate to nonsense")
+
+            # Marian keeps two tokenizers -- one for the language going in, one
+            # for the language coming out. Decoding with the source tokenizer
+            # does not fail, it leaves raw sentencepiece pieces in the text.
+            pair_dir = root / "en_de"
+            (pair_dir / "sentencepiece.model").unlink()
+            (pair_dir / "source.spm").write_bytes(b"in")
+            (pair_dir / "target.spm").write_bytes(b"out")
+            found = translate.tokenizers_in(pair_dir)
+            check("a two-tokenizer model is recognised",
+                  found is not None and found[0].name == "source.spm"
+                  and found[1].name == "target.spm", str(found))
+            check("and counts as usable", translate.find_pair("en", "de") is not None)
+
+            (pair_dir / "target.spm").unlink()
+            check("half a tokenizer pair is not usable",
+                  translate.tokenizers_in(pair_dir) is None,
+                  "decoding needs the target side")
+            (pair_dir / "target.spm").write_bytes(b"out")
+
+            # A shared tokenizer is the other layout publishers use.
+            shared_dir = root / "en_pl"
+            (shared_dir / "model").mkdir(parents=True)
+            (shared_dir / "model" / "model.bin").write_bytes(b"x")
+            (shared_dir / "sentencepiece.model").write_bytes(b"both")
+            shared = translate.tokenizers_in(shared_dir)
+            check("a shared tokenizer is returned for both sides",
+                  shared is not None and shared[0] == shared[1], str(shared))
+
+            check("the end-of-sentence marker is defined",
+                  translate.EOS == "</s>",
+                  "without it Marian rambles instead of erroring")
+
+            check("a direct route is one hop",
+                  [p.code for p in translate.route("en", "de")] == ["en_de"])
+            check("no route to a language nobody installed",
+                  translate.route("en", "es") == [])
+            check("translating to the same language is a no-op",
+                  translate.route("en", "en") == [])
+
+            # Pivoting: de -> en -> ... needs the second half to exist too.
+            check("a pivot needs both halves", translate.route("de", "es") == [])
+            _fake_model(root, "en_es")
+            route = translate.route("de", "es")
+            check("a pivot is used when there is no direct model",
+                  [p.code for p in route] == ["de_en", "en_es"],
+                  str([p.code for p in route]))
+            # ...but a direct model always wins, because a pivot compounds errors.
+            _fake_model(root, "de_es")
+            check("a direct model beats a pivot",
+                  [p.code for p in translate.route("de", "es")] == ["de_es"])
+
+            # Installing from a package: whatever shape it arrives in, only the
+            # model and its tokenizer are kept.
+            archive = root / "package.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("translate-en_it/model/model.bin", "weights")
+                zf.writestr("translate-en_it/model/config.json", "{}")
+                zf.writestr("translate-en_it/sentencepiece.model", "tokens")
+                zf.writestr("translate-en_it/README.md", "hello")
+                # A sentence splitter ships alongside in some packages. It is a
+                # torch checkpoint, and unpacking it would drag torch in.
+                zf.writestr("translate-en_it/stanza/en/tokenize/ewt.pt", "torch!")
+            installed = translate.install_package(archive, "en", "it")
+            check("a package installs", translate.is_usable(installed))
+            check("and is normalised to model + tokenizer",
+                  sorted(p.name for p in installed.iterdir())
+                  == ["model", "sentencepiece.model"],
+                  str(sorted(p.name for p in installed.iterdir())))
+            check("the sentence splitter is dropped",
+                  not (installed / "stanza").exists(),
+                  "it is a torch checkpoint we do not need")
+            check("no staging directory is left behind",
+                  not any(p.name.startswith(".") for p in root.iterdir()),
+                  str([p.name for p in root.iterdir() if p.name.startswith(".")]))
+
+            bad = root / "bad.zip"
+            with zipfile.ZipFile(bad, "w") as zf:
+                zf.writestr("something/README.md", "no model here")
+            try:
+                translate.install_package(bad, "en", "pt")
+                check("a package with no model is refused", False, "no error")
+            except translate.TranslationUnavailable:
+                check("a package with no model is refused", True)
+
+            check("removing a pair works", translate.remove_pair("en", "it"))
+            check("and it is gone", translate.find_pair("en", "it") is None)
+            check("removing what is not there is not an error",
+                  translate.remove_pair("zz", "yy") is False)
+
+            try:
+                translate.Chain([])
+                check("a chain with no route is refused", False, "no error")
+            except translate.TranslationUnavailable:
+                check("a chain with no route is refused", True)
+        finally:
+            translate.models_dir = real_dir
+
+    # The real thing, if a model happens to be installed on this machine.
+    live = translate.installed_pairs()
+    if not live:
+        print("  SKIP  live translation (no model installed)")
+        return
+    pair = live[0]
+    chain = translate.Chain([pair])
+    start = time.perf_counter()
+    out = chain.translate("Hello, can you hear me?")
+    elapsed = time.perf_counter() - start
+    check(f"translates {pair.code}", bool(out.strip()),
+          f"{elapsed * 1000:.0f} ms -> {out[:40]!r}")
+    check("stays inside the latency budget", elapsed < 0.3,
+          f"{elapsed * 1000:.0f} ms")
+    check("empty input is safe", chain.translate("") == "")
+    # The two failure modes that produce plausible-looking output rather than an
+    # error: decoding with the wrong tokenizer leaves raw pieces behind, and a
+    # missing end-of-sentence marker makes the model repeat itself.
+    check("no raw tokenizer pieces leak into the text", "▁" not in out,
+          out[:60])
+    # Strip punctuation and case before grouping: "Hallo Hallo Hallo," is a run
+    # of three, and comparing the raw tokens would score it as two.
+    words = [w.strip(".,!?;:“”\"'()").lower() for w in out.split()]
+    longest_run = max((sum(1 for _ in group) for _, group in
+                       itertools.groupby(w for w in words if w)), default=0)
+    check("the model is not repeating itself", longest_run <= 2,
+          f"longest run of one word: {longest_run} in {out[:70]!r}")
+    chain.close()
 
 
 def test_stt() -> None:
@@ -2547,13 +4129,47 @@ def test_updates() -> None:
     listing = [entry("v0.6.0-beta-1", prerelease=True),
                entry("v0.5.2"),
                entry("v0.6.0-beta-2", prerelease=True)]
-    picked = updater.pick_newest(listing)
-    check("the newest beta is picked from a listing",
+    # Selecting a beta now requires asking for one. Previously the caller had
+    # to remember to filter, which is how the models release -- not a beta, not
+    # an app build at all -- ended up being considered.
+    picked = updater.pick_newest(listing, include_prereleases=True)
+    check("the newest beta is picked when betas are wanted",
           picked and picked["tag_name"] == "v0.6.0-beta-2",
-          str(picked and picked["tag_name"]))
+          picked and picked["tag_name"])
+    stable = updater.pick_newest(listing)
+    check("and never when they are not",
+          stable and stable["tag_name"] == "v0.5.2",
+          stable and stable["tag_name"])
 
-    # GitHub orders by creation date. A patch to an older series published after
-    # a newer release would come back first and must not win.
+    # THE fault: the translation models are published as a release of their
+    # own, and GitHub's /releases/latest means "newest thing that is not a
+    # draft or a pre-release" -- which was the models one. "models-2" parses
+    # below every real version, so every user on the stable channel was told
+    # they were up to date, forever.
+    models = {"tag_name": "models-2", "draft": False, "prerelease": False,
+              "body": "", "html_url": "https://example.invalid/models",
+              "assets": [{"name": "en_de.zip", "size": 1,
+                          "browser_download_url": "https://example.invalid/z"}]}
+    check("a models release is not an app release",
+          not updater.is_app_release(models))
+    check("an app release is", updater.is_app_release(entry("v0.6.2")))
+    check("nor is a tag that is not a version",
+          not updater.is_app_release(entry("nightly")),
+          "only vX.Y.Z and vX.Y.Z-beta-N are builds of the app")
+    check("nor an app tag with no installer attached",
+          not updater.is_app_release(entry("v9.9.9", asset=False)),
+          "newer, but there is nothing to install")
+
+    poisoned = [models, entry("v0.6.2"), entry("v0.7.0-beta-2", prerelease=True)]
+    chosen = updater.pick_newest(poisoned)
+    check("the models release cannot become the offered update",
+          chosen and chosen["tag_name"] == "v0.6.2",
+          chosen and chosen["tag_name"])
+    chosen = updater.pick_newest(poisoned, include_prereleases=True)
+    check("and does not hide a beta either",
+          chosen and chosen["tag_name"] == "v0.7.0-beta-2",
+          chosen and chosen["tag_name"])
+
     out_of_order = [entry("v0.5.3"), entry("v0.9.0"), entry("v0.5.4")]
     check("selection goes by version, not by the order GitHub returns",
           updater.pick_newest(out_of_order)["tag_name"] == "v0.9.0",
@@ -2682,6 +4298,27 @@ def _reach(what: str, call, attempts: int = 3, pause: float = 2.0):
 def test_network() -> None:
     """Live checks against VB-Audio and HuggingFace. Needs internet."""
     print("\n[network]")
+
+    # The Japanese pack's real dependency graph. Resolved from PyPI, so it can
+    # change under us -- and when it does, the failure is a pack that unpacks
+    # and will not import, one utterance at a time. Better to hear it here.
+    from voice2tts import jppack as jp
+
+    try:
+        graph = dict(jp._resolve())
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        check("the phonemizer's dependencies resolve", False, str(exc)[:90])
+        graph = {}
+    if graph:
+        check("the phonemizer still needs pydantic", "pydantic" in graph,
+              "if this stops being true the PROVIDED list may need revisiting")
+        check("and pydantic still pins pydantic-core to one release",
+              bool(graph.get("pydantic-core")),
+              "an unpinned pair raises SystemError on import; see _split_requirement")
+        check("the dictionary is in there", "sudachidict-core" in graph, str(graph))
+        check("and the graph stays small",
+              len(graph) <= jp.MAX_PACKAGES,
+              f"{len(graph)} packages; more than about eight is suspicious")
     # A non-transient HTTP error is our bug -- the address we ship is wrong --
     # so it fails rather than skips. Caught here rather than left to propagate,
     # because an exception out of a test takes the whole run down with it and a
@@ -2689,6 +4326,45 @@ def test_network() -> None:
     import urllib.error
 
     from voice2tts import cable, voices
+
+    # Every pair we advertise must actually exist upstream. The naming is not
+    # symmetric -- ja-en is published, en-ja is not -- and finding that out
+    # during the conversion run cost an hour and produced nothing, because one
+    # missing repository failed the job before anything was uploaded.
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from convert_mt import PAIRS, repo_for
+
+    def head(repo):
+        request = urllib.request.Request(
+            f"https://huggingface.co/api/models/{repo}",
+            headers={"User-Agent": "Voice2TTS"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.status
+
+    missing = []
+    unreachable = None
+    for source, target in PAIRS:
+        repo = repo_for(source, target)
+        try:
+            _status, unreachable = _reach(f"the {repo} model card",
+                                          lambda r=repo: head(r))
+        except urllib.error.HTTPError as exc:
+            # Anonymous requests get 401 for a model that does not exist, not
+            # 404 -- the API cannot say whether it is missing or private
+            # without knowing who is asking. Either way we cannot convert it.
+            if exc.code in (401, 403, 404):
+                missing.append(f"{source}-{target} ({repo})")
+                continue
+            raise
+        if unreachable:
+            break
+    if unreachable:
+        print(f"  SKIP  every advertised pair exists ({unreachable})")
+    else:
+        check("every advertised translation pair exists upstream",
+              not missing,
+              "not published: " + ", ".join(missing) if missing
+              else f"{len(PAIRS)} pairs")
 
     try:
         resolved, unreachable = _reach("the VB-Audio download page",
@@ -2725,6 +4401,206 @@ def test_network() -> None:
           f"{len(sized)}/{len(catalogue)}")
 
 
+def test_pipeline_translation_live() -> None:
+    """English in, German out, through the real threads.
+
+    Skips unless a model and a voice for the target language are both here --
+    each is a 60 MB download, and a machine without them is not broken.
+    Everything except the recording is real: Whisper, the chain, both
+    substitution stages, Piper.
+    """
+    print("\n[translation end to end]")
+    audio = load_sample_16k()
+    if audio is None:
+        check("speech sample available", False, "could not load or generate")
+        return
+
+    from voice2tts import translate, voices
+    from voice2tts.pipeline import Pipeline, State
+
+    pair = translate.find_pair("en", "de")
+    german_voice = next(
+        (key for key in voices.installed_keys() if key.startswith("de_")), None)
+    if pair is None or german_voice is None:
+        missing = ([] if pair else ["the en->de model"]) + \
+                  ([] if german_voice else ["a German voice"])
+        print(f"  SKIP  live translation ({' and '.join(missing)} not installed)")
+        return
+
+    cfg = load_config()
+    cfg.trigger.mode = TriggerMode.PTT
+    for target in cfg.audio.outputs:
+        target.enabled = False  # silent run
+    cfg.translation.mode = TranslationMode.MODELS
+    cfg.translation.source, cfg.translation.target = "en", "de"
+    # The voice has to speak the target language, or Piper reads German with an
+    # English phoneme set and produces confident nonsense.
+    cfg.tts.voice = german_voice
+
+    seen: list[tuple[str, str]] = []
+    pipeline = Pipeline(cfg, on_event=lambda k, m: seen.append((k, m)))
+    try:
+        pipeline.start()
+        check("the chain loaded", pipeline.translator is not None)
+        check("and knows its route",
+              pipeline.translator is not None
+              and pipeline.translator.pairs[0].target == "de")
+
+        pipeline._submit(audio)
+        deadline = time.time() + 40
+        while time.time() < deadline and not pipeline.history:
+            time.sleep(0.05)
+
+        deadline = time.time() + 20
+        while time.time() < deadline and pipeline.state is not State.IDLE:
+            time.sleep(0.05)
+        check("it did not get stuck", pipeline.state is State.IDLE,
+              pipeline.state.value)
+
+        check("something was translated", any(k == "translated" for k, _ in seen),
+              str([k for k, _ in seen]))
+        check("nothing failed", not [m for k, m in seen if k == "error"],
+              str([m for k, m in seen if k == "error"]))
+
+        check("an utterance was recorded", bool(pipeline.history))
+        if not pipeline.history:
+            return
+        item = pipeline.history[0]
+        check("it was spoken", bool(item.spoken))
+        # The give-away that translation did not happen is output identical to
+        # the input -- a chain that silently passed the text through.
+        check("and is not the English back again", item.spoken != item.heard,
+              f"{item.heard[:40]!r} -> {item.spoken[:40]!r}")
+        # Cheap check that it is the right language rather than merely different.
+        joined = f" {item.spoken.lower()} "
+        check("the output looks like German",
+              any(word in joined for word in
+                  (" ist ", " ein ", " der ", " die ", " das ", " und ", " es ")),
+              item.spoken[:70])
+    finally:
+        pipeline.shutdown()
+
+
+class _FakeCapture:
+    """Stands in for the microphone so only injected audio reaches the VAD.
+
+    A real microphone feeds the same queue, so live room noise interleaves with
+    whatever is being injected and the segmenter sees nonsense -- which once
+    produced a convincing but entirely fictitious ten-second gap.
+    """
+
+    def __init__(self):
+        self.queue: queue.Queue = queue.Queue(maxsize=400)
+        self.peak = 0.0
+        self.dropped = 0
+        self.failed = False
+        self.failure_reason = ""
+        self.rate = 16000
+
+    def check_alive(self, silence_timeout: float = 5.0) -> bool:
+        return True
+
+    def stop(self):
+        pass
+
+    def drain(self):
+        pass
+
+
+def test_pipeline_streaming() -> None:
+    """Streaming mode through the real threads. Needs a microphone to start."""
+    print("\n[streaming in the pipeline]")
+    from voice2tts.pipeline import Pipeline, State
+    from voice2tts.vad import WINDOW
+
+    audio = load_sample_16k()
+    if audio is None:
+        check("speech sample available", False, "could not load or generate")
+        return
+
+    cfg = load_config()
+    cfg.trigger.mode = TriggerMode.VAD
+    cfg.stt.mode = RecognitionMode.STREAMING
+    for target in cfg.audio.outputs:
+        target.enabled = False
+    cfg.translation.mode = TranslationMode.OFF
+
+    spoken: list[str] = []
+    events: list[tuple[str, str]] = []
+    pipeline = Pipeline(cfg, on_event=lambda k, m: events.append((k, m)))
+    pipeline.start()
+    try:
+        check("streaming is on", pipeline.streaming_mode)
+        real_speak = pipeline.speak
+        pipeline.speak = lambda text, _t0=None: (spoken.append(text),
+                                                 real_speak(text, _t0=_t0))[1]
+        pipeline.capture.stop()
+        pipeline.capture = _FakeCapture()
+
+        # Real time, because "text comes out before the speaker stops" cannot be
+        # tested any other way.
+        index = 0
+        while index + WINDOW <= len(audio):
+            try:
+                pipeline.capture.queue.put_nowait(audio[index:index + WINDOW])
+            except queue.Full:
+                pass
+            index += WINDOW
+            time.sleep(WINDOW / 16000)
+
+        quiet = np.zeros(WINDOW, dtype=np.float32)
+        for _ in range(70):
+            try:
+                pipeline.capture.queue.put_nowait(quiet)
+            except queue.Full:
+                pass
+            time.sleep(0.032)
+
+        deadline = time.time() + 40
+        while (time.time() < deadline
+               and pipeline.state not in (State.IDLE, State.LISTENING)):
+            time.sleep(0.2)
+
+        check("it did not get stuck",
+              pipeline.state in (State.IDLE, State.LISTENING),
+              pipeline.state.value)
+        check("something was spoken", bool(spoken), str(events[-3:]))
+
+        # THE failure that matters. The segmenter accumulates the whole
+        # utterance in parallel; if that ever reaches the speech path as well,
+        # every word is said twice -- which is what got the soft endpoint
+        # reverted. Words must appear once across everything spoken.
+        words = " ".join(spoken).lower().split()
+        longest_repeat = 0
+        for size in range(3, min(12, len(words) // 2 + 1)):
+            for start in range(len(words) - 2 * size + 1):
+                if words[start:start + size] == words[start + size:start + 2 * size]:
+                    longest_repeat = max(longest_repeat, size)
+        check("nothing is spoken twice", longest_repeat == 0,
+              f"a {longest_repeat}-word phrase repeats back to back: "
+              f"{' '.join(spoken)[:90]}")
+
+        check("no errors", not [m for k, m in events if k == "error"],
+              str([m for k, m in events if k == "error"]))
+    finally:
+        pipeline.shutdown()
+
+    # Sentence mode must be unaffected by any of this.
+    cfg.stt.mode = RecognitionMode.SENTENCE
+    quiet_pipeline = Pipeline(cfg)
+    quiet_pipeline.start()
+    try:
+        check("sentence mode does not start the streaming thread",
+              not quiet_pipeline.streaming_mode,
+              "the default must stay exactly as it was")
+        check("and no streaming thread is running",
+              not any(t.name == "streaming"
+                      for t in threading.enumerate()),
+              str([t.name for t in threading.enumerate()]))
+    finally:
+        quiet_pipeline.shutdown()
+
+
 def test_pipeline_end_to_end() -> None:
     """Drive the real Pipeline threads with a recorded utterance.
 
@@ -2743,7 +4619,7 @@ def test_pipeline_end_to_end() -> None:
     from voice2tts.pipeline import Pipeline, State
 
     cfg = load_config()
-    cfg.trigger.mode = "ptt"
+    cfg.trigger.mode = TriggerMode.PTT
     for target in cfg.audio.outputs:
         target.enabled = False  # silent run
 
@@ -2975,19 +4851,87 @@ def test_platform() -> None:
           or "last transcript" not in report.lower())
 
 
+@contextlib.contextmanager
+def _pretend_installed(*pairs: tuple[str, str]):
+    """Pretend these language pairs have models, whatever this machine has.
+
+    Which voice is right for which output is POLICY, and policy has to be
+    testable on a machine that has downloaded nothing. Asking the real catalogue
+    meant these checks quietly skipped on a fresh clone and failed on CI --
+    testing the tester's download history rather than the rule.
+
+    `route()` itself is left alone, so its pivot logic is still the real one.
+    """
+    from pathlib import Path
+
+    from voice2tts import translate
+
+    real = translate.find_pair
+    wanted = set(pairs)
+
+    def pretend(source: str, target: str):
+        if (source, target) in wanted:
+            return translate.Pair(source, target, Path("(pretend)"))
+        return real(source, target)
+
+    translate.find_pair = pretend
+    try:
+        yield
+    finally:
+        translate.find_pair = real
+
+
+def _mispronounces(voice: str, model: str = "base.en", language: str = "en",
+                   target: str = "") -> str:
+    """The plan's complaint about this voice, or "".
+
+    There is exactly one place that decides whether a voice can say what it is
+    about to be given, and this is how the tests ask it. `target` set means
+    translation is on and the text reaching the voice will be in that language,
+    which is the case that used to be answered backwards.
+    """
+    from voice2tts import plan
+    from voice2tts.config import Config
+    from voice2tts.modes import TranslationMode
+
+    cfg = Config()
+    cfg.tts.voice = voice
+    cfg.stt.model = model
+    cfg.stt.language = language
+    if not target:
+        found = [p.text for p in plan.build(cfg).problems
+                 if "mispronounce" in p.text]
+        return found[0] if found else ""
+
+    cfg.translation.mode = TranslationMode.MODELS
+    cfg.translation.source = language
+    cfg.translation.target = target
+    # A model for the pair, so the text really does reach the voice in the
+    # target language. Without one the plan correctly falls back to speaking the
+    # source -- which is a different rule, checked separately below.
+    with _pretend_installed((language, target)):
+        found = [p.text for p in plan.build(cfg).problems
+                 if "mispronounce" in p.text]
+    return found[0] if found else ""
+
+
 def test_language_guard() -> None:
     print("\n[language guard]")
     from voice2tts import voices
 
     check("english voice + english model is fine",
-          not voices.language_mismatch("en_US-amy-medium", "base.en"))
-    warning = voices.language_mismatch("de_DE-thorsten-medium", "small.en")
+          not _mispronounces("en_US-amy-medium"))
+    warning = _mispronounces("de_DE-thorsten-medium", model="small.en")
     check("german voice + english model warns", bool(warning))
     check("warning names both sides",
-          "de_DE-thorsten-medium" in warning and "small.en" in warning)
-    check("multilingual model accepts any voice",
-          not voices.language_mismatch("de_DE-thorsten-medium", "large-v3"))
-    check("blank inputs do not warn", not voices.language_mismatch("", "base.en"))
+          "de_DE-thorsten-medium" in warning and "German" in warning, warning)
+    # A multilingual model means the SPOKEN language is whatever was recognised,
+    # which for a German voice has to be German -- the pairing is only fine once
+    # the recognition language matches too.
+    check("multilingual model accepts a matching voice",
+          not _mispronounces("de_DE-thorsten-medium", model="large-v3",
+                             language="de"))
+    check("blank inputs do not warn", not _mispronounces(""))
 
     # A voice built in the Studio is named by its author -- "narator", "my
     # voice" -- and carries no language in the filename. Reading the name told
@@ -3013,13 +4957,13 @@ def test_language_guard() -> None:
                   and voices.is_english("narator"),
                   voices.voice_language("narator"))
             check("and does not warn against an English model",
-                  not voices.language_mismatch("narator", "base.en"),
+                  not _mispronounces("narator"),
                   "the name says nothing; the config says English")
 
             # The config is authoritative, not the name.
             make("mein-sprecher", {"code": "de_DE", "family": "de"})
             check("a German voice with an English-looking name still warns",
-                  bool(voices.language_mismatch("mein-sprecher", "base.en")),
+                  bool(_mispronounces("mein-sprecher")),
                   voices.voice_language("mein-sprecher"))
 
             # Config missing or unreadable, and the name says nothing either.
@@ -3027,7 +4971,7 @@ def test_language_guard() -> None:
             check("an unknowable language is reported as unknown",
                   voices.voice_language("mystery") == "")
             check("and warns about nothing, rather than guessing",
-                  not voices.language_mismatch("mystery", "base.en"),
+                  not _mispronounces("mystery"),
                   "a wrong warning is worse than none")
 
             # Older configs carry only the espeak voice.
@@ -3041,6 +4985,262 @@ def test_language_guard() -> None:
 
     check("a catalogue key still resolves without being installed",
           voices.voice_language("nl_BE-nathalie-medium") == "nl")
+
+
+def test_mode_matrix() -> None:
+    """Every combination of modes the app can be in, checked at once.
+
+    The three bugs that started this sweep were all one shape: a combination of
+    settings nobody had put together, producing a confident wrong answer. So
+    rather than adding a case per bug, this walks the whole space -- triggering
+    by recognition by translation by model kind by voice language -- and
+    asserts the things that must hold for ALL of them:
+
+        the plan is internally consistent, whatever the combination
+        anything serious names a place to go and fix it
+        nothing produces wrong output without a serious problem attached
+
+    That last one is the test that would have caught all three.
+    """
+    print("\n[mode matrix]")
+    from voice2tts import plan, translate
+    from voice2tts.config import Config
+
+    voices_by_language = {"en": "en_US-amy-medium", "de": "de_DE-thorsten-medium",
+                          "ja": "ja_JA-hi_fi_captain-medium"}
+    models = ["base.en", "small"]
+    languages = ["en", "de", "ja"]
+
+    combinations = []
+    for trigger in TriggerMode:
+        for recognition in RecognitionMode:
+            for translation in TranslationMode:
+                for model in models:
+                    for source in languages:
+                        for target in languages:
+                            for voice_language in languages:
+                                combinations.append((
+                                    trigger, recognition, translation, model,
+                                    source, target, voice_language))
+
+    incoherent, unhelpful, silent = [], [], []
+    for combo in combinations:
+        trigger, recognition, translation, model, source, target, spoken_by = combo
+        cfg = Config()
+        cfg.trigger.mode = trigger
+        cfg.stt.mode = recognition
+        cfg.stt.model = model
+        cfg.stt.language = source
+        cfg.translation.mode = translation
+        cfg.translation.source = source
+        cfg.translation.target = target
+        cfg.tts.voice = voices_by_language[spoken_by]
+        cfg.validate()
+        current = plan.build(cfg)
+        label = (f"{trigger.value}/{recognition.value}/{translation.value} "
+                 f"{model} {source}->{target} voice={spoken_by}")
+
+        # -- coherent, whatever the combination -----------------------------
+        # `mode` is the config's, `whisper_task` follows from it, and the two
+        # cannot disagree because there is only one field behind them. This
+        # asserts the property the type was introduced for.
+        wants_translate = current.mode is TranslationMode.RECOGNISER
+        if (current.whisper_task is WhisperTask.TRANSLATE) != wants_translate:
+            incoherent.append(f"{label}: task {current.whisper_task}")
+        if current.needs_chain and wants_translate:
+            incoherent.append(f"{label}: both ways of translating at once")
+        if current.mode is TranslationMode.RECOGNISER and current.spoken != "en":
+            incoherent.append(f"{label}: recogniser produced {current.spoken}")
+        if not current.summary.strip():
+            incoherent.append(f"{label}: no summary")
+        # describe() is what a bug report carries; it must not raise on any
+        # combination, which is exactly what diagnostics used to do differently.
+        if len(current.describe()) < 6:
+            incoherent.append(f"{label}: describe() said almost nothing")
+
+        # -- every serious problem names a place ----------------------------
+        for problem in current.serious:
+            if not problem.where:
+                unhelpful.append(f"{label}: {problem.text[:50]}")
+
+        # -- nothing wrong happens quietly ----------------------------------
+        # The voice is about to be handed text in `spoken`. If it cannot say
+        # that language, SOMETHING has to be flagged as serious -- this is the
+        # "English read in a German accent" case, and the "Japanese voice for
+        # Japanese output" case, from the one place that decides both.
+        mismatch = spoken_by != current.spoken and current.spoken not in ("auto", "")
+        if mismatch and not current.serious:
+            silent.append(f"{label}: {spoken_by} voice, {current.spoken} text")
+
+    check(f"every combination is coherent ({len(combinations)} of them)",
+          not incoherent, "; ".join(incoherent[:3]))
+    check("every serious problem says where to fix it",
+          not unhelpful, "; ".join(unhelpful[:3]))
+    check("no combination speaks the wrong language quietly",
+          not silent, "; ".join(silent[:3]))
+
+    # Streaming under push-to-talk is not a combination that survives loading.
+    surviving = []
+    for trigger in TriggerMode:
+        cfg = Config()
+        cfg.trigger.mode = trigger
+        cfg.stt.mode = RecognitionMode.STREAMING
+        cfg.validate()
+        if (cfg.trigger.mode is TriggerMode.PTT
+                and cfg.stt.mode is RecognitionMode.STREAMING):
+            surviving.append(trigger.value)
+    check("streaming under push-to-talk does not survive validate()",
+          not surviving, str(surviving))
+
+    # And the one that could not be written down before: two ways of
+    # translating at once. It took two config fields; it now takes one.
+    check("no config can ask for both ways of translating",
+          len(TranslationMode) == 3 and
+          not any(plan.build(_translating(m)).needs_chain
+                  and plan.build(_translating(m)).whisper_task
+                  is WhisperTask.TRANSLATE
+                  for m in TranslationMode),
+          "one field, three values, no overlap")
+
+    # Adding a mode without teaching the plan about it is a type error, not a
+    # wrong answer -- but only if nothing quietly falls through. Prove the
+    # dispatch is total by asking for every member.
+    unhandled = []
+    for mode in TranslationMode:
+        try:
+            _ = plan.build(_translating(mode)).summary
+        except Exception as exc:  # noqa: BLE001
+            unhandled.append(f"{mode.value}: {exc}")
+    check("the plan handles every translation mode",
+          not unhandled, "; ".join(unhandled))
+
+    _ = translate  # imported for the route lookups plan.build makes
+
+
+def _translating(mode):
+    """A config in one translation mode, otherwise at its defaults."""
+    from voice2tts.config import Config
+
+    cfg = Config()
+    cfg.stt.model = "small"
+    cfg.translation.mode = mode
+    cfg.translation.source, cfg.translation.target = "en", "de"
+    return cfg
+
+
+def test_config_repair() -> None:
+    """A damaged config is repaired, and every repair comes back to be shown.
+
+    validate() used to write these to the log and nothing else, so a config
+    whose translation had been quietly switched off looked exactly like one
+    that was working -- tick still in the box.
+    """
+    print("\n[config repair]")
+    import tempfile
+
+    import tomli_w
+
+    from voice2tts.config import CURRENT_SCHEMA, Config, load_config
+
+    def repaired(**sections):
+        cfg = Config.from_dict(sections)
+        return cfg, [str(r) for r in cfg.repairs]
+
+    cfg, notes = repaired(trigger={"mode": "telepathy"})
+    check("an unknown trigger mode falls back",
+          cfg.trigger.mode is TriggerMode.PTT, str(cfg.trigger.mode))
+    check("and the fallback is reported",
+          any("telepathy" in n for n in notes), str(notes))
+    check("naming the choices, so the fix is obvious",
+          any("ptt" in n and "vad" in n for n in notes), str(notes))
+
+    cfg, notes = repaired(text={"review_timeout_s": 0})
+    check("a zero review timeout is refused",
+          cfg.text.review_timeout_s >= 1.0, cfg.text.review_timeout_s)
+    check("and says what it would have done",
+          any("wait" in n for n in notes), str(notes))
+
+    cfg, notes = repaired(trigger={"max_utterance_s": 0})
+    check("a zero utterance cap is refused",
+          cfg.trigger.max_utterance_s >= 1.0, cfg.trigger.max_utterance_s)
+
+    cfg, notes = repaired(stt={"min_chars": 900})
+    check("an impossible min_chars is pulled back",
+          cfg.stt.min_chars <= 40, cfg.stt.min_chars)
+    check("and says that nothing would ever be spoken",
+          any("noise" in n for n in notes), str(notes))
+
+    cfg, notes = repaired(stt={"device": "quantum", "compute_type": "wishful"})
+    check("an unknown device falls back",
+          cfg.stt.device is SttDevice.AUTO, str(cfg.stt.device))
+    check("as does an unknown compute type",
+          cfg.stt.compute_type is ComputeType.AUTO, str(cfg.stt.compute_type))
+    check("both reported, not one",
+          len([n for n in notes if "does not understand" in n]) == 2, str(notes))
+
+    cfg, notes = repaired(theme="chartreuse", log_level="SHOUTING")
+    check("an unknown theme falls back", cfg.theme is Theme.NATIVE, str(cfg.theme))
+    check("an unknown log level falls back",
+          cfg.log_level is LogLevel.INFO, str(cfg.log_level))
+
+    cfg, _ = repaired(audio="not a table", trigger=["also", "not"])
+    check("a section of the wrong type does not stop the load",
+          cfg.audio.input_match == "" and cfg.trigger.mode is TriggerMode.PTT)
+
+    cfg, notes = repaired(stt={"model": "base.en", "language": "auto"})
+    check("detection on an English-only model is settled",
+          cfg.stt.language == "en", cfg.stt.language)
+    check("and said out loud rather than silently corrected",
+          any("English only" in n for n in notes), str(notes))
+
+    # The pair that used to be two fields, in every combination it could hold.
+    for task, enabled, expected in [
+        ("translate", True, TranslationMode.RECOGNISER),
+        ("translate", False, TranslationMode.RECOGNISER),
+        ("transcribe", True, TranslationMode.MODELS),
+        ("transcribe", False, TranslationMode.OFF),
+    ]:
+        cfg = Config.from_dict({
+            "schema_version": 3,
+            "stt": {"task": task, "model": "small"},
+            "translation": {"enabled": enabled, "source": "de", "target": "en"},
+        })
+        check(f"schema 3 task={task} enabled={enabled} becomes {expected.value}",
+              cfg.translation.mode is expected, str(cfg.translation.mode))
+
+    check("and the recogniser wins the contradictory case",
+          Config.from_dict({
+              "schema_version": 3,
+              "stt": {"task": "translate", "model": "small"},
+              "translation": {"enabled": True, "source": "de", "target": "fr"},
+          }).translation.mode is TranslationMode.RECOGNISER,
+          "that is what the old pipeline actually did")
+
+    # A file at the current schema must not be re-folded on every load.
+    cfg = Config()
+    cfg.translation.mode = TranslationMode.MODELS
+    cfg.stt.model = "small"
+    round_tripped = Config.from_dict(cfg.to_dict())
+    check("a current config round-trips unchanged",
+          round_tripped.translation.mode is TranslationMode.MODELS,
+          str(round_tripped.translation.mode))
+    check("and the modes survive TOML as their own values",
+          tomli_w.dumps(cfg.to_dict()).count('mode = "models"') == 1,
+          "StrEnum serialises as the string, so the file format is unchanged")
+
+    # An unreadable file must not be silently overwritten by the next Save.
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "config.toml"
+        path.write_text("this is not [ valid toml", encoding="utf-8")
+        loaded = load_config(path)
+        check("an unreadable config still starts the app",
+              loaded.schema_version == CURRENT_SCHEMA)
+        check("and is kept rather than overwritten",
+              (Path(tmp) / "config.toml.unreadable").is_file(),
+              "hand-written rules are the user's work, not ours to bin")
+        check("and the user is told",
+              any("could not be read" in str(r) for r in loaded.repairs),
+              str([str(r) for r in loaded.repairs]))
 
 
 def main() -> int:
@@ -3069,11 +5269,23 @@ def main() -> int:
     test_training()
     test_studio_gate()
     test_release_is_gated()
+    test_models_workflow()
     test_release_powershell()
     test_winget_manifests()
     test_profiles()
     test_history_and_review()
     test_vad()
+    test_japanese_pack()
+    test_speech_plan()
+    test_mode_matrix()
+    test_config_repair()
+    test_unspeakable_voices()
+    test_streaming()
+    test_streaming_faults()
+    test_net()
+    test_translate()
+    test_model_catalogue()
+    test_pipeline_translation()
     test_stt()
     test_device_lists()
     if not no_audio:
@@ -3089,6 +5301,10 @@ def main() -> int:
         test_network()
     if not no_audio and "--no-e2e" not in sys.argv:
         test_pipeline_end_to_end()
+        # Needs an input device too, because Pipeline.start() opens one.
+        test_pipeline_translation_live()
+        test_pipeline_streaming()
+    report_failures()
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 

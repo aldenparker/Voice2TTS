@@ -21,6 +21,12 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 # Only these are captured. Anything else is machine-level and stays put.
+#
+# Deliberately NOT here: anything that decides which models get loaded --
+# stt.model, and how translation happens. Switching profile is meant to be
+# instant, and those cost a reload of Whisper or a translation chain. A profile
+# that took four seconds to apply, or half-applied, would be worse than editing
+# Settings.
 PROFILED_FIELDS = (
     "trigger.mode",
     "trigger.hotkey",
@@ -28,6 +34,10 @@ PROFILED_FIELDS = (
     "tts.voice",
     "tts.length_scale",
     "tts.volume",
+    # Paired with trigger.mode on purpose: streaming needs automatic detection,
+    # so a profile that set push-to-talk without this left an impossible pair
+    # for validate() to pull apart afterwards.
+    "stt.mode",
     "vad.threshold",
     "vad.min_silence_ms",
     "text.review_before_speaking",
@@ -45,24 +55,24 @@ class Profile:
 
     @property
     def summary(self) -> str:
-        mode = self.values.get("trigger.mode", "?")
+        mode = str(self.values.get("trigger.mode", "?"))
         voice = str(self.values.get("tts.voice", "?"))
         return f"{mode}, {voice}"
 
 
-def _get(cfg, path: str):
+def _get(cfg: Any, path: str) -> Any:
     section, _, name = path.partition(".")
     return getattr(getattr(cfg, section), name)
 
 
-def _set(cfg, path: str, value) -> None:
+def _set(cfg: Any, path: str, value: Any) -> None:
     section, _, name = path.partition(".")
     setattr(getattr(cfg, section), name, value)
 
 
-def capture(cfg, name: str) -> Profile:
+def capture(cfg: Any, name: str) -> Profile:
     """Snapshot the profiled fields of `cfg`."""
-    values = {}
+    values: dict[str, Any] = {}
     for path in PROFILED_FIELDS:
         try:
             values[path] = copy.deepcopy(_get(cfg, path))
@@ -71,7 +81,7 @@ def capture(cfg, name: str) -> Profile:
     return Profile(name=name, values=values)
 
 
-def apply(cfg, profile: Profile) -> list[str]:
+def apply(cfg: Any, profile: Profile) -> list[str]:
     """Write a profile into `cfg`. Returns the fields that actually changed."""
     changed = []
     for path, value in profile.values.items():
@@ -84,15 +94,18 @@ def apply(cfg, profile: Profile) -> list[str]:
                 changed.append(path)
         except AttributeError:
             log.debug("profile field %s missing; skipped", path)
-    cfg.validate()
+    # A profile is a partial config, so applying one can produce a combination
+    # neither half asked for. Repairs are published rather than dropped, the
+    # same way loading a file publishes them.
+    cfg.repairs = cfg.validate()
     return changed
 
 
-def to_dict(profile: Profile) -> dict:
+def to_dict(profile: Profile) -> dict[str, Any]:
     return dataclasses.asdict(profile)
 
 
-def from_dict(data: dict) -> Profile:
+def from_dict(data: dict[str, Any]) -> Profile:
     return Profile(
         name=str(data.get("name", "")),
         values={k: v for k, v in (data.get("values") or {}).items()

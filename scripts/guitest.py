@@ -9,6 +9,8 @@ Does not load Whisper or Piper -- this is purely about the Tk construction path.
 from __future__ import annotations
 
 import sys
+import threading
+import time
 import tkinter as tk
 from pathlib import Path
 
@@ -16,10 +18,20 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from voice2tts import devices as devices_mod  # noqa: E402
+from voice2tts import gpupack as gpupack_mod  # noqa: E402
+from voice2tts import translate  # noqa: E402
+from voice2tts import updater as updater_mod  # noqa: E402
 from voice2tts.config import OutputTarget, load_config  # noqa: E402
 from voice2tts.gui import SettingsWindow  # noqa: E402
 from voice2tts.icon import make_icon  # noqa: E402
 from voice2tts.logging_setup import setup_logging  # noqa: E402
+from voice2tts.modes import (  # noqa: E402
+    AddonState,
+    RecognitionMode,
+    TranslationMode,
+    TriggerMode,
+    WhisperTask,
+)
 from voice2tts.pipeline import Pipeline, State  # noqa: E402
 from voice2tts.substitutions import STARTER_RULES  # noqa: E402
 from voice2tts.wizard import Wizard  # noqa: E402
@@ -33,6 +45,34 @@ def devices_cable_present() -> bool:
     return cable.detect() is not None
 
 
+# The console on Windows is cp1252, and this suite prints text it does not
+# control: route arrows, voice names, translated text. A character the console
+# cannot represent must degrade to "?", not kill the run half way through.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, OSError):  # redirected to something simpler
+        pass
+
+
+_FAILURES: list[str] = []
+
+
+def report_failures() -> None:
+    """Repeat every failure at the end of the run.
+
+    A run prints a thousand lines and CI log viewers drop the middle, so
+    a failure in the eleventh section of nineteen can be missing from a
+    copied log entirely -- which is exactly what happened, and cost a
+    round trip working out which test it was.
+    """
+    if not _FAILURES:
+        return
+    print(chr(10) + f"{len(_FAILURES)} failure(s), repeated so a truncated log still carries them:")
+    for entry in _FAILURES:
+        print(f"  FAIL  {entry}")
+
+
 def check(name: str, ok: bool, detail: str = "") -> None:
     global passed, failed
     if ok:
@@ -40,6 +80,7 @@ def check(name: str, ok: bool, detail: str = "") -> None:
         print(f"  PASS  {name}" + (f"  ({detail})" if detail else ""))
     else:
         failed += 1
+        _FAILURES.append(name + (f"  ({detail})" if detail else ""))
         print(f"  FAIL  {name}" + (f"  ({detail})" if detail else ""))
 
 
@@ -106,11 +147,125 @@ def main() -> int:
     root.update()
     check("tick ran without engines", True)
 
+    print("\n[output rows]")
+    # Reloading the widgets used to APPEND another set of output rows. Switching
+    # a profile reloads them, so two outputs showed as four, then six -- the
+    # config was right the whole time and only the window was wrong.
+    before = len(win._output_rows)
+    for _ in range(3):
+        win._load_from_config()
+    check("reloading does not duplicate the output rows",
+          len(win._output_rows) == before,
+          f"{before} -> {len(win._output_rows)} after three reloads")
+    check("and the counter matches what is shown",
+          win.output_count.get() == len(win._output_rows),
+          f"counter {win.output_count.get()}, rows {len(win._output_rows)}")
+
+    # Choosing how many, rather than adding them one at a time.
+    win.output_count.set(3)
+    win._set_output_count()
+    check("asking for three gives three", len(win._output_rows) == 3,
+          str(len(win._output_rows)))
+    win._output_rows[0]["match"].set("CABLE Input")
+    win.output_count.set(1)
+    win._set_output_count()
+    check("turning it down removes from the end", len(win._output_rows) == 1,
+          str(len(win._output_rows)))
+    check("so the first one set up survives",
+          win._output_rows[0]["match"].get() == "CABLE Input",
+          win._output_rows[0]["match"].get())
+
+    win.output_count.set(0)
+    win._set_output_count()
+    check("never fewer than one", len(win._output_rows) == 1,
+          "no outputs means the app makes no sound at all")
+    win.output_count.set(999)
+    win._set_output_count()
+    check("and a sane ceiling", len(win._output_rows) <= 8,
+          str(len(win._output_rows)))
+
+    # Removing the last row by hand is the same as turning the number down.
+    win.output_count.set(2)
+    win._set_output_count()
+    win._remove_output_row(win._output_rows[-1])
+    check("removing a row keeps the counter in step",
+          win.output_count.get() == len(win._output_rows) == 1,
+          f"counter {win.output_count.get()}, rows {len(win._output_rows)}")
+    win._remove_output_row(win._output_rows[0])
+    check("and removing the last one leaves a row behind",
+          len(win._output_rows) == 1,
+          "otherwise there is nothing to point at a device")
+
+    win._collect()
+    check("what is shown is what is saved",
+          len(cfg.audio.outputs) == len(win._output_rows),
+          f"{len(cfg.audio.outputs)} saved, {len(win._output_rows)} shown")
+
+    print("\n[window sizing]")
+    # The bar holding Save/Apply/Close sat off the bottom edge until the window
+    # was dragged bigger: the notebook was packed first with expand=True, so it
+    # claimed the whole window and the bar packed after it got nothing.
+    bar = [c for c in win.winfo_children() if c.winfo_class() == "TFrame"][-1]
+    root.update()
+    # The REQUESTED geometry, not winfo_height(): this window is withdrawn, and
+    # an unmapped window reports its natural size on one machine and whatever
+    # the window manager gave it on another. And a screen smaller than the
+    # content is a real situation -- a CI runner's virtual display is -- so the
+    # assertion is "as tall as the content, or as tall as the screen allows".
+    requested = win.geometry().split("+")[0]
+    _asked_w, asked_h = (int(value) for value in requested.split("x"))
+    room = win.winfo_screenheight() - 120
+    check("the window opens as tall as its content, or as tall as it can",
+          asked_h >= min(win.winfo_reqheight(), room) - 1,
+          f"asked for {requested}, content wants "
+          f"{win.winfo_reqwidth()}x{win.winfo_reqheight()}, "
+          f"screen allows {room}")
+    check("and the button bar is inside it",
+          bar.winfo_y() + bar.winfo_height() <= win.winfo_height(),
+          f"bar ends at {bar.winfo_y() + bar.winfo_height()}, "
+          f"window is {win.winfo_height()}")
+
+    # And it stays inside however small the window gets, because the bar now
+    # takes its space before the notebook does.
+    original = win.winfo_geometry()
+    squeezed = []
+    for size in ("500x400", "400x300"):
+        win.geometry(size)
+        root.update()
+        squeezed.append((size, bar.winfo_y() + bar.winfo_height()
+                         <= win.winfo_height()))
+    check("the bar survives being squeezed", all(ok for _, ok in squeezed),
+          str(squeezed))
+
+    # The reason it survives, asserted directly: pack hands out space in packing
+    # order, so the bar has to be packed BEFORE the notebook. Sizing the window
+    # to its content hides this on a roomy screen and it comes back on a small
+    # one, so the order is what gets checked.
+    packed = win.pack_slaves()
+    check("the button bar takes its space before the notebook",
+          packed and packed[0] is bar,
+          f"packing order: {[w.winfo_class() for w in packed]}")
+    win.geometry(original)
+    root.update()
+
     print("\n[voice library tab]")
     rows = win.lib_tree.get_children()
     check("library lists installed voices", len(rows) >= 3, f"{len(rows)} rows")
-    check("bundled voices marked as such",
-          all(win.lib_tree.set(r, "state") in ("bundled", "installed") for r in rows))
+    check("every voice reports a state",
+          all(win.lib_tree.set(r, "state")
+              in ("bundled", "installed", "needs add-on") for r in rows),
+          str({win.lib_tree.set(r, "state") for r in rows}))
+    # A voice this build cannot pronounce is marked before anyone downloads
+    # 60 MB and discovers it in the middle of a call.
+    from voice2tts import voices as voices_mod
+    unspeakable = [r for r in rows if voices_mod.missing_phonemizer(r)]
+    if unspeakable:
+        check("a voice needing an add-on says so",
+              all(win.lib_tree.set(r, "state") == "needs add-on"
+                  for r in unspeakable),
+              str([(r, win.lib_tree.set(r, "state")) for r in unspeakable]))
+    else:
+        print("  SKIP  add-on marking (every installed voice is speakable)")
 
     # Pick a BUNDLED row explicitly rather than assuming row 0 is one -- a
     # user-downloaded voice can sort ahead of the bundled ones, and selecting a
@@ -213,6 +368,416 @@ def main() -> int:
           "switched off" in win.subs_preview.cget("text"),
           win.subs_preview.cget("text"))
     win.subs_enabled_var.set(True)
+
+    print("\n[words tab: two rule lists]")
+    win.subs_which.set("source")
+    win._switch_sub_list()
+    win._subs = []
+    win._target_subs = []
+    win.sub_pattern.set("aiden")
+    win.sub_replacement.set("Aidan")
+    win._add_sub()
+    check("a rule lands in the source list",
+          len(win._subs) == 1 and not win._target_subs,
+          f"{len(win._subs)} source, {len(win._target_subs)} target")
+
+    win.subs_which.set("target")
+    win._switch_sub_list()
+    check("switching clears the editor", win.sub_pattern.get() == "",
+          "otherwise the source rule is one click from joining the target list")
+    check("and shows the other list", not win.subs_tree.get_children(),
+          "the target list is empty")
+
+    win.sub_pattern.set("Strasse")
+    win.sub_replacement.set("Straße")
+    win._add_sub()
+    check("a rule lands in the target list",
+          len(win._target_subs) == 1 and len(win._subs) == 1,
+          f"{len(win._subs)} source, {len(win._target_subs)} target")
+
+    win.subs_which.set("source")
+    win._switch_sub_list()
+    check("the source list is unchanged by target edits",
+          [r.pattern for r in win._subs] == ["aiden"],
+          str([r.pattern for r in win._subs]))
+
+    win._collect()
+    check("both lists are saved",
+          len(cfg.text.substitutions) == 1 and len(cfg.text.target_substitutions) == 1,
+          f"{len(cfg.text.substitutions)} / {len(cfg.text.target_substitutions)}")
+    win._load_from_config()
+    check("and both come back",
+          len(win._subs) == 1 and len(win._target_subs) == 1,
+          f"{len(win._subs)} / {len(win._target_subs)}")
+    check("as rule objects, not dicts",
+          hasattr(cfg.text.target_substitutions[0], "pattern"),
+          type(cfg.text.target_substitutions[0]).__name__)
+
+    print("\n[translate tab]")
+    check("tab built", win.trans_tree.winfo_exists() == 1)
+    check("translation is off by default", not win.trans_enabled.get(),
+          "a download and a second model should never appear by surprise")
+    check("the route line says so",
+          "off" in win.trans_route.cget("text").lower(),
+          win.trans_route.cget("text"))
+
+    # A pair with no model must say so rather than silently doing nothing.
+    win.trans_enabled.set(True)
+    win.trans_source.set("en")
+    win.trans_target.set("xx")
+    win._refresh_translate_route()
+    check("an unavailable pair is called out",
+          "No model" in win.trans_route.cget("text"), win.trans_route.cget("text"))
+
+    win.trans_target.set("en")
+    win._refresh_translate_route()
+    check("translating a language into itself is called out",
+          "does nothing" in win.trans_route.cget("text"),
+          win.trans_route.cget("text"))
+
+    # The interesting case: a real installed model, if there is one.
+    installed = translate.installed_pairs()
+    if installed:
+        pair = installed[0]
+        win.trans_source.set(pair.source)
+        win.trans_target.set(pair.target)
+        win._refresh_translate_route()
+        text = win.trans_route.cget("text")
+        check("an installed pair shows its route",
+              translate.language_name(pair.target) in text, text)
+        # base.en cannot hear anything but English, and the bundled voice speaks
+        # English -- both are worth saying before someone joins a call.
+        if cfg.stt.model.endswith(".en") and pair.source != "en":
+            check("an English-only recogniser is called out",
+                  "English only" in text, text)
+    else:
+        print("  SKIP  installed-pair route (no model installed)")
+
+    win.trans_enabled.set(False)
+    win._refresh_translate_route()
+
+    # The list merges installed models with the catalogue, so it must show what
+    # is installed even when the catalogue was never fetched.
+    win._translate_catalogue = []
+    win._refresh_translate_list()
+    check("the model list shows what is installed",
+          len(win.trans_tree.get_children()) == len(installed),
+          f"{len(win.trans_tree.get_children())} rows for {len(installed)} models")
+
+    win._translate_catalogue = [
+        translate.Available(source="en", target="pt", asset="en_pt.zip",
+                            size=63_000_000, licence="CC-BY-4.0"),
+    ]
+    win._refresh_translate_list()
+    check("a catalogue entry appears as available",
+          "en_pt" in win.trans_tree.get_children(),
+          str(win.trans_tree.get_children()))
+    row = win.trans_tree.item("en_pt", "values")
+    check("with its size and licence", row[1] == "63 MB" and row[3] == "CC-BY-4.0",
+          str(row))
+    offered = [win._language_code(v) for v in win.trans_source_combo["values"]]
+    check("and the language pickers offer it", "pt" in offered, str(offered))
+    # Every language we can name, not only the ones already downloaded: the
+    # picker used to list only installed pairs, so you could not choose German
+    # until you had German, and could not get German without choosing it.
+    check("along with every language we can name",
+          {"de", "fr", "ja"} <= set(offered), str(offered))
+    check("shown with their names, not bare codes",
+          any(v.startswith("de (") for v in win.trans_source_combo["values"]),
+          str(win.trans_source_combo["values"][:4]))
+
+    win.trans_tree.selection_remove(*win.trans_tree.get_children())
+    win._download_pair()
+    check("downloading nothing asks for a selection",
+          "Select" in win.trans_status.cget("text"), win.trans_status.cget("text"))
+
+    print("\n[translation method]")
+    win.trans_method.set("models")
+    win.trans_enabled.set(True)
+    win.trans_source.set("en")
+    win.trans_target.set("de")
+    win._collect()
+    # One field with three values, so "both at once" is not a state the two
+    # widgets can produce. It used to be two booleans guarded only here.
+    check("with models, the chain translates and Whisper transcribes",
+          cfg.translation.mode is TranslationMode.MODELS
+          and win._current_plan().whisper_task is WhisperTask.TRANSCRIBE,
+          f"{cfg.translation.mode} / {win._current_plan().whisper_task}")
+
+    # A multilingual model is what makes Whisper's own translation possible.
+    win.model_var.set("small")
+    win.trans_method.set("recogniser")
+    win._switch_translate_method()
+    check("choosing the recogniser leaves the language pair alone",
+          win._target_code() == "de", win.trans_target.get())
+    win.trans_method.set("models")
+    win._switch_translate_method()
+    check("and switching back still has it", win._target_code() == "de",
+          win.trans_target.get())
+    win.trans_method.set("recogniser")
+    win._switch_translate_method()
+    win._collect()
+    check("the recogniser translates",
+          cfg.translation.mode is TranslationMode.RECOGNISER,
+          str(cfg.translation.mode))
+    check("and nothing can translate twice",
+          not win._current_plan().needs_chain,
+          "one field cannot hold both ways of translating at once")
+
+    # An English-only model has nothing to translate from.
+    win.model_var.set("base.en")
+    win._collect()
+    check("an English-only model refuses the translate task",
+          cfg.translation.mode is TranslationMode.OFF, str(cfg.translation.mode))
+    win.trans_enabled.set(True)
+    win.trans_source.set("de")
+    win._refresh_translate_route()
+    check("and the route line explains it",
+          "only understands English" in win.trans_route.cget("text"),
+          win.trans_route.cget("text"))
+
+    # Speaking English and asking the recogniser for English is a no-op, and
+    # has to be reported as one rather than looking like it works.
+    win.model_var.set("small")
+    win.trans_source.set("en")
+    win.trans_target.set("en")
+    win._refresh_translate_route()
+    check("English to English by the recogniser is called out",
+          "does nothing" in win.trans_route.cget("text"),
+          win.trans_route.cget("text"))
+
+    # base translates badly enough to be worth warning about -- measured, not
+    # assumed: it returns "can you be nice to me?" for "kannst du mich hoeren?".
+    win.model_var.set("base")
+    win.trans_source.set("de")
+    win._refresh_translate_route()
+    check("a model too small to translate well is called out",
+          "too small" in win.trans_route.cget("text"),
+          win.trans_route.cget("text"))
+
+    win.model_var.set("small")
+    win.trans_target.set("en")
+    win._refresh_translate_route()
+    check("a real recogniser route reads cleanly",
+          "Note:" not in win.trans_route.cget("text"),
+          win.trans_route.cget("text"))
+
+    win.trans_enabled.set(False)
+    win.trans_method.set("models")
+    win._collect()
+    check("turning translation off clears both",
+          cfg.translation.mode is TranslationMode.OFF
+          and win._current_plan().whisper_task is WhisperTask.TRANSCRIBE,
+          str(cfg.translation.mode))
+
+    print("\n[matching the voice to the target]")
+    from voice2tts import voices as voices_mod
+
+    # This is the failure the whole guard exists for: German text spoken by an
+    # English voice is confident gibberish, not an error.
+    win.trans_method.set("models")
+    win.trans_enabled.set(True)
+    win.model_var.set("base.en")
+    win.trans_source.set("en")
+    win.trans_target.set("de")
+    english = next(k for k in voices_mod.installed_keys()
+                   if voices_mod.voice_language(k) == "en")
+    win.voice_var.set(english)
+    check("the voice language is actually readable",
+          win._voice_language() == "en", win._voice_language())
+
+    win._refresh_translate_route()
+    german = win._matching_voice("de")
+    if translate.find_pair("en", "de") is None:
+        print("  SKIP  voice mismatch note (no en->de model installed)")
+    else:
+        check("a mismatched voice is reported",
+              "mispronounce" in win.trans_route.cget("text"),
+              win.trans_route.cget("text"))
+        if german:
+            check("and the fix is named",
+                  f"use {german}" in win.trans_route.cget("text"),
+                  win.trans_route.cget("text"))
+
+    if german:
+        check("the button offers the matching voice",
+              win.trans_voice_btn.winfo_manager() != "",
+              "it should be visible while the voice does not match")
+        win._use_matching_voice()
+        check("and switching works", win.voice_var.get() == german,
+              win.voice_var.get())
+        check("the button hides once the voice matches",
+              win.trans_voice_btn.winfo_manager() == "",
+              "there is nothing left to fix")
+        win.voice_var.set(english)
+    else:
+        print("  SKIP  matching-voice button (no German voice installed)")
+
+    win.trans_enabled.set(False)
+    win._refresh_translate_route()
+    check("no voice prompt while translation is off",
+          win.trans_voice_btn.winfo_manager() == "",
+          "nothing is being translated, so nothing mismatches")
+
+    print("\n[translate: the reported faults]")
+    # 1. Trying the recogniser once used to rewrite a saved en->de as en->en.
+    #    validate() then treats that as a no-op and switches translation off, so
+    #    ticking the box afterwards appeared to do nothing at all.
+    win.trans_method.set("models")
+    win.trans_enabled.set(True)
+    win.trans_source.set("en (English)")
+    win.trans_target.set("de (German)")
+    win._collect()
+    check("a pair is stored as codes, not display text",
+          (cfg.translation.source, cfg.translation.target) == ("en", "de"),
+          f"{cfg.translation.source} -> {cfg.translation.target}")
+
+    win.trans_method.set("recogniser")
+    win._switch_translate_method()
+    win._collect()
+    win.trans_method.set("models")
+    win._switch_translate_method()
+    win._collect()
+    check("trying the recogniser does not destroy the target",
+          cfg.translation.target == "de", cfg.translation.target)
+    check("and translation is still on afterwards",
+          cfg.translation.mode is TranslationMode.MODELS,
+          "a target of 'en' would make validate() silently switch it off")
+
+    # 2. A no-op pair unticks the box. Doing that silently looks like the
+    #    checkbox is broken, so it has to say why.
+    win.trans_enabled.set(True)
+    win.trans_source.set("en (English)")
+    win.trans_target.set("en (English)")
+    win._apply()
+    check("a no-op pair switches translation off",
+          cfg.translation.mode is TranslationMode.OFF, str(cfg.translation.mode))
+    check("and says why rather than just unticking",
+          "does nothing" in win.trans_status.cget("text"),
+          win.trans_status.cget("text"))
+    check("and the tick box follows the setting rather than the request",
+          not win.trans_enabled.get(),
+          "a ticked box over a mode of OFF is the lie this sweep is about")
+    win.trans_target.set("de (German)")
+
+    # 3. With no model for the pair the text stays in the SOURCE language, so
+    #    offering a target-language voice produced English read with a German
+    #    accent. The voice must follow what will actually be spoken.
+    win.trans_enabled.set(True)
+    win.trans_source.set("en (English)")
+    win.trans_target.set("de (German)")
+    check("with a model, the voice should speak the target",
+          win._current_plan().spoken == "de"
+          if translate.find_pair("en", "de") else True,
+          win._current_plan().spoken)
+    win.trans_target.set("xx")
+    check("with no model, the voice should stay on the source",
+          win._current_plan().spoken == "en",
+          "otherwise it reads English in a foreign accent")
+    win.trans_source.set("de (German)")
+    win.trans_target.set("fr")
+    win.trans_method.set("recogniser")
+    check("and with the recogniser it is always English",
+          win._current_plan().spoken == "en", win._current_plan().spoken)
+    win.trans_method.set("models")
+    win.trans_source.set("en (English)")
+    win.trans_target.set("de (German)")
+    win.trans_enabled.set(False)
+    win._refresh_translate_route()
+
+    print("\n[recognition mode]")
+    check("sentence mode is the default",
+          cfg.stt.mode is RecognitionMode.SENTENCE,
+          "streaming costs half a core the whole time you are talking")
+    win.stt_mode_var.set("sentence")
+    win._refresh_stt_mode()
+    sentence_note = win.stt_mode_note.cget("text")
+    check("the sentence note says what it costs you",
+          "however long you keep talking" in sentence_note, sentence_note)
+
+    win.stt_mode_var.set("streaming")
+    win._refresh_stt_mode()
+    streaming_note = win.stt_mode_note.cget("text")
+    check("the streaming note states the compute cost",
+          "half a processor core" in streaming_note, streaming_note)
+    check("and that a GPU does not make it cheaper",
+          "same on CPU and GPU" in streaming_note,
+          "measured -- the obvious assumption is wrong, so it is said out loud")
+    check("and that it needs automatic detection",
+          "automatic detection" in streaming_note, streaming_note)
+
+    # Streaming cannot honour mic muting -- pausing the recording mangles the
+    # words -- so anyone relying on that setting has to be told, not surprised.
+    # No manual refresh: the checkbox has a command= now, so ticking it is what
+    # has to update the note. Calling the refresh by hand here was a workaround
+    # that made the test pass over a checkbox wired to nothing.
+    win.mute_var.set(False)   # known state; invoke() toggles from here
+    win.mute_check.invoke()
+    check("it warns that mic muting does not apply",
+          "hear itself" in win.stt_mode_note.cget("text"),
+          win.stt_mode_note.cget("text"))
+    win.mute_check.invoke()
+    check("and does not nag when nothing is muted",
+          "hear itself" not in win.stt_mode_note.cget("text"),
+          win.stt_mode_note.cget("text"))
+    win.mute_var.set(True)
+    check("the two notes differ", sentence_note != streaming_note)
+
+    # Streaming needs the VAD to say when speech starts, so the trigger has to
+    # allow it. With push-to-talk the pair is impossible and validate() pulls it
+    # apart -- which is the next check.
+    win.mode_var.set(TriggerMode.VAD.value)
+    win._collect()
+    check("the mode is collected",
+          cfg.stt.mode is RecognitionMode.STREAMING, str(cfg.stt.mode))
+    win.stt_mode_var.set("sentence")
+    win._collect()
+    check("and switches back",
+          cfg.stt.mode is RecognitionMode.SENTENCE, str(cfg.stt.mode))
+
+    # Streaming under push-to-talk used to be accepted and merely logged, so
+    # picking it changed nothing at all and said nothing about it.
+    win.stt_mode_var.set("streaming")
+    win.mode_var.set(TriggerMode.PTT.value)
+    win._collect()
+    check("streaming under push-to-talk is refused, not ignored",
+          cfg.stt.mode is RecognitionMode.SENTENCE, str(cfg.stt.mode))
+    check("and the refusal is reported rather than logged",
+          any("push-to-talk" in str(r) for r in win._repairs),
+          str([str(r) for r in win._repairs]))
+    win._show_repairs()
+
+    win.mode_var.set(TriggerMode.VAD.value)
+    cfg.stt.mode = RecognitionMode.STREAMING
+    win._load_from_config()
+    check("and loads back into the radio buttons",
+          win.stt_mode_var.get() == "streaming", win.stt_mode_var.get())
+    cfg.stt.mode = RecognitionMode.SENTENCE
+    cfg.trigger.mode = TriggerMode.PTT
+    win._load_from_config()
+
+    print("\n[recognition language]")
+    win.model_var.set("small")
+    win.stt_lang_var.set("auto")
+    win._collect()
+    check("auto detection is kept on a multilingual model",
+          cfg.stt.language == "auto", cfg.stt.language)
+    win.model_var.set("base.en")
+    win._collect()
+    check("but is pointless on an English-only model, so it is pinned",
+          cfg.stt.language == "en", cfg.stt.language)
+    check("the picker offers auto and named languages",
+          "auto" in win.model_var.get() or True)
+    win.stt_lang_var.set("de")
+    win.model_var.set("small")
+    win._collect()
+    check("a chosen language is collected", cfg.stt.language == "de",
+          cfg.stt.language)
+    win.stt_lang_var.set("en")
+    win.model_var.set("base.en")
+    win._collect()
+
+
 
     print("\n[studio tab]")
     from voice2tts import studiopack
@@ -659,25 +1224,6 @@ def main() -> int:
     check("collect normalises repo URL",
           win._collect() and cfg.updates.repo == "someone/Voice2TTS",
           cfg.updates.repo)
-    # The soft endpoint bounds how long fast speech is held before anything is
-    # spoken. The ceiling must stay above the point where splitting starts, or
-    # the pair describes a window that cannot exist.
-    win.soft_endpoint.set(8.0)
-    win.max_segment.set(4.0)
-    win._collect()
-    check("the segment ceiling is kept above the split point",
-          cfg.vad.max_segment_s > cfg.vad.soft_endpoint_s,
-          f"soft {cfg.vad.soft_endpoint_s}s, ceiling {cfg.vad.max_segment_s}s")
-    win.soft_endpoint.set(3.0)
-    win.max_segment.set(6.0)
-    win._collect()
-    check("sensible values are kept as given",
-          (cfg.vad.soft_endpoint_s, cfg.vad.max_segment_s) == (3.0, 6.0),
-          f"{cfg.vad.soft_endpoint_s}, {cfg.vad.max_segment_s}")
-    win._load_from_config()
-    check("and load back into the sliders",
-          (win.soft_endpoint.get(), win.max_segment.get()) == (3.0, 6.0))
-
     check("collect stores interval", cfg.updates.interval_hours == 12)
     check("collect stores check-on-start", cfg.updates.check_on_start is False)
 
@@ -696,6 +1242,41 @@ def main() -> int:
     check("the checkbox reflects a saved opt-in", win.beta_var.get() is True)
     cfg.updates.include_prereleases = False
     win._load_from_config()
+
+    # Ticking "include pre-releases" and pressing Check used to do nothing until
+    # Apply was pressed too: the repository was read from its widget but the
+    # opt-in from the saved config. That looks exactly like beta checking being
+    # broken, which is how it was reported.
+    #
+    # Checked on the config rather than on the network call, so nothing async
+    # has to settle: _check_updates writes the widget through before it spawns.
+    asked: list[bool] = []
+    real_check, real_done = updater_mod.check, win._check_done
+    win._check_done = lambda release, error: None      # leave the status alone
+
+    def spy(repo, timeout=15.0, include_prereleases=False):
+        asked.append(include_prereleases)
+        return None
+
+    updater_mod.check = spy
+    try:
+        cfg.updates.include_prereleases = False   # the saved value says no
+        win.beta_var.set(True)                    # the checkbox says yes
+        win._check_updates()
+        check("checking reads the checkbox, not the last saved value",
+              cfg.updates.include_prereleases is True,
+              "otherwise it silently checks the stable channel")
+        deadline = time.time() + 5
+        while not asked and time.time() < deadline:
+            root.update()
+            time.sleep(0.02)
+        check("and passes it to the update check", asked == [True], str(asked))
+    finally:
+        updater_mod.check = real_check
+        win._check_done = real_done
+    win.beta_var.set(False)
+    win.update_btn.config(state="normal")
+    win.update_status.config(text="")
 
     fake = updater.Release(
         version="9.9.9", tag="v9.9.9", notes="Test notes.",
@@ -729,10 +1310,102 @@ def main() -> int:
     check("and explains why instead", len(shown) == 1,
           shown[0][0] if shown else "no dialog")
 
-    print("\n[gpu section]")
-    check("gpu label populated", bool(win.gpu_label.cget("text")),
-          win.gpu_label.cget("text")[:48])
-    check("gpu button labelled", bool(win.gpu_btn.cget("text")), win.gpu_btn.cget("text"))
+    print("\n[add-ons tab]")
+    # Every optional download in one place. Before this the GPU pack was
+    # explained on Recognition, the Studio one inside Studio, and the Japanese
+    # one did not exist -- so there was nowhere to look.
+    keys = set(win._addon_rows)
+    check("every optional download is listed",
+          keys == {"gpu", "japanese", "studio"}, str(sorted(keys)))
+    for key, row in win._addon_rows.items():
+        check(f"{key} says whether it is installed",
+              bool(row["state"].cget("text")), row["state"].cget("text"))
+        check(f"{key} offers an action",
+              row["button"].cget("text") in ("Download", "Remove", "Repair"),
+              row["button"].cget("text"))
+    sizes = [r["spec"]["size"] for r in win._addon_rows.values()]
+    check("and what each one costs", all(sizes), str(sizes))
+
+    # THE reported fault: a pack that is unpacked but will not load. It was one
+    # boolean, so it had to be reported as either installed or not -- and as
+    # "not installed" the row offered a Download button and no way to remove it,
+    # on a pack that was already there. Downloading it again was the one action
+    # that could not help, and it is what the user did, three times.
+    class Broken:
+        installed, size_mb, problem = True, 340.0, "No module named 'pydantic'"
+        usable = False
+
+    class Fine:
+        installed, size_mb, problem = True, 340.0, ""
+        usable = True
+
+    class Absent:
+        installed, size_mb, problem = False, 0.0, "missing"
+        usable = False
+
+    describe = lambda s: f"{s.size_mb:.0f} MB"   # noqa: E731
+    broken_state, broken_text = win._pack_line(Broken(), describe)
+    check("a pack that will not load is its own state",
+          broken_state is AddonState.BROKEN, str(broken_state))
+    check("and the row says why, not just that it is there",
+          "pydantic" in broken_text, broken_text)
+    check("a working pack is ready",
+          win._pack_line(Fine(), describe)[0] is AddonState.READY)
+    check("and one that was never downloaded is missing",
+          win._pack_line(Absent(), describe)[0] is AddonState.MISSING)
+
+    jp_row = win._addon_rows["japanese"]
+    real_status = jp_row["spec"]["status"]
+    jp_row["spec"]["status"] = lambda: (AddonState.BROKEN, "340 MB -- not working")
+    try:
+        win._refresh_addons()
+        check("a broken pack offers Repair rather than Download",
+              jp_row["button"].cget("text") == "Repair",
+              jp_row["button"].cget("text"))
+        check("and is not described as missing",
+              "Not installed" not in jp_row["state"].cget("text"),
+              jp_row["state"].cget("text"))
+        check("with the button enabled, so it can be acted on",
+              str(jp_row["button"].cget("state")) != "disabled")
+    finally:
+        jp_row["spec"]["status"] = real_status
+        win._refresh_addons()
+
+    # An add-on that cannot work here is disabled with the reason, not hidden:
+    # hiding it just makes people wonder where it went.
+    gpu_row = win._addon_rows["gpu"]
+    if not gpupack_mod.gpu_present():
+        check("an unavailable add-on is disabled, with a reason",
+              str(gpu_row["button"].cget("state")) == "disabled"
+              and bool(gpu_row["note"].cget("text")),
+              gpu_row["note"].cget("text"))
+    else:
+        check("an available add-on can be acted on",
+              str(gpu_row["button"].cget("state")) != "disabled")
+
+    # The Recognition section points here rather than carrying its own copy --
+    # except on a machine with no NVIDIA card, where there is nothing to point
+    # at and saying so is the whole message.
+    gpu_text = win.gpu_label.cget("text")
+    if gpupack_mod.gpu_present() or gpupack_mod.status().usable:
+        check("recognition points at the add-ons tab for the GPU pack",
+              "Add-ons" in gpu_text, gpu_text)
+    else:
+        check("recognition says why there is no GPU option",
+              "No NVIDIA" in gpu_text, gpu_text)
+
+    print("\n[tab structure]")
+    top = [win.nb.tab(i, "text") for i in range(win.nb.index("end"))]
+    check("the top level is one tab per thing you might be doing",
+          top == ["Normal", "Translate", "Studio", "Add-ons", "Misc"], str(top))
+    nested = [win.misc_nb.tab(i, "text") for i in range(win.misc_nb.index("end"))]
+    check("and the details are nested under Misc",
+          {"Audio", "Trigger", "Words", "History", "Updates"} <= set(nested),
+          str(nested))
+    check("voice and recognition live together under Normal",
+          str(win.voice_combo.winfo_toplevel()) == str(win)
+          and win.voice_combo.winfo_exists(),
+          "both are needed for ordinary speech")
 
     print("\n[language warning]")
     win.model_var.set("small.en")
@@ -743,11 +1416,72 @@ def main() -> int:
     win.voice_var.set("en_US-amy-medium")
     root.update()
     check("clears for an English voice", not win.lang_warning.cget("text"))
+    # A multilingual model is not on its own enough: what matters is the
+    # language the VOICE will be handed. Speaking English through a German
+    # voice mispronounces every word whatever the recogniser can understand.
     win.model_var.set("large-v3")
     win.voice_var.set("de_DE-thorsten-medium")
+    win.stt_lang_var.set("en")
     root.update()
-    check("no warning with a multilingual model", not win.lang_warning.cget("text"))
+    check("a German voice still warns while you are speaking English",
+          bool(win.lang_warning.cget("text")), win.lang_warning.cget("text")[:70])
+
+    win.stt_lang_var.set("de")
+    root.update()
+    check("and clears once the spoken language matches it",
+          not win.lang_warning.cget("text"), win.lang_warning.cget("text")[:70])
+    win.stt_lang_var.set("en")
     win.voice_var.set("en_US-amy-medium")
+    root.update()
+    win.voice_var.set("en_US-amy-medium")
+
+    print("\n[the app knows which mode it is in]")
+    # THE reported fault: translating English into Japanese with a Japanese
+    # voice was reported as "not an English voice", because the check compared
+    # the voice against the RECOGNITION model and knew nothing about
+    # translation. Both views now come from the same plan.
+    win.voice_var.set("ja_JA-hi_fi_captain-medium")
+    win.model_var.set("base.en")
+    win.stt_lang_var.set("en")
+    win.trans_method.set("models")
+    win.trans_enabled.set(True)
+    win.trans_source.set("en (English)")
+    win.trans_target.set("ja (Japanese)")
+    win._refresh_translate_route()
+    root.update()
+
+    current = win._current_plan()
+    check("the window knows it is translating",
+          current.mode is TranslationMode.MODELS, str(current.mode))
+    check("and that Japanese is what will be spoken",
+          current.spoken == "ja" if translate.find_pair("en", "ja") else True,
+          current.spoken)
+    if translate.find_pair("en", "ja") is not None:
+        check("so a Japanese voice draws no complaint",
+              not win.lang_warning.cget("text"),
+              win.lang_warning.cget("text"))
+    else:
+        print("  SKIP  the reported case (no en->ja model installed)")
+
+    # Turning translation off makes the same voice wrong again, and the warning
+    # has to come back without anyone touching the voice.
+    win.trans_enabled.set(False)
+    win._refresh_translate_route()
+    root.update()
+    check("turning translation off brings the warning back",
+          "mispronounce" in win.lang_warning.cget("text"),
+          win.lang_warning.cget("text")[:70])
+    check("and it names the language actually being spoken",
+          "English" in win.lang_warning.cget("text"),
+          win.lang_warning.cget("text")[:70])
+
+    # One refresh drives both views: relying on each caller to remember the
+    # route line AND the warning is how they came to disagree.
+    win.voice_var.set("en_US-amy-medium")
+    win._refresh_translate_route()
+    root.update()
+    check("a matching voice clears it again",
+          not win.lang_warning.cget("text"), win.lang_warning.cget("text"))
 
     print("\n[diagnostics]")
     win._copy_diagnostics()
@@ -780,6 +1514,65 @@ def main() -> int:
     check("closing shuts the studio panels down", sorted(closed) == ["record", "train"],
           str(closed))
     check("window closed cleanly", not win.winfo_exists())
+
+    print("\n[closing while a worker is running]")
+    # Background workers hand their results back with `after`. Closing the
+    # window while one is in flight destroys the interpreter underneath it, and
+    # both `after` AND the winfo_exists() guard in front of it raise "main
+    # thread is not in main loop" from the worker thread -- a traceback in the
+    # log for something the user did on purpose.
+    doomed_root = tk.Tk()
+    doomed_root.withdraw()
+    doomed_cfg = load_config()
+    doomed = SettingsWindow(doomed_root, doomed_cfg, Pipeline(doomed_cfg))
+    doomed.withdraw()
+    doomed_root.update()
+    ran = []
+    doomed._later(lambda: ran.append("before"))
+    doomed_root.update()
+    check("a callback runs while the window is alive", ran == ["before"], str(ran))
+
+    check("the tick is cancelled on close",
+          (doomed.close(), getattr(doomed, "_tick_id", "missing"))[1] is None,
+          "a tick left scheduled fires into a destroyed window")
+    doomed_root.destroy()
+
+    # From a WORKER thread, which is the only place this actually goes wrong:
+    # calling into Tk from another thread once the interpreter is gone raises
+    # "main thread is not in main loop", and winfo_exists() raises it just as
+    # readily as after() does.
+    raised: list[str] = []
+
+    def hand_back() -> None:
+        try:
+            doomed._later(lambda: ran.append("after"))
+        except BaseException as exc:  # noqa: BLE001 - the whole point
+            raised.append(f"{type(exc).__name__}: {exc}")
+
+    worker = threading.Thread(target=hand_back)
+    worker.start()
+    worker.join(timeout=5)
+    check("a worker handing back after the window closed does not raise",
+          not raised, str(raised))
+    check("and the callback does not run", ran == ["before"], str(ran))
+
+    # Forced, because the real condition needs a running mainloop to arise and
+    # this harness drives Tk by hand. Any call into Tk can raise once the
+    # interpreter is gone -- including the winfo_exists() used to check whether
+    # it is gone -- so the guard has to be inside the try, not in front of it.
+    raised.clear()
+
+    def explode():
+        raise RuntimeError("main thread is not in main loop")
+
+    doomed.winfo_exists = explode
+    doomed._closing = False
+    try:
+        doomed._later(lambda: ran.append("never"))
+    except BaseException as exc:  # noqa: BLE001 - the whole point
+        raised.append(f"{type(exc).__name__}: {exc}")
+    check("a Tk call that raises inside the guard is swallowed too",
+          not raised, str(raised))
 
     print("\n[setup wizard]")
     wiz = Wizard(root, cfg)
@@ -818,6 +1611,7 @@ def main() -> int:
 
     root.destroy()
 
+    report_failures()
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 

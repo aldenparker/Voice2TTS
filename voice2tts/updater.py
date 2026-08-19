@@ -29,13 +29,14 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import __version__
+from .net import USER_AGENT, ByteProgress, Json
 from .paths import cache_dir, is_frozen
 
 log = logging.getLogger(__name__)
 
-USER_AGENT = f"Voice2TTS/{__version__}"
 API_TEMPLATE = "https://api.github.com/repos/{repo}/releases/latest"
 # The full list, newest-created first. Only consulted when someone has opted in
 # to betas: /releases/latest deliberately skips pre-releases, which is what keeps
@@ -110,7 +111,7 @@ def current_version() -> str:
 # -- discovery --------------------------------------------------------------
 
 
-def _fetch(url: str, repo: str, timeout: float):
+def _fetch(url: str, repo: str, timeout: float) -> Any:
     """GET a GitHub API endpoint, turning its failures into readable ones."""
     req = urllib.request.Request(
         url,
@@ -139,7 +140,7 @@ def _fetch(url: str, repo: str, timeout: float):
         raise
 
 
-def _installer_asset(entry: dict) -> tuple[dict | None, dict | None]:
+def _installer_asset(entry: Json) -> tuple[Json | None, Json | None]:
     """The Setup .exe and its .sha256 from a release payload."""
     assets = entry.get("assets") or []
     installer = next(
@@ -154,11 +155,35 @@ def _installer_asset(entry: dict) -> tuple[dict | None, dict | None]:
     return installer, checksum
 
 
-def _tag_version(entry: dict) -> str:
+# What an application release tag looks like: v1.2.3 or v1.2.3-beta-4. Anything
+# else in the repository's releases is not something we can install.
+_APP_TAG_RE = re.compile(r"^v?\d+\.\d+\.\d+(?:-beta-\d+)?$")
+
+
+def _tag_version(entry: Json) -> str:
     return str(entry.get("tag_name") or "").lstrip("vV")
 
 
-def pick_newest(entries: list[dict]) -> dict | None:
+def is_app_release(entry: Json) -> bool:
+    """Whether this release is a build of the app, rather than something else.
+
+    The translation models are published as a release of their own, under a
+    `models-N` tag. GitHub's /releases/latest returns the newest release that is
+    not a draft or a pre-release -- which was the models one -- and "models-2"
+    parses to a version below everything, so every user was told they were up to
+    date forever. The stable channel was dead and said nothing.
+    """
+    if entry.get("draft"):
+        return False
+    if not _APP_TAG_RE.match(str(entry.get("tag_name") or "")):
+        return False
+    # An installer is what makes it installable; a release without one cannot be
+    # offered even if the tag looks right.
+    return _installer_asset(entry)[0] is not None
+
+
+def pick_newest(entries: list[Json],
+                include_prereleases: bool = False) -> Json | None:
     """The newest usable release in a listing, by version rather than by date.
 
     Three things are filtered out, each for its own reason:
@@ -173,22 +198,21 @@ def pick_newest(entries: list[dict]) -> dict | None:
     by creation date, which stops matching version order the moment a patch to
     an older series is published after a newer one.
     """
-    best: dict | None = None
+    best: Json | None = None
     for entry in entries or []:
-        if entry.get("draft"):
+        if not is_app_release(entry):
+            log.debug("skipping %r: not an installable app release",
+                      entry.get("tag_name"))
+            continue
+        if entry.get("prerelease") and not include_prereleases:
             continue
         version = _tag_version(entry)
-        if not version:
-            continue
-        if _installer_asset(entry)[0] is None:
-            log.debug("skipping %s: no installer asset", version)
-            continue
         if best is None or parse_version(version) > parse_version(_tag_version(best)):
             best = entry
     return best
 
 
-def _to_release(entry: dict, repo: str) -> Release:
+def _to_release(entry: Json, repo: str) -> Release:
     tag = str(entry.get("tag_name") or "")
     installer, checksum = _installer_asset(entry)
     if installer is None:
@@ -209,10 +233,16 @@ def check(repo: str, timeout: float = 15.0,
           include_prereleases: bool = False) -> Release | None:
     """Ask GitHub for the newest release. Returns None if it is not newer.
 
-    With `include_prereleases`, betas are considered too. That needs the full
-    listing rather than /releases/latest, which excludes them by design -- and
-    that exclusion is precisely what keeps betas away from everyone who has not
-    opted in, so the two paths are deliberately separate.
+    Both channels read the full listing and filter it here, rather than leaning
+    on /releases/latest for the stable one. That endpoint means "newest release
+    that is not a draft or a pre-release", which is not the same as "newest
+    release of the app": publishing the translation models as their own release
+    made THAT the latest, and since "models-2" parses below every real version,
+    every user on the stable channel was told they were up to date forever.
+
+    Filtering here also means the rule that keeps betas away from people who did
+    not ask for them is written down in one place instead of being a property of
+    somebody else's endpoint.
 
     Raises on network or API failure so callers can distinguish "up to date" from
     "could not tell".
@@ -223,16 +253,13 @@ def check(repo: str, timeout: float = 15.0,
             "Set it in Settings -> Updates."
         )
 
-    if include_prereleases:
-        listing = _fetch(RELEASES_TEMPLATE.format(repo=repo), repo, timeout)
-        if not isinstance(listing, list):
-            raise RuntimeError(f"Unexpected release listing for {repo}")
-        entry = pick_newest(listing)
-        if entry is None:
-            log.info("no installable release found for %s", repo)
-            return None
-    else:
-        entry = _fetch(API_TEMPLATE.format(repo=repo), repo, timeout)
+    listing = _fetch(RELEASES_TEMPLATE.format(repo=repo), repo, timeout)
+    if not isinstance(listing, list):
+        raise RuntimeError(f"Unexpected release listing for {repo}")
+    entry = pick_newest(listing, include_prereleases=include_prereleases)
+    if entry is None:
+        log.info("no installable release found for %s", repo)
+        return None
 
     version = _tag_version(entry) or "0"
     if not is_newer(version):
@@ -250,7 +277,8 @@ def should_check(last_check_epoch: float, interval_hours: int) -> bool:
 # -- download ---------------------------------------------------------------
 
 
-def download(release: Release, progress=None, timeout: float = 120.0) -> Path:
+def download(release: Release, progress: ByteProgress = None,
+             timeout: float = 120.0) -> Path:
     """Fetch the installer into the cache directory and verify it."""
     dest_dir = cache_dir() / "updates"
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -292,18 +320,27 @@ def _verify(path: Path, release: Release) -> None:
             path.unlink(missing_ok=True)
             raise RuntimeError("downloaded file is not a Windows executable")
 
-    if release.sha256_url:
-        expected = _fetch_expected_sha(release.sha256_url)
-        if expected:
-            actual = _sha256(path)
-            if actual.lower() != expected.lower():
-                path.unlink(missing_ok=True)
-                raise RuntimeError(
-                    f"checksum mismatch\n  expected {expected}\n  actual   {actual}"
-                )
-            log.info("checksum verified")
-    else:
-        log.warning("release published no .sha256 asset; skipping checksum check")
+    if not release.sha256_url:
+        path.unlink(missing_ok=True)
+        raise RuntimeError(
+            "this release published no .sha256 file, so the installer cannot "
+            "be verified. Every Voice2TTS release publishes one -- download it "
+            "from the releases page by hand if you are sure.")
+
+    expected = _fetch_expected_sha(release.sha256_url)
+    if expected is None:
+        path.unlink(missing_ok=True)
+        raise RuntimeError(
+            "the checksum for this release could not be fetched, so the "
+            "installer cannot be verified. Try again when the network settles.")
+
+    actual = _sha256(path)
+    if actual.lower() != expected.lower():
+        path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"checksum mismatch\n  expected {expected}\n  actual   {actual}"
+        )
+    log.info("checksum verified")
 
 
 def _fetch_expected_sha(url: str, timeout: float = 20.0) -> str | None:

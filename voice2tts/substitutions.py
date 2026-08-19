@@ -69,16 +69,22 @@ class Substituter:
 
     def __init__(self, rules: list[Rule] | None = None):
         self._compiled: list[tuple[re.Pattern, str]] = []
+        # Why a rule is not in _compiled, for whoever shows the list. Filled by
+        # load(); see `dropped`.
+        self.rejected: list[str] = []
         self.load(rules or [])
 
     def load(self, rules: list[Rule]) -> int:
         """Compile the enabled rules. Returns how many are active."""
         self._compiled = []
+        self.rejected = []
         for rule in rules[:MAX_RULES]:
             if not rule.enabled:
                 continue
             pattern = rule.compiled()
             if pattern is None:
+                self.rejected.append(
+                    f"{rule.pattern!r}: {rule.describe_error() or 'will not compile'}")
                 continue
             # Backslashes in a replacement are only meaningful for a regex rule,
             # where "\1" is a backreference the user meant. In a plain rule they
@@ -89,7 +95,20 @@ class Substituter:
             self._compiled.append((pattern, replacement))
         if len(rules) > MAX_RULES:
             log.warning("only the first %d substitutions are used", MAX_RULES)
+            self.rejected.append(
+                f"only the first {MAX_RULES} rules are used; "
+                f"{len(rules) - MAX_RULES} were ignored")
         return len(self._compiled)
+
+    @property
+    def dropped(self) -> list[str]:
+        """Rules that could not be used, and why. Empty when all of them work.
+
+        A rule that will not compile used to vanish into the log, so the count
+        beside the list said "6 rule(s) active" over seven rules and the one
+        that was silently missing was the one someone had just typed.
+        """
+        return list(self.rejected)
 
     @property
     def active(self) -> int:
@@ -107,6 +126,12 @@ class Substituter:
                 try:
                     result = pattern.sub(replacement, result)
                 except re.error as exc:  # a bad backreference in the replacement
+                    # Recorded, not just logged: the rule will fail on every
+                    # utterance from here on, and the list beside it went on
+                    # showing it as active.
+                    note = f"{pattern.pattern!r}: {exc}"
+                    if note not in self.rejected:
+                        self.rejected.append(note)
                     log.warning("substitution failed: %s", exc)
             if result == before:
                 break  # settled; no rule fed another

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
@@ -33,7 +34,7 @@ CONTEXT = 64
 
 
 class SileroVad:
-    def __init__(self, model_path=None):
+    def __init__(self, model_path: Path | None = None):
         path = model_path or vad_model_path()
         if not path.exists():
             raise FileNotFoundError(
@@ -85,64 +86,18 @@ class VadSegmenter:
     ):
         self.cfg = cfg
         self.vad = SileroVad()
-        self._preroll = deque(maxlen=max(1, preroll_ms // WINDOW_MS))
+        self._preroll: deque[np.ndarray] = deque(
+            maxlen=max(1, preroll_ms // WINDOW_MS))
         self._max_windows = int(max_utterance_s * 1000 / WINDOW_MS)
         self._pad_windows = max(0, cfg.speech_pad_ms // WINDOW_MS)
         self._min_speech_windows = max(1, cfg.min_speech_ms // WINDOW_MS)
         self._min_silence_windows = max(1, cfg.min_silence_ms // WINDOW_MS)
-
-        # The relaxation window. Below _soft_windows nothing changes at all, and
-        # soft_endpoint_s = 0 turns the whole thing off -- including the segment
-        # ceiling, which is part of the same feature. Leaving the ceiling armed
-        # when the relaxation is disabled would give a third behaviour that is
-        # nobody's intent.
-        enabled = cfg.soft_endpoint_s > 0 and cfg.max_segment_s > 0
-        self._soft_windows = (int(cfg.soft_endpoint_s * 1000 / WINDOW_MS)
-                              if enabled else 0)
-        self._segment_windows = (max(self._soft_windows + 1,
-                                     int(cfg.max_segment_s * 1000 / WINDOW_MS))
-                                 if enabled else 0)
-        self._floor_silence_windows = max(1, cfg.min_silence_floor_ms // WINDOW_MS)
-        # How far back a forced cut looks for a quiet moment. One second is long
-        # enough to contain a gap between words at any speaking rate.
-        self._recent_windows = max(1, 1000 // WINDOW_MS)
         self.reset()
-
-    def _required_silence(self) -> int:
-        """How much quiet ends the utterance, given how long it has run.
-
-        Constant until `soft_endpoint_s`, then eased down to the floor by
-        `max_segment_s`. Easing rather than stepping so there is no length at
-        which the behaviour changes abruptly.
-        """
-        if not self._soft_windows or len(self._buf) <= self._soft_windows:
-            return self._min_silence_windows
-        span = self._segment_windows - self._soft_windows
-        through = min(1.0, (len(self._buf) - self._soft_windows) / max(1, span))
-        eased = self._min_silence_windows - through * (
-            self._min_silence_windows - self._floor_silence_windows)
-        return max(self._floor_silence_windows, round(eased))
-
-    def _quietest_recent(self, lookback: int) -> int:
-        """Index into _buf of the quietest window in the recent past.
-
-        Used when a segment has run to its ceiling without any pause. Cutting on
-        a fixed count would land mid-vowel; the quietest moment is at worst
-        between two words.
-        """
-        if not self._probs:
-            return len(self._buf)
-        recent = list(self._probs)[-lookback:]
-        offset = len(self._buf) - len(recent)
-        return offset + int(min(range(len(recent)), key=recent.__getitem__))
 
     def reset(self) -> None:
         self.vad.reset()
         self._preroll.clear()
         self._buf: list[np.ndarray] = []
-        # Probabilities alongside _buf, so a forced cut can be placed at the
-        # quietest moment rather than wherever the counter happened to land.
-        self._probs: deque[float] = deque(maxlen=self._segment_windows + 1)
         self._triggered = False
         self._speech_windows = 0
         self._silence_windows = 0
@@ -151,6 +106,16 @@ class VadSegmenter:
     @property
     def active(self) -> bool:
         return self._triggered
+
+    def captured(self) -> list[np.ndarray]:
+        """The windows held so far, including the pre-roll before the trigger.
+
+        Detection needs a moment of sustained speech before it fires, so by the
+        time `active` goes true the first syllables are already in here. A
+        caller that starts collecting only from the next window loses the start
+        of every utterance -- "I can reproduce it" arrives as "reproduce it".
+        """
+        return list(self._buf)
 
     def process(self, window: np.ndarray) -> np.ndarray | None:
         """Feed one window; returns a complete utterance when one ends."""
@@ -167,59 +132,24 @@ class VadSegmenter:
                     self._triggered = True
                     self._silence_windows = 0
                     self._buf = list(self._preroll)
-                    # One entry per window in _buf, or _quietest_recent would
-                    # index into the wrong place. The pre-roll predates speech,
-                    # so it is not a candidate cut point: score it high.
-                    self._probs = deque([1.0] * len(self._buf),
-                                        maxlen=self._segment_windows + 1)
                     self._preroll.clear()
             else:
                 self._speech_windows = 0
             return None
 
         self._buf.append(window)
-        self._probs.append(prob)
 
         if speech:
             self._silence_windows = 0
         else:
             self._silence_windows += 1
-            if self._silence_windows >= self._required_silence():
+            if self._silence_windows >= self._min_silence_windows:
                 return self._finish()
-
-        # No pause is coming. Cut at the quietest recent moment and carry the
-        # rest forward, so continuous speech is still delivered in pieces
-        # instead of being held until the speaker stops.
-        if self._segment_windows and len(self._buf) >= self._segment_windows:
-            cut = self._quietest_recent(self._recent_windows)
-            log.info("segment ceiling reached; cutting at the quietest of the "
-                     "last %d ms", self._recent_windows * WINDOW_MS)
-            return self._split_at(cut)
 
         if len(self._buf) >= self._max_windows:
             log.info("utterance hit max length; cutting")
             return self._finish()
         return None
-
-    def _split_at(self, index: int) -> np.ndarray | None:
-        """Emit _buf[:index] and keep the remainder as the utterance in progress.
-
-        Not _finish(): the speaker has not stopped, so dropping the tail would
-        lose whatever they said after the cut point.
-        """
-        index = max(1, min(index, len(self._buf)))
-        head, tail = self._buf[:index], self._buf[index:]
-
-        self._buf = tail
-        self._probs = deque(list(self._probs)[index:],
-                            maxlen=self._probs.maxlen)
-        self._silence_windows = 0
-        # _triggered stays True: this is the same stretch of speech continuing.
-
-        audio = np.concatenate(head) if head else None
-        if audio is None or len(audio) < self._min_speech_windows * WINDOW:
-            return None
-        return audio
 
     def flush(self) -> np.ndarray | None:
         """End any in-progress utterance, e.g. when stopping or switching modes."""
@@ -231,8 +161,7 @@ class VadSegmenter:
         Used while the app is speaking: those windows would be its own voice
         coming back, so they must not be fed in -- but the speech captured
         BEFORE playback started is real and was going to be said. reset() used
-        to be called here, which discarded exactly the tail that a mid-speech
-        split deliberately carries forward.
+        to be called here, which simply threw that away.
 
         Returns anything worth speaking, so it is not merely dropped.
         """
@@ -254,7 +183,6 @@ class VadSegmenter:
         audio = np.concatenate(chunks) if chunks else None
 
         self._buf = []
-        self._probs.clear()
         self._triggered = False
         self._speech_windows = 0
         self._silence_windows = 0

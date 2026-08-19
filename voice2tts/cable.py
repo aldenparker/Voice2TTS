@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import devices
+from .net import user_agent
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ _ZIP_LINK = re.compile(
     r"""https?://[^\s"'<>]*?VBCABLE_Driver_Pack\d*\.zip""", re.IGNORECASE
 )
 
-USER_AGENT = "Voice2TTS/0.2 (+https://vb-audio.com/Cable/)"
+USER_AGENT = user_agent("https://vb-audio.com/Cable/")
 
 # Windows names virtual audio endpoints "<FriendlyName> (<DriverName>)", and the
 # driver name is IDENTICAL on the playback and recording side of the same virtual

@@ -15,6 +15,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import probe
+from .net import USER_AGENT, StepProgress
 from .paths import list_voices, resource_root, user_data_dir
 
 log = logging.getLogger(__name__)
@@ -23,7 +25,6 @@ CATALOGUE_URL = (
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.json?download=true"
 )
 CATALOGUE_PAGE = "https://huggingface.co/rhasspy/piper-voices"
-USER_AGENT = "Voice2TTS/0.2"
 
 # Shipped in the installer; never offered for deletion.
 BUNDLED = ("en_US-lessac-medium", "en_US-amy-medium", "en_US-ryan-high")
@@ -37,6 +38,90 @@ ENGLISH_PREFIX = "en"
 
 # A catalogue key looks like "en_US-lessac-medium" or "en_GB-alba-medium".
 _LANGUAGE_KEY = re.compile(r"^([a-z]{2,3})(?:_[A-Za-z]{2,4})?-")
+
+
+# Some voices need a phonemizer beyond the espeak data that ships with Piper.
+# Japanese voices are trained on OpenJTalk phonemes and Piper imports
+# `pyopenjtalk` to produce them; Korean voices do the same with their own.
+# Neither is declared as a dependency of piper-tts -- the import simply fails at
+# synthesis time, once per utterance, with a traceback and no speech.
+#
+# Not shipped because of what they cost: pyopenjtalk-plus plus the dictionaries
+# it needs measured 341 MB installed, against an installer that is currently a
+# fraction of that. Japanese is one language; the download is not.
+_PHONEMIZERS = {
+    "japanese": ("pyopenjtalk", "Japanese"),
+    "korean": ("g2pk", "Korean"),
+}
+
+
+def required_phonemizer(voice_key: str) -> tuple[str, str] | None:
+    """The (module, language) a voice needs beyond Piper's own, or None.
+
+    Read from the voice's own config rather than guessed from its name: the
+    `phoneme_type` field is what Piper dispatches on, so it is the same thing
+    that decides whether the import happens.
+    """
+    path = installed_path(voice_key)
+    if path is None:
+        return None
+    try:
+        config = json.loads(
+            path.with_suffix(".onnx.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # Not "no phonemizer needed" -- unknown. A voice whose config cannot be
+        # read might need one, and saying it does not is how an unreadable file
+        # came to look like a working English voice.
+        log.warning("cannot read the config for %s (%s); assuming it needs "
+                    "nothing beyond espeak", voice_key, exc)
+        return None
+    return _PHONEMIZERS.get(str(config.get("phoneme_type") or "").lower())
+
+
+def missing_phonemizer(voice_key: str) -> str:
+    """Why this voice cannot be spoken here, or "" if it can.
+
+    Checked before a voice is used rather than discovered inside synthesis: the
+    failure there is a ModuleNotFoundError raised once per utterance, which
+    reaches the user as "Failed to process utterance" and nothing else.
+    """
+    needed = required_phonemizer(voice_key)
+    if needed is None:
+        return ""
+    module, language = needed
+
+    # Put the optional pack on the import path first. Doing this only at
+    # application startup meant every other entry point -- the tests, a tool,
+    # anything importing this module directly -- reported an installed pack as
+    # missing, which is a difference nobody should have to know about.
+    from . import jppack
+
+    jppack.activate()
+
+    problem = _import_problem(module)
+    if problem is None:
+        return ""
+    if problem == probe.MISSING:
+        return (f"{voice_key} is a {language} voice, and speaking {language} "
+                f"needs the {module} phonemizer, which is not installed. Get it "
+                "from Settings -> Add-ons, or choose a different voice.")
+    return (f"{voice_key} is a {language} voice, and the {module} phonemizer is "
+            f"installed but will not load: {problem}. Try removing and "
+            "re-downloading it in Settings -> Add-ons.")
+
+
+def forget_import_checks() -> None:
+    """Re-test importability, after a pack is installed or removed."""
+    probe.forget()
+
+
+def _import_problem(module: str) -> str | None:
+    """None if the module imports, "missing" if absent, else why it failed."""
+    return probe.import_problem(module)
+
+
+def is_speakable(voice_key: str) -> bool:
+    return not missing_phonemizer(voice_key)
 
 
 def voice_language(voice_key: str) -> str:
@@ -80,26 +165,10 @@ def is_english(voice_key: str) -> bool:
     return voice_language(voice_key) == ENGLISH_PREFIX
 
 
-def language_mismatch(voice_key: str, whisper_model: str) -> str:
-    """Return a warning if this voice cannot work with this recognition model.
-
-    Empty string means the pairing is fine.
-    """
-    if not voice_key or not whisper_model:
-        return ""
-    english_model = whisper_model.endswith(".en")
-    family = voice_language(voice_key)
-    # Unknown language: say nothing. Warning on a guess is how a voice built in
-    # the Studio ended up being called foreign.
-    if english_model and family and family != ENGLISH_PREFIX:
-        return (
-            f"{voice_key} is not an English voice, but the {whisper_model} "
-            "recognition model only understands English. Speech will be "
-            "transcribed as English and the result will be wrong.\n\n"
-            "Switch to a multilingual model (large-v3) in Recognition, or pick an "
-            "English voice."
-        )
-    return ""
+# language_mismatch() used to live here. It answered "is this voice wrong for
+# this recognition model", which is the wrong question the moment translation
+# is on -- and it was asked from four places that each passed it something
+# different. plan.build() answers the whole question once; see plan.py.
 
 
 @dataclass(frozen=True)
@@ -239,7 +308,7 @@ def languages(entries: list[VoiceEntry]) -> list[str]:
 # -- install / remove -------------------------------------------------------
 
 
-def download_voice(key: str, progress=None) -> Path:
+def download_voice(key: str, progress: StepProgress = None) -> Path:
     """Download a voice into the user directory. Returns the .onnx path."""
     from piper.download_voices import download_voice as _dl
 
@@ -250,10 +319,22 @@ def download_voice(key: str, progress=None) -> Path:
     _dl(key, dest)
 
     onnx = dest / f"{key}.onnx"
-    if not onnx.exists():
-        raise RuntimeError(f"download finished but {onnx.name} is missing")
-    if not (dest / f"{key}.onnx.json").exists():
-        raise RuntimeError(f"{key}.onnx.json is missing; the voice will not load")
+    trouble = probe.files_problem(dest, {
+        f"{key}.onnx": "there is no voice to speak with",
+        f"{key}.onnx.json":
+            "nothing says what language it speaks or how it is tuned",
+    })
+    if trouble is not None:
+        raise RuntimeError(f"the download of {key} did not finish: {trouble}")
+
+    # Prove it loads before calling it installed. A voice that arrives whole but
+    # needs a phonemizer this build does not carry is not a download failure --
+    # it is a voice that will fail once per utterance, days later.
+    if progress:
+        progress(f"Checking {key}...")
+    unspeakable = missing_phonemizer(key)
+    if unspeakable:
+        log.warning("%s downloaded but cannot be spoken: %s", key, unspeakable)
     if progress:
         progress(f"Installed {key}")
     return onnx

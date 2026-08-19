@@ -5,6 +5,398 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Two recognition modes**, chosen in Settings → Recognition, because they
+  serve different purposes rather than being a fast setting and a slow one:
+
+  - **Wait for a sentence** — the default and what the app has always done.
+    Waits for a pause, then speaks the whole utterance with its natural
+    intonation. Costs nothing while you are quiet.
+  - **Speak while talking** — recognises as you go and speaks each phrase once
+    it settles, so a long stretch does not leave the other side in silence.
+    Typically runs about 2 s behind you, and costs roughly half a processor core
+    for as long as anyone is speaking.
+
+  A phrase is only spoken once two consecutive readings agree on it. That
+  matters: reading four seconds of "the tests are still failing", Whisper
+  produced an obscenity and corrected itself a second later. The word was never
+  spoken, because the two readings never agreed.
+
+  Measured, and against the obvious assumption: **a GPU does not make streaming
+  cheaper** (0.51x realtime on CUDA against 0.49x on CPU). If a machine cannot
+  keep up, the readings are spread further apart first, and past the point where
+  that beats simply waiting, it switches to sentence mode and says so.
+
+  Streaming keeps listening while it speaks, so *Mute microphone while speaking*
+  does not apply to it — the interface says so when both are set. And because
+  speaking a sentence takes about as long as saying it did, it warns rather than
+  drifting silently further behind.
+
+- **Live translation.** Speak one language, have the far end hear another,
+  entirely on this machine. Settings → **Translate** picks the pair, downloads
+  the models and says up front why a combination will not work.
+
+  Models are Helsinki-NLP's OPUS-MT, converted to CTranslate2 and published as
+  release assets. Converting them ourselves rather than using a pre-converted
+  third-party set settles the licence question — those state terms for their
+  software and nothing about the weights — and turned out smaller and faster
+  anyway: **63 MB against 151, and 19 ms against 37** on a short sentence.
+  Each download carries the CC-BY-4.0 attribution the licence requires.
+
+- **Whisper's own translation**, as a second method: one setting, no download,
+  English only. Measured on synthesized German — `base` is not good enough
+  (*"can you be nice to me?"* for *"kannst du mich hören?"*), `small` is, and
+  `medium` costs three times as much for nothing. The tab says so.
+
+- **Multilingual recognition.** The Whisper models without `.en` are now
+  offered, with a spoken-language picker and `auto` detection — what
+  translating *from* anything but English needs.
+
+- **Two pronunciation lists.** Settings → Words has a *Rules for* switch.
+  Source rules fix what the recogniser misheard and run before translation;
+  target rules fix what the voice says badly and run after it.
+
+- The Translate tab names a voice that speaks the target language and switches
+  to it with one button, rather than only warning about the mismatch.
+
+### Removed
+
+- **The soft endpoint that split continuous speech into segments** (0.6.1). In
+  use it cut mid-thought and the app talked over itself. Waiting for a real
+  pause is back, and is now one of the two modes above -- which is what that
+  change was reaching for and the wrong way to get it.
+
+- **The app now works out what it is doing in one place**, and everything reads
+  that rather than deciding for itself. There are two modes — speak what you
+  said, or speak a translation — and three questions that decide whether either
+  works: what language will be heard, what language will be spoken, and whether
+  this build can pronounce it. Each of those used to be answered separately by
+  whoever needed it, and the answers disagreed:
+
+  - The settings window said a Japanese voice "is not an English voice" while
+    translating English **into** Japanese, because that check compared the voice
+    against the recognition model and knew nothing about translation.
+  - The window and the pipeline announced the same situation in different words,
+    and could reach different conclusions about it.
+
+  The warning also only recomputed when the voice changed, so changing the
+  target language or the recognition model left a stale one on screen.
+
+- **A voice could be reported as usable and then fail on every utterance.** The
+  phonemizer check asked whether the module could be *found*, not whether it
+  would *load* — so a pack that unpacked but would not import passed the check
+  and failed inside synthesis, once per utterance, as "Failed to process
+  utterance". It is imported now, and a failure says what actually went wrong.
+
+- **The Audio tab showed more outputs than were configured.** Reloading the
+  widgets appended another set of rows instead of replacing them, and switching
+  a profile reloads them — so two outputs showed as four, then six. The saved
+  config was correct throughout; only the window was wrong.
+
+- **Closing the settings window during a background task no longer logs a
+  traceback.** Workers hand results back with `after`, and both that call and
+  the `winfo_exists()` guard in front of it raise once the interpreter is gone —
+  the guard has to be inside the try, not before it. The periodic refresh is
+  also cancelled on close instead of firing into a destroyed window.
+
+- **Japanese voices, as an optional download.** Settings → **Add-ons** fetches
+  the phonemizer Piper needs for them: about 100 MB, 330 MB on disk. Not
+  bundled, because that is a lot to add to every installer for one language.
+
+  The dictionary is most of it and is not optional: without it a sentence
+  containing a character with more than one reading is caught inside Piper and
+  produces no audio at all, silently. Measured on eight ordinary sentences — the
+  one containing 人 was the one that failed.
+
+- **How many outputs is now a setting**, one by default, rather than adding and
+  removing rows one at a time. Never fewer than one, since no outputs means the
+  app makes no sound at all.
+
+- **An Add-ons tab.** One place for every optional download — GPU acceleration,
+  Japanese voices and the Studio training environment — each saying what it
+  costs and whether it is installed. The GPU pack used to be explained on the
+  Recognition tab and the Studio one inside Studio, so there was nowhere to look
+  for a third. Voices needing an add-on are marked in the voice library rather
+  than discovered after a 60 MB download.
+
+- **Settings is grouped by what you are doing**: Normal, Translate, Studio,
+  Add-ons, and Misc for everything else, nested the way Studio already nested
+  its own panels. Voice and Recognition were separate tabs despite both being
+  needed for ordinary speech, and making translation work meant visiting four
+  tabs with nothing saying so.
+
+### Changed — modes that cannot contradict each other
+
+Three bugs in a row came from the same place and none of them was a typo. The
+settings window said a Japanese voice "is not an English voice" while
+translating English *into* Japanese. A phonemizer that was installed but would
+not load passed a check that only asked whether it could be *found*. An earlier
+one spoke English through a German voice. Each was fixed; the cause was not.
+
+The app had no single answer to what it was doing. Five places reasoned
+independently about the same three questions -- what will be heard, what will be
+spoken, and whether this build can pronounce it -- and disagreed.
+
+- **Every mode is now a type**, in `voice2tts/modes.py`, rather than a string
+  compared against a literal in whichever module needed it. `trigger.mode`'s
+  value set had been written out four times; a `StrEnum` written once means
+  adding a mode fails to compile at every site that does not handle it. The
+  config file format does not change: a `StrEnum` still is its string.
+
+- **The two settings that said how translation happens are one setting.**
+  `stt.task = "translate"` and `translation.enabled = true` were mutually
+  exclusive, and only the settings window knew it -- so a hand-edited config or
+  a profile could set both, and Whisper translated to English while a model
+  chain translated that again. `translation.mode` is one field with three
+  values, and that combination can no longer be written down. Existing configs
+  are migrated (schema 4); the recogniser wins the contradictory case, because
+  that is what the old pipeline actually did.
+
+- **`plan.build()` decides the languages, and everything else renders it.** The
+  route line in Settings was ninety lines of its own reasoning running beside
+  the plan's. The bug report generator had a third version, stale enough to
+  report a "voice/model language mismatch" without mentioning that translation
+  was on -- so every bug report from a translate user arrived with a red herring
+  at the top.
+
+- **A repaired setting is shown, not just logged.** `validate()` returns what it
+  had to change and the app says so. A config whose translation had been quietly
+  switched off used to look exactly like one that was working, tick still in the
+  box.
+
+- **Streaming under push-to-talk is refused rather than ignored.** Push-to-talk
+  hands over a finished recording, so there is nothing left to stream. Choosing
+  both used to change nothing at all and say nothing about it.
+
+- **A type checker runs in CI.** mypy, strict over the fifteen modules where the
+  modes and the state machine live, looser over the Tk interface -- ruff could
+  not see any of this. It found three things on the way in: the Japanese pack
+  called its progress callback with a message where the type said bytes, closing
+  a translation chain left every attribute `None` for the next caller, and the
+  substitution preview bound one name to two types.
+
+### Fixed — the Japanese pack was missing a dependency
+
+`pyopenjtalk-plus` declares `pydantic`, and the pack never downloaded it. It
+unpacked perfectly and then would not import, on every machine except the one it
+was written on -- because a development venv has pydantic via something
+unrelated, and the installed build does not. The check added earlier this
+release named the reason exactly (`installed but will not load: No module named
+'pydantic'`), which is how it was found, but the pack itself was wrong.
+
+- **The download list is read, not typed.** It was three package names in a
+  tuple; it is now those three plus whatever their own wheel metadata says they
+  need, walked transitively. A typed list is only ever correct on the machine it
+  was typed on.
+
+- **Exact version pins are honoured.** Found while fixing the above: pydantic
+  pins `pydantic-core` to one release and raises `SystemError` on any other, so
+  resolving names and taking the newest of each produced a pack that downloaded
+  cleanly, unpacked cleanly, and still would not import.
+
+- **What the application already ships is declared, not probed.** `numpy` is
+  named in a list rather than detected with `find_spec`, because "what happens
+  to be importable" differs between a venv and an installer -- which is the
+  whole shape of this bug.
+
+- **Asking what is installed no longer locks it.** `status()` imported the
+  phonemizer to prove it worked, and importing loads compiled extensions that
+  Windows then refuses to let anything overwrite or delete. So opening the
+  settings window locked the pack: every repair failed on its first package --
+  before reaching the missing one -- and every removal left a half-deleted
+  directory and reported failure. A query that changes what the app is allowed
+  to do next is not a query; the proof happens at install, and when a voice
+  actually needs it.
+
+- **Installing builds elsewhere and swaps.** Windows allows a loaded file to be
+  renamed even though it cannot be overwritten or deleted, so the pack is
+  unpacked beside the old one and moved into place. Repair and removal both work
+  while the phonemizer is in use; the app says to restart when the copy already
+  in memory is the old one.
+
+- **A pack that is here but broken is its own state.** It was a boolean, so it
+  had to be reported as installed or not, and "not installed" offered a Download
+  button and no Remove -- on a pack that was already downloaded. There are three
+  states now, and a broken one offers **Repair**.
+
+- **`scripts/isolated_pack.py`** installs the pack into a temporary directory
+  and imports it under `python -S` with only the pack and a staged copy of the
+  application's numpy reachable. That is the frozen build's condition, and it is
+  the only thing that catches this class of failure. Its first version pointed
+  at numpy's parent directory -- which is site-packages -- and so put the entire
+  venv back and reported a deliberately broken pack as fine; staging a copy is
+  what makes it real. It then repeats the whole thing with the pack deliberately
+  broken and the phonemizer loaded, which is the state every retry in the field
+  failed from.
+
+### Fixed — things that failed without saying so
+
+An audit of the whole package found about forty places that failed quietly.
+They were not forty mistakes; they were six patterns repeated.
+
+- **The app could go deaf.** After repeated speech-detection failures it
+  announced "switching to push-to-talk" and set the mode -- but never bound the
+  key, which in automatic mode had never been bound at all. It then saved the
+  broken combination to disk.
+
+- **A failing review window spoke the text it was meant to be reviewing.** The
+  timeout path discarded it. Two paths through one feature, opposite outcomes,
+  in the feature whose whole purpose is that nothing unreviewed gets spoken.
+
+- **An add-on is proven to work, not checked to be present.** Four modules asked
+  whether a file or directory existed and called that installed. A pack now has
+  to import, a CUDA library has to load, and a translation model has to
+  translate one word before the download counts as finished. Uninstalling a pack
+  unloads it, so it stops reporting itself usable after being deleted.
+
+- **An update with no checksum is refused rather than run.** Every Voice2TTS
+  release publishes one, so its absence means something is wrong with the
+  release.
+
+- **A missing voice is written back to the config.** The fallback used to leave
+  `tts.voice` pointing at the absent one, so every language check afterwards
+  reasoned about a voice that was never loaded.
+
+- **An unplugged speaker is noticed.** The microphone has been checked since
+  0.4; the output never was, so unplugging it mid-session left the app
+  listening, transcribing and synthesising into nothing while reporting
+  "speaking".
+
+- **An unreadable settings file is kept, not overwritten.** It used to fall back
+  to defaults silently, and the next Save destroyed the original -- hand-written
+  substitution rules and all.
+
+- **Smaller ones, all the same shape:** a clipboard another program was holding
+  open reported as empty; a rule that would not compile vanished from the list
+  without changing the count beside it; a device name matched by fragment
+  without saying so; a designed voice that lost its effects chain spoke as a
+  different voice; a hotkey with no canonical form simply never fired; a
+  numeric setting outside its range was accepted, including a review timeout of
+  zero, which meant "wait forever" in a feature documented to discard.
+
+- **Settings that claimed capabilities the build did not have** are gone:
+  `profiles.auto_switch` was persisted and read by nothing, and the theme
+  picker accepted a fourth value it never offered.
+
+### Added — the test that would have caught all three
+
+- **The mode matrix.** Rather than a case per bug, the tests now walk every
+  combination of triggering, recognition, translation, model kind and voice
+  language -- 972 of them -- and assert what must hold for all: the plan is
+  coherent, every serious problem names a place to fix it, and nothing produces
+  wrong output quietly. Reintroducing each of the three original bugs now fails
+  between two and eight checks.
+
+- **A repair test** feeding hand-damaged TOML: unknown modes, zero timeouts,
+  out-of-range gains, a section of the wrong type, and every combination of the
+  old two-field translation settings. Writing it found one more bug -- a section
+  of the wrong type crashed the loader before `validate()` could repair
+  anything.
+
+- **`scripts/nothing_installed.py`**, which runs the self-test as if nothing
+  optional had ever been downloaded -- the machine CI actually runs on, and not
+  the machine anyone develops on. Four checks had been quietly asking what the
+  author happened to have downloaded rather than what the rule under test says,
+  so they were green locally and red at release verification. Running it found
+  one more real bug: a voice this build cannot pronounce hid the fact that it
+  was also the wrong language, so fixing the first problem was how you found
+  out about the second.
+
+### Fixed
+
+- **A Japanese voice crashed on every utterance.** Piper imports `pyopenjtalk`
+  from inside synthesis for Japanese voices and does not declare it as a
+  dependency, so each utterance raised `ModuleNotFoundError` deep in the call
+  stack and surfaced as "Failed to process utterance". Voices needing a
+  phonemizer this build does not carry are now refused when the voice is
+  loaded, with a message naming what is missing, and the app falls back to a
+  voice it can actually speak rather than failing to start.
+
+  Not shipped because of the size: the phonemizer plus its dictionaries measure
+  **341 MB installed**, for one language. An on-demand pack, like the GPU and
+  Studio ones, is the way to add it.
+
+- **The voice/language warning was measured against the wrong language.** It
+  compared the voice with the *recognition* model, so translating English to
+  Japanese with a Japanese voice — exactly right — was reported as a mismatch.
+  It now compares the voice with the language the text will actually be in.
+
+- **The settings window opened too small to show Save, Apply and Close.** The
+  notebook was packed before the button bar, so it claimed the whole window and
+  left the bar nothing. The bar is packed first now, and the window opens at the
+  size its content asks for rather than a hardcoded one that went stale every
+  time a tab was added.
+
+- **Two things kept the machine busy doing nothing.** Both showed up as the fans
+  spinning up with the app apparently idle:
+
+  Streaming re-read its buffer on a timer whether or not any new audio had
+  arrived. When a microphone dropped out mid-utterance the buffer stayed put and
+  the same few seconds were transcribed over and over, forever, at whatever the
+  selected model costs — on `medium.en` that is a GPU at full load with nobody
+  speaking. A pass now needs new audio as well as an elapsed interval.
+
+  Microphone recovery treated `start()` succeeding as recovery. A device that
+  opens and then fails from its own callback — which is how PortAudio reports
+  most of them — produced an endless three-second cycle of "reconnected" and
+  "stopped again", re-enumerating every audio device each time. Recovery now
+  waits to see the stream survive, and retries back off from 3 s to 60 s: nine
+  attempts in five minutes rather than a hundred.
+
+- **The app looked for a models release that did not exist.** `MODELS_TAG` still
+  said `models-1` after `models-2` was published, so fetching the catalogue
+  returned a 404.
+
+- **Update checking was dead on the stable channel, and the beta checkbox did
+  nothing until you pressed Apply.** Two separate faults with the same symptom:
+
+  Publishing the translation models as their own GitHub release made *that* the
+  repository's "latest release" — the endpoint means "newest thing that is not a
+  draft or a pre-release", which the models release was. `models-2` parses below
+  every real version, so every user was told they were up to date, permanently.
+  Update checking now reads the full release listing and filters it here, and
+  only a `vX.Y.Z` or `vX.Y.Z-beta-N` tag with an installer attached counts as a
+  build of the app. The models release is also published as a pre-release now,
+  so it stops claiming to be the latest.
+
+  Separately, *Check for updates* read the repository from its text box but the
+  pre-release opt-in from the saved config — so ticking the box and pressing
+  Check silently checked the stable channel. It reads the checkbox now.
+
+- **The language pickers only offered languages you already had models for**, so
+  you could not choose German until you had German and could not get German
+  without choosing it. They now list every language, with names.
+- **Trying the recogniser method overwrote the saved target language.** An
+  "English to German" pair became "English to English", which validation treats
+  as a no-op and switches translation off — so ticking the box afterwards
+  appeared to do nothing. The method no longer touches the language pair, and a
+  pair that would do nothing now says so instead of silently unticking.
+- **With no model for the pair, the tab still offered to switch to a voice for
+  the target language.** The text stays in the source language when there is
+  nothing to translate it, so that produced English read in a German accent. The
+  voice now follows what will actually be spoken.
+- **Translation being unavailable was a quiet warning**; it is an error now,
+  because the far end hears a language nobody asked for.
+- **One unpublishable pair threw away the other fifteen.** `opus-mt-en-ja` does
+  not exist upstream — the naming is not symmetric, `ja-en` is published and
+  `en-ja` is not — and the converter exited non-zero, so the publish step never
+  ran and an hour of conversion produced nothing. English to Japanese now comes
+  from `opus-tatoeba-en-ja`, and a partial run publishes what worked before
+  reporting the failure. A test checks every advertised pair exists upstream,
+  which takes seconds instead of an hour.
+- **The models release can be published by pushing a `models-*` tag**, not only
+  from the Actions tab. The first build shipped a download button with nothing
+  behind it because the workflow had simply never been run.
+- Target substitution rules were written to the config but loaded back as plain
+  dictionaries, so a saved rule would have broken the substituter.
+- Four modules announced themselves to servers as `Voice2TTS/0.2` long after
+  0.2 shipped. There is one User-Agent now, and it reports the real version.
+- A model whose tokenizer pair was half-downloaded was treated as usable, and
+  would have decoded output with the source tokenizer — producing text with raw
+  tokenizer marks in it rather than an error.
+
+
 ## [0.6.2]
 
 ### Fixed

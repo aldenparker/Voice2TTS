@@ -47,6 +47,11 @@ class TargetStream:
         # Most recent block peak, decayed so a meter falls smoothly rather than
         # snapping to zero between words.
         self.peak = 0.0
+        # When PortAudio last asked us for audio. A device that has gone away
+        # sometimes raises and sometimes simply stops calling back, and only
+        # this tells the difference between the second case and an idle app.
+        self._last_callback = time.monotonic()
+        self.failed_reason = ""
 
     @property
     def name(self) -> str:
@@ -56,6 +61,27 @@ class TargetStream:
     def pending(self) -> int:
         with self._lock:
             return self._pending
+
+    @property
+    def failed(self) -> bool:
+        return bool(self.failed_reason)
+
+    def check_alive(self, silence_timeout: float = 5.0) -> bool:
+        """False if this device has stopped asking for audio.
+
+        The mirror of MicCapture.check_alive, and for the same reason: an
+        output stream is not necessarily told when its device is unplugged. The
+        callback simply stops, and everything upstream carries on happily.
+        """
+        if self.failed:
+            return False
+        if self._stream is None:
+            return True
+        if time.monotonic() - self._last_callback > silence_timeout:
+            self.failed_reason = "the device stopped asking for audio"
+            log.error("output %s stopped asking for audio", self.name)
+            return False
+        return True
 
     def open(self) -> None:
         if self._stream is not None:
@@ -106,6 +132,7 @@ class TargetStream:
             self._pending += len(mono)
 
     def _callback(self, outdata: np.ndarray, frames: int, time_info, status) -> None:
+        self._last_callback = time.monotonic()
         if status:
             log.debug("output status on %s: %s", self.name, status)
 
@@ -157,6 +184,17 @@ class OutputSink:
     def active(self) -> bool:
         """True while any device still has audio queued."""
         return any(t.pending > 0 for t in self.targets)
+
+    def dead_targets(self, silence_timeout: float = 5.0) -> list[tuple[str, str]]:
+        """Devices that have stopped taking audio, as (name, reason).
+
+        Only meaningful for a stream that has been open long enough to have been
+        called back, so this is polled rather than raised: PortAudio calls back
+        continuously once a stream is started, silence included.
+        """
+        return [(t.name, t.failed_reason)
+                for t in self.targets
+                if not t.check_alive(silence_timeout)]
 
     def configure(self, wanted: list[OutputTarget], src_rate: int) -> list[tuple[str, str]]:
         """(Re)open streams for the enabled targets. Returns any failures."""

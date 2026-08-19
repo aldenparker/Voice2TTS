@@ -21,12 +21,43 @@ from .paths import find_voice, list_voices
 log = logging.getLogger(__name__)
 
 
+class UnspeakableVoice(RuntimeError):
+    """A voice this build cannot pronounce -- its phonemizer is not here."""
+
+
+class VoiceSubstituted(RuntimeError):
+    """The configured voice is not installed, and something else would be used.
+
+    Raised rather than quietly substituted, because the config still names the
+    missing voice: every language check downstream then reasons about a voice
+    that is not loaded, and reports on the wrong one. The caller decides to take
+    the substitute -- and has to write it into the config when it does.
+    """
+
+    def __init__(self, wanted: str, using: Path):
+        super().__init__(
+            f"The voice {wanted} is not installed. Using {using.stem} instead.")
+        self.wanted = wanted
+        self.using = using
+
+
 class PiperEngine:
     def __init__(self, cfg: TtsConfig):
         from piper import PiperVoice, SynthesisConfig
 
         self._SynthesisConfig = SynthesisConfig
         path = self._resolve_voice(cfg.voice)
+
+        # Refuse here rather than inside synthesis. A voice whose phonemizer is
+        # missing raises ModuleNotFoundError once per utterance, from deep
+        # inside Piper, which reaches the user as "Failed to process utterance"
+        # and a traceback in the log -- with the app apparently running fine.
+        from .voices import missing_phonemizer
+
+        problem = missing_phonemizer(path.stem)
+        if problem:
+            raise UnspeakableVoice(problem)
+
         log.info("loading piper voice %s", path)
         t0 = time.perf_counter()
         self.voice = PiperVoice.load(path, use_cuda=False)
@@ -38,9 +69,9 @@ class PiperEngine:
 
         # A voice built in the Voice Designer carries an effects chain beside it.
         # Ordinary voices have no sidecar and pay nothing for this.
-        from .designer import read_design
+        from .designer import read_design_or_problem
 
-        self.design = read_design(path)
+        self.design, self.design_problem = read_design_or_problem(path)
         if self.design is not None and self.design.is_neutral:
             self.design = None
         if self.design is not None:
@@ -54,8 +85,12 @@ class PiperEngine:
             return path
         available = list_voices()
         if available:
+            # The caller has to be told WHICH voice it got, because the config
+            # still names the missing one: every language check downstream then
+            # reasons about a voice that is not loaded, which is how a German
+            # voice came to be judged against an English one's rules.
             log.warning("voice %r not found; using %s", name, available[0].stem)
-            return available[0]
+            raise VoiceSubstituted(name, available[0])
         raise FileNotFoundError(
             f"No Piper voice found for {name!r} and no voices installed. "
             "Run scripts/fetch_models.py to download one."

@@ -153,7 +153,8 @@ def _cmd_cli() -> int:
 
     pipeline = Pipeline(cfg, on_event=on_event)
     pipeline.start()
-    print(f"\nRunning in {cfg.trigger.mode} mode. Hotkey: {cfg.trigger.hotkey}")
+    print(f"\nRunning in {cfg.trigger.mode.value} mode. "
+          f"Hotkey: {cfg.trigger.hotkey}")
     print("Ctrl+C to stop.\n")
     try:
         while True:
@@ -202,6 +203,14 @@ def main(argv: list[str] | None = None) -> int:
     # Must happen before Tk creates its first window.
     mode = enable_dpi_awareness()
     logging.getLogger(__name__).info("DPI awareness: %s", mode)
+
+    # Optional packs go on the import path before anything asks what this build
+    # can do. Whether a Japanese voice is usable is answered by find_spec, so
+    # asking before this ran would always answer no.
+    from . import jppack
+
+    if jppack.activate():
+        logging.getLogger(__name__).info("Japanese phonemizer available")
 
     from .app import TrayApp
 
