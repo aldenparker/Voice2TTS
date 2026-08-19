@@ -126,6 +126,120 @@ versioning follows [Semantic Versioning](https://semver.org/).
   needed for ordinary speech, and making translation work meant visiting four
   tabs with nothing saying so.
 
+### Changed — modes that cannot contradict each other
+
+Three bugs in a row came from the same place and none of them was a typo. The
+settings window said a Japanese voice "is not an English voice" while
+translating English *into* Japanese. A phonemizer that was installed but would
+not load passed a check that only asked whether it could be *found*. An earlier
+one spoke English through a German voice. Each was fixed; the cause was not.
+
+The app had no single answer to what it was doing. Five places reasoned
+independently about the same three questions -- what will be heard, what will be
+spoken, and whether this build can pronounce it -- and disagreed.
+
+- **Every mode is now a type**, in `voice2tts/modes.py`, rather than a string
+  compared against a literal in whichever module needed it. `trigger.mode`'s
+  value set had been written out four times; a `StrEnum` written once means
+  adding a mode fails to compile at every site that does not handle it. The
+  config file format does not change: a `StrEnum` still is its string.
+
+- **The two settings that said how translation happens are one setting.**
+  `stt.task = "translate"` and `translation.enabled = true` were mutually
+  exclusive, and only the settings window knew it -- so a hand-edited config or
+  a profile could set both, and Whisper translated to English while a model
+  chain translated that again. `translation.mode` is one field with three
+  values, and that combination can no longer be written down. Existing configs
+  are migrated (schema 4); the recogniser wins the contradictory case, because
+  that is what the old pipeline actually did.
+
+- **`plan.build()` decides the languages, and everything else renders it.** The
+  route line in Settings was ninety lines of its own reasoning running beside
+  the plan's. The bug report generator had a third version, stale enough to
+  report a "voice/model language mismatch" without mentioning that translation
+  was on -- so every bug report from a translate user arrived with a red herring
+  at the top.
+
+- **A repaired setting is shown, not just logged.** `validate()` returns what it
+  had to change and the app says so. A config whose translation had been quietly
+  switched off used to look exactly like one that was working, tick still in the
+  box.
+
+- **Streaming under push-to-talk is refused rather than ignored.** Push-to-talk
+  hands over a finished recording, so there is nothing left to stream. Choosing
+  both used to change nothing at all and say nothing about it.
+
+- **A type checker runs in CI.** mypy, strict over the fifteen modules where the
+  modes and the state machine live, looser over the Tk interface -- ruff could
+  not see any of this. It found three things on the way in: the Japanese pack
+  called its progress callback with a message where the type said bytes, closing
+  a translation chain left every attribute `None` for the next caller, and the
+  substitution preview bound one name to two types.
+
+### Fixed — things that failed without saying so
+
+An audit of the whole package found about forty places that failed quietly.
+They were not forty mistakes; they were six patterns repeated.
+
+- **The app could go deaf.** After repeated speech-detection failures it
+  announced "switching to push-to-talk" and set the mode -- but never bound the
+  key, which in automatic mode had never been bound at all. It then saved the
+  broken combination to disk.
+
+- **A failing review window spoke the text it was meant to be reviewing.** The
+  timeout path discarded it. Two paths through one feature, opposite outcomes,
+  in the feature whose whole purpose is that nothing unreviewed gets spoken.
+
+- **An add-on is proven to work, not checked to be present.** Four modules asked
+  whether a file or directory existed and called that installed. A pack now has
+  to import, a CUDA library has to load, and a translation model has to
+  translate one word before the download counts as finished. Uninstalling a pack
+  unloads it, so it stops reporting itself usable after being deleted.
+
+- **An update with no checksum is refused rather than run.** Every Voice2TTS
+  release publishes one, so its absence means something is wrong with the
+  release.
+
+- **A missing voice is written back to the config.** The fallback used to leave
+  `tts.voice` pointing at the absent one, so every language check afterwards
+  reasoned about a voice that was never loaded.
+
+- **An unplugged speaker is noticed.** The microphone has been checked since
+  0.4; the output never was, so unplugging it mid-session left the app
+  listening, transcribing and synthesising into nothing while reporting
+  "speaking".
+
+- **An unreadable settings file is kept, not overwritten.** It used to fall back
+  to defaults silently, and the next Save destroyed the original -- hand-written
+  substitution rules and all.
+
+- **Smaller ones, all the same shape:** a clipboard another program was holding
+  open reported as empty; a rule that would not compile vanished from the list
+  without changing the count beside it; a device name matched by fragment
+  without saying so; a designed voice that lost its effects chain spoke as a
+  different voice; a hotkey with no canonical form simply never fired; a
+  numeric setting outside its range was accepted, including a review timeout of
+  zero, which meant "wait forever" in a feature documented to discard.
+
+- **Settings that claimed capabilities the build did not have** are gone:
+  `profiles.auto_switch` was persisted and read by nothing, and the theme
+  picker accepted a fourth value it never offered.
+
+### Added — the test that would have caught all three
+
+- **The mode matrix.** Rather than a case per bug, the tests now walk every
+  combination of triggering, recognition, translation, model kind and voice
+  language -- 972 of them -- and assert what must hold for all: the plan is
+  coherent, every serious problem names a place to fix it, and nothing produces
+  wrong output quietly. Reintroducing each of the three original bugs now fails
+  between two and eight checks.
+
+- **A repair test** feeding hand-damaged TOML: unknown modes, zero timeouts,
+  out-of-range gains, a section of the wrong type, and every combination of the
+  old two-field translation settings. Writing it found one more bug -- a section
+  of the wrong type crashed the loader before `validate()` could repair
+  anything.
+
 ### Fixed
 
 - **A Japanese voice crashed on every utterance.** Piper imports `pyopenjtalk`
