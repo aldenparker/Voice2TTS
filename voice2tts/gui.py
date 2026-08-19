@@ -54,6 +54,11 @@ _TK_MODIFIERS = {
 }
 
 
+# One output is all most setups need: the virtual cable Discord listens
+# to. A second is for hearing yourself.
+_DEFAULT_OUTPUTS = 1
+_MAX_OUTPUTS = 8
+
 _DEFAULT_WIDTH = 640
 _DEFAULT_HEIGHT = 620
 _MIN_WIDTH = 560
@@ -207,9 +212,17 @@ class SettingsWindow(tk.Toplevel):
         self.outputs_frame = ttk.Frame(tab)
         self.outputs_frame.grid(row=4, column=0, columnspan=2, sticky="nsew")
 
-        ttk.Button(tab, text="Add output", command=self._add_output_row).grid(
-            row=5, column=0, sticky="w", pady=6
-        )
+        count_row = ttk.Frame(tab)
+        count_row.grid(row=5, column=0, columnspan=2, sticky="w", pady=6)
+        ttk.Label(count_row, text="Outputs").pack(side="left")
+        self.output_count = tk.IntVar(value=_DEFAULT_OUTPUTS)
+        ttk.Spinbox(count_row, from_=1, to=_MAX_OUTPUTS, width=4,
+                    textvariable=self.output_count,
+                    command=self._set_output_count).pack(side="left", padx=(6, 0))
+        ttk.Label(count_row,
+                  text="One is enough for Discord. Add a second to hear "
+                       "yourself through headphones.",
+                  foreground=self.palette.muted).pack(side="left", padx=(10, 0))
 
         cable_row = ttk.Frame(tab)
         cable_row.grid(row=6, column=0, columnspan=2, sticky="w", pady=(6, 0))
@@ -438,6 +451,33 @@ class SettingsWindow(tk.Toplevel):
     def _remove_output_row(self, entry: dict) -> None:
         entry["frame"].destroy()
         self._output_rows.remove(entry)
+        # Keep the counter honest: removing a row by hand is the same thing as
+        # turning the number down.
+        if not self._output_rows:
+            self._add_output_row()
+        self.output_count.set(len(self._output_rows))
+
+    def _clear_output_rows(self) -> None:
+        for entry in self._output_rows:
+            entry["frame"].destroy()
+        self._output_rows.clear()
+
+    def _set_output_count(self) -> None:
+        """Grow or shrink the list to the chosen number.
+
+        Rows are removed from the end, so the one someone set up first survives.
+        """
+        try:
+            wanted = int(self.output_count.get())
+        except (tk.TclError, ValueError):
+            return
+        wanted = max(1, min(_MAX_OUTPUTS, wanted))
+        while len(self._output_rows) > wanted:
+            entry = self._output_rows.pop()
+            entry["frame"].destroy()
+        while len(self._output_rows) < wanted:
+            self._add_output_row()
+        self.output_count.set(wanted)
 
     def _device_names(self, kind: str) -> list[str]:
         """Names for a picker, virtual cables tagged so they are easy to spot."""
@@ -2603,10 +2643,14 @@ class SettingsWindow(tk.Toplevel):
         self.input_var.set(c.audio.input_match)
         self.mute_var.set(c.audio.mute_mic_during_playback)
         self._update_device_count()
+        # Cleared first. This runs again whenever a profile is switched, and
+        # appending to what was already there turned two outputs into four.
+        self._clear_output_rows()
         for target in c.audio.outputs:
             self._add_output_row(target)
-        if not c.audio.outputs:
+        if not self._output_rows:
             self._add_output_row()
+        self.output_count.set(len(self._output_rows))
         self._update_cable_hint()
 
         self.mode_var.set(c.trigger.mode)

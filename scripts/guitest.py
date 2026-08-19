@@ -121,6 +121,60 @@ def main() -> int:
     root.update()
     check("tick ran without engines", True)
 
+    print("\n[output rows]")
+    # Reloading the widgets used to APPEND another set of output rows. Switching
+    # a profile reloads them, so two outputs showed as four, then six -- the
+    # config was right the whole time and only the window was wrong.
+    before = len(win._output_rows)
+    for _ in range(3):
+        win._load_from_config()
+    check("reloading does not duplicate the output rows",
+          len(win._output_rows) == before,
+          f"{before} -> {len(win._output_rows)} after three reloads")
+    check("and the counter matches what is shown",
+          win.output_count.get() == len(win._output_rows),
+          f"counter {win.output_count.get()}, rows {len(win._output_rows)}")
+
+    # Choosing how many, rather than adding them one at a time.
+    win.output_count.set(3)
+    win._set_output_count()
+    check("asking for three gives three", len(win._output_rows) == 3,
+          str(len(win._output_rows)))
+    win._output_rows[0]["match"].set("CABLE Input")
+    win.output_count.set(1)
+    win._set_output_count()
+    check("turning it down removes from the end", len(win._output_rows) == 1,
+          str(len(win._output_rows)))
+    check("so the first one set up survives",
+          win._output_rows[0]["match"].get() == "CABLE Input",
+          win._output_rows[0]["match"].get())
+
+    win.output_count.set(0)
+    win._set_output_count()
+    check("never fewer than one", len(win._output_rows) == 1,
+          "no outputs means the app makes no sound at all")
+    win.output_count.set(999)
+    win._set_output_count()
+    check("and a sane ceiling", len(win._output_rows) <= 8,
+          str(len(win._output_rows)))
+
+    # Removing the last row by hand is the same as turning the number down.
+    win.output_count.set(2)
+    win._set_output_count()
+    win._remove_output_row(win._output_rows[-1])
+    check("removing a row keeps the counter in step",
+          win.output_count.get() == len(win._output_rows) == 1,
+          f"counter {win.output_count.get()}, rows {len(win._output_rows)}")
+    win._remove_output_row(win._output_rows[0])
+    check("and removing the last one leaves a row behind",
+          len(win._output_rows) == 1,
+          "otherwise there is nothing to point at a device")
+
+    win._collect()
+    check("what is shown is what is saved",
+          len(cfg.audio.outputs) == len(win._output_rows),
+          f"{len(cfg.audio.outputs)} saved, {len(win._output_rows)} shown")
+
     print("\n[window sizing]")
     # The bar holding Save/Apply/Close sat off the bottom edge until the window
     # was dragged bigger: the notebook was packed first with expand=True, so it

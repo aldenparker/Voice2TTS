@@ -158,8 +158,9 @@ fluent and wrong.
 
 ### Multiple outputs
 
-Settings → Misc → Audio holds a list of outputs. Add as many as you like; each has its own
-enable toggle and gain. Typical setup:
+Settings → Misc → Audio holds a list of outputs. **Outputs** sets how many — one
+by default, which is all you need for Discord. Each has its own enable toggle
+and gain. A two-output setup:
 
 | Device | Gain | Why |
 |---|---|---|
