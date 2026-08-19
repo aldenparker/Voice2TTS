@@ -284,9 +284,9 @@ class SettingsWindow(tk.Toplevel):
                 )
             except Exception as exc:  # noqa: BLE001
                 failure = str(exc)
-                self.after(0, lambda: self._verify_done(None, failure))
+                self._later(lambda: self._verify_done(None, failure))
                 return
-            self.after(0, lambda: self._verify_done(result, None))
+            self._later(lambda: self._verify_done(result, None))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -326,9 +326,9 @@ class SettingsWindow(tk.Toplevel):
                 )
             except Exception as exc:  # noqa: BLE001
                 failure = str(exc)
-                self.after(0, lambda: self._scan_done(None, failure, info))
+                self._later(lambda: self._scan_done(None, failure, info))
                 return
-            self.after(0, lambda: self._scan_done(hits, None, info))
+            self._later(lambda: self._scan_done(hits, None, info))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -396,10 +396,10 @@ class SettingsWindow(tk.Toplevel):
                 # Bind the text now: Python deletes `exc` when this block ends, so
                 # a lambda closing over it would raise NameError when Tk runs it.
                 failure = str(exc)
-                self.after(0, lambda: messagebox.showerror(
+                self._later(lambda: messagebox.showerror(
                     "Uninstall failed", failure, parent=self))
                 return
-            self.after(0, lambda: (self._update_cable_hint(),
+            self._later(lambda: (self._update_cable_hint(),
                                    messagebox.showinfo("Virtual cable", message,
                                                        parent=self)))
 
@@ -800,7 +800,7 @@ class SettingsWindow(tk.Toplevel):
                 entries = voices.fetch_catalogue()
             except Exception as exc:  # noqa: BLE001
                 failure = str(exc)  # `exc` is deleted when this block ends
-                self.after(0, lambda: self.lib_status.config(text=f"Failed: {failure}"))
+                self._later(lambda: self.lib_status.config(text=f"Failed: {failure}"))
                 return
 
             def apply() -> None:
@@ -811,7 +811,7 @@ class SettingsWindow(tk.Toplevel):
                     self.lib_lang.set("en_US" if "en_US" in langs else "(all)")
                 self._refresh_library()
 
-            self.after(0, apply)
+            self._later(apply)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -869,10 +869,10 @@ class SettingsWindow(tk.Toplevel):
                 seconds = voices.play_sample(entry)
             except Exception as exc:  # noqa: BLE001
                 failure = str(exc)
-                self.after(0, lambda: self.lib_status.config(
+                self._later(lambda: self.lib_status.config(
                     text=f"No preview available: {failure}"))
                 return
-            self.after(0, lambda: self.lib_status.config(
+            self._later(lambda: self.lib_status.config(
                 text=f"Playing {key} ({seconds:.1f}s)"))
 
         threading.Thread(target=work, daemon=True).start()
@@ -891,9 +891,9 @@ class SettingsWindow(tk.Toplevel):
                 voices.download_voice(key)
             except Exception as exc:  # noqa: BLE001
                 failure = str(exc)  # `exc` is deleted when this block ends
-                self.after(0, lambda: self.lib_status.config(text=f"Failed: {failure}"))
+                self._later(lambda: self.lib_status.config(text=f"Failed: {failure}"))
                 return
-            self.after(0, lambda: self._after_library_change(f"Installed {key}"))
+            self._later(lambda: self._after_library_change(f"Installed {key}"))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1277,7 +1277,7 @@ class SettingsWindow(tk.Toplevel):
                              f"-- or a {translate.MODELS_TAG} tag -- to be run "
                              "once on that repository.")
 
-            self.after(0, apply)
+            self._later(apply)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1307,7 +1307,7 @@ class SettingsWindow(tk.Toplevel):
 
         def report(done: int, total: int) -> None:
             share = f"{done / max(total, 1) * 100:.0f}%"
-            self.after(0, lambda: self.trans_status.config(
+            self._later(lambda: self.trans_status.config(
                 text=f"Downloading {label}... {share}"))
 
         def work() -> None:
@@ -1315,7 +1315,7 @@ class SettingsWindow(tk.Toplevel):
                 translate.download_pair(entry, repo, progress=report)
             except Exception as exc:  # noqa: BLE001
                 failure = str(exc)  # `exc` is deleted when this block ends
-                self.after(0, lambda: self.trans_status.config(
+                self._later(lambda: self.trans_status.config(
                     text=f"Failed: {failure}"))
                 return
 
@@ -1327,7 +1327,7 @@ class SettingsWindow(tk.Toplevel):
                 if self.cfg.translation.enabled:
                     self.pipeline.apply_translation_changes()
 
-            self.after(0, done)
+            self._later(done)
 
         self.trans_status.config(text=f"Downloading {label}...")
         threading.Thread(target=work, daemon=True).start()
@@ -1522,16 +1522,16 @@ class SettingsWindow(tk.Toplevel):
         row["progress"].start(12)
 
         def report(message: str) -> None:
-            self.after(0, lambda: row["note"].config(text=message))
+            self._later(lambda: row["note"].config(text=message))
 
         def work() -> None:
             try:
                 spec["install"](report)
             except Exception as exc:  # noqa: BLE001
                 failure = str(exc)  # `exc` is deleted when this block ends
-                self.after(0, lambda: self._addon_done(key, failure))
+                self._later(lambda: self._addon_done(key, failure))
                 return
-            self.after(0, lambda: self._addon_done(key, None))
+            self._later(lambda: self._addon_done(key, None))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -2106,16 +2106,16 @@ class SettingsWindow(tk.Toplevel):
         self.studio_progress.start(12)
 
         def report(msg: str) -> None:
-            self.after(0, lambda: self.studio_log.config(text=msg))
+            self._later(lambda: self.studio_log.config(text=msg))
 
         def work() -> None:
             try:
                 studiopack.install(progress=report)
             except Exception as exc:  # noqa: BLE001
                 failure = str(exc)
-                self.after(0, lambda: self._studio_done(failure))
+                self._later(lambda: self._studio_done(failure))
                 return
-            self.after(0, lambda: self._studio_done(None))
+            self._later(lambda: self._studio_done(None))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -2375,9 +2375,9 @@ class SettingsWindow(tk.Toplevel):
                     include_prereleases=self.cfg.updates.include_prereleases)
             except Exception as exc:  # noqa: BLE001
                 failure = str(exc)  # `exc` is deleted when this block ends
-                self.after(0, lambda: self._check_done(None, failure))
+                self._later(lambda: self._check_done(None, failure))
                 return
-            self.after(0, lambda: self._check_done(release, None))
+            self._later(lambda: self._check_done(release, None))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -2545,6 +2545,25 @@ class SettingsWindow(tk.Toplevel):
             theme.style_text_widget(widget, self.palette)
         self.diag_status.config(
             text="Theme applied. Reopen Settings for a full refresh.")
+
+    def _later(self, callback) -> None:
+        """Run something on the interface thread, if there is still one.
+
+        Background workers hand their results back with `after`. Closing the
+        window while one is in flight destroys the interpreter underneath it,
+        and `after` itself raises "main thread is not in main loop" from the
+        worker -- before any winfo_exists() guard inside the callback gets a
+        chance to run.
+        """
+        try:
+            # winfo_exists() is itself a call into Tk, so it raises the same way
+            # `after` does once the interpreter is gone. The guard has to be
+            # inside the try, not in front of it.
+            if self._closing or not self.winfo_exists():
+                return
+            self.after(0, callback)
+        except (tk.TclError, RuntimeError):
+            pass  # the window went away while this worker was running
 
     def append_log(self, kind: str, message: str) -> None:
         if self._closing or not self.winfo_exists():
@@ -2771,10 +2790,20 @@ class SettingsWindow(tk.Toplevel):
             row["meter"]["value"] = min(100.0, value * 140)
 
         self._refresh_history()
-        self.after(100, self._tick)
+        # Remembered so close() can cancel it. A tick left scheduled fires
+        # after the window is destroyed and Tk complains about an "invalid
+        # command name" for a callback nobody can see.
+        self._tick_id = self.after(100, self._tick)
 
     def close(self) -> None:
         self._closing = True
+        tick = getattr(self, "_tick_id", None)
+        if tick is not None:
+            try:
+                self.after_cancel(tick)
+            except (tk.TclError, ValueError):
+                pass
+            self._tick_id = None
         # This window is destroyed on close and rebuilt on reopen, so anything
         # holding a device has to let go of it here.
         for panel in ("record_panel", "train_panel"):

@@ -9,6 +9,7 @@ Does not load Whisper or Piper -- this is purely about the Tk construction path.
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import tkinter as tk
 from pathlib import Path
@@ -126,10 +127,19 @@ def main() -> int:
     # claimed the whole window and the bar packed after it got nothing.
     bar = [c for c in win.winfo_children() if c.winfo_class() == "TFrame"][-1]
     root.update()
-    check("the window opens big enough for its content",
-          win.winfo_height() >= win.winfo_reqheight() - 1,
-          f"{win.winfo_width()}x{win.winfo_height()} for "
-          f"{win.winfo_reqwidth()}x{win.winfo_reqheight()}")
+    # The REQUESTED geometry, not winfo_height(): this window is withdrawn, and
+    # an unmapped window reports its natural size on one machine and whatever
+    # the window manager gave it on another. And a screen smaller than the
+    # content is a real situation -- a CI runner's virtual display is -- so the
+    # assertion is "as tall as the content, or as tall as the screen allows".
+    requested = win.geometry().split("+")[0]
+    _asked_w, asked_h = (int(value) for value in requested.split("x"))
+    room = win.winfo_screenheight() - 120
+    check("the window opens as tall as its content, or as tall as it can",
+          asked_h >= min(win.winfo_reqheight(), room) - 1,
+          f"asked for {requested}, content wants "
+          f"{win.winfo_reqwidth()}x{win.winfo_reqheight()}, "
+          f"screen allows {room}")
     check("and the button bar is inside it",
           bar.winfo_y() + bar.winfo_height() <= win.winfo_height(),
           f"bar ends at {bar.winfo_y() + bar.winfo_height()}, "
@@ -1206,11 +1216,16 @@ def main() -> int:
         check("an available add-on can be acted on",
               str(gpu_row["button"].cget("state")) != "disabled")
 
-    # The Recognition section points here rather than carrying its own copy.
-    check("recognition points at the add-ons tab for the GPU pack",
-          "Add-ons" in win.gpu_label.cget("text")
-          or "installed" in win.gpu_label.cget("text").lower(),
-          win.gpu_label.cget("text"))
+    # The Recognition section points here rather than carrying its own copy --
+    # except on a machine with no NVIDIA card, where there is nothing to point
+    # at and saying so is the whole message.
+    gpu_text = win.gpu_label.cget("text")
+    if gpupack_mod.gpu_present() or gpupack_mod.status().usable:
+        check("recognition points at the add-ons tab for the GPU pack",
+              "Add-ons" in gpu_text, gpu_text)
+    else:
+        check("recognition says why there is no GPU option",
+              "No NVIDIA" in gpu_text, gpu_text)
 
     print("\n[tab structure]")
     top = [win.nb.tab(i, "text") for i in range(win.nb.index("end"))]
@@ -1271,6 +1286,65 @@ def main() -> int:
     check("closing shuts the studio panels down", sorted(closed) == ["record", "train"],
           str(closed))
     check("window closed cleanly", not win.winfo_exists())
+
+    print("\n[closing while a worker is running]")
+    # Background workers hand their results back with `after`. Closing the
+    # window while one is in flight destroys the interpreter underneath it, and
+    # both `after` AND the winfo_exists() guard in front of it raise "main
+    # thread is not in main loop" from the worker thread -- a traceback in the
+    # log for something the user did on purpose.
+    doomed_root = tk.Tk()
+    doomed_root.withdraw()
+    doomed_cfg = load_config()
+    doomed = SettingsWindow(doomed_root, doomed_cfg, Pipeline(doomed_cfg))
+    doomed.withdraw()
+    doomed_root.update()
+    ran = []
+    doomed._later(lambda: ran.append("before"))
+    doomed_root.update()
+    check("a callback runs while the window is alive", ran == ["before"], str(ran))
+
+    check("the tick is cancelled on close",
+          (doomed.close(), getattr(doomed, "_tick_id", "missing"))[1] is None,
+          "a tick left scheduled fires into a destroyed window")
+    doomed_root.destroy()
+
+    # From a WORKER thread, which is the only place this actually goes wrong:
+    # calling into Tk from another thread once the interpreter is gone raises
+    # "main thread is not in main loop", and winfo_exists() raises it just as
+    # readily as after() does.
+    raised: list[str] = []
+
+    def hand_back() -> None:
+        try:
+            doomed._later(lambda: ran.append("after"))
+        except BaseException as exc:  # noqa: BLE001 - the whole point
+            raised.append(f"{type(exc).__name__}: {exc}")
+
+    worker = threading.Thread(target=hand_back)
+    worker.start()
+    worker.join(timeout=5)
+    check("a worker handing back after the window closed does not raise",
+          not raised, str(raised))
+    check("and the callback does not run", ran == ["before"], str(ran))
+
+    # Forced, because the real condition needs a running mainloop to arise and
+    # this harness drives Tk by hand. Any call into Tk can raise once the
+    # interpreter is gone -- including the winfo_exists() used to check whether
+    # it is gone -- so the guard has to be inside the try, not in front of it.
+    raised.clear()
+
+    def explode():
+        raise RuntimeError("main thread is not in main loop")
+
+    doomed.winfo_exists = explode
+    doomed._closing = False
+    try:
+        doomed._later(lambda: ran.append("never"))
+    except BaseException as exc:  # noqa: BLE001 - the whole point
+        raised.append(f"{type(exc).__name__}: {exc}")
+    check("a Tk call that raises inside the guard is swallowed too",
+          not raised, str(raised))
 
     print("\n[setup wizard]")
     wiz = Wizard(root, cfg)

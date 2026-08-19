@@ -64,11 +64,18 @@ jobs:
       - name: Self-test
         run: python scripts/selftest.py --no-audio
 
-      # Not yet part of the release gate: Tk on a headless runner is unproven, and
-      # a flaky check must not be able to block a release. Promote it into
-      # release.yml's verify job once it has been reliably green here.
+      # This one is advisory; release.yml runs the same suite as a hard gate.
       - name: GUI smoke test
         run: python scripts/guitest.py
+        continue-on-error: true
+
+      # The same tests with every optional download absent and a small screen.
+      # A runner is already all of those things, so this mostly earns its keep
+      # on a developer machine -- where voices, models and both packs ARE
+      # installed, and a test that quietly depends on them looks green until it
+      # reaches CI.
+      - name: Interface tests on a fresh machine
+        run: python scripts/fresh_machine.py
         continue-on-error: true
 
       - name: Upload logs on failure

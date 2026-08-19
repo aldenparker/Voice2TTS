@@ -543,6 +543,18 @@ of them shows up until a push. Run this before touching anything that reads
 hardware. `--keep-outputs` simulates the other awkward case, a desktop with
 speakers and no microphone.
 
+```powershell
+& "$env:USERPROFILE\.venvs\voice2tts\Scripts\python.exe" scripts\fresh_machine.py
+```
+
+Runs the interface tests with every optional download absent — no extra voices,
+no translation models, neither pack — and a small screen. The same class of
+problem as above, one layer up: a developer machine accumulates all of those,
+and a test that quietly depends on one is green here and red on every runner.
+Two of them shipped this way, including a window-size check that read the wrong
+measurement on a window nobody had mapped. Run this before touching the
+settings window.
+
 ## Project layout
 
     voice2tts/

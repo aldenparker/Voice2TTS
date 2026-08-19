@@ -67,6 +67,12 @@ versioning follows [Semantic Versioning](https://semver.org/).
   pause is back, and is now one of the two modes above -- which is what that
   change was reaching for and the wrong way to get it.
 
+- **Closing the settings window during a background task no longer logs a
+  traceback.** Workers hand results back with `after`, and both that call and
+  the `winfo_exists()` guard in front of it raise once the interpreter is gone —
+  the guard has to be inside the try, not before it. The periodic refresh is
+  also cancelled on close instead of firing into a destroyed window.
+
 - **Japanese voices, as an optional download.** Settings → **Add-ons** fetches
   the phonemizer Piper needs for them: about 100 MB, 330 MB on disk. Not
   bundled, because that is a lot to add to every installer for one language.
