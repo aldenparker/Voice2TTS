@@ -67,6 +67,11 @@ versioning follows [Semantic Versioning](https://semver.org/).
   pause is back, and is now one of the two modes above -- which is what that
   change was reaching for and the wrong way to get it.
 
+- **The Audio tab showed more outputs than were configured.** Reloading the
+  widgets appended another set of rows instead of replacing them, and switching
+  a profile reloads them — so two outputs showed as four, then six. The saved
+  config was correct throughout; only the window was wrong.
+
 - **Closing the settings window during a background task no longer logs a
   traceback.** Workers hand results back with `after`, and both that call and
   the `winfo_exists()` guard in front of it raise once the interpreter is gone —
@@ -81,6 +86,10 @@ versioning follows [Semantic Versioning](https://semver.org/).
   containing a character with more than one reading is caught inside Piper and
   produces no audio at all, silently. Measured on eight ordinary sentences — the
   one containing 人 was the one that failed.
+
+- **How many outputs is now a setting**, one by default, rather than adding and
+  removing rows one at a time. Never fewer than one, since no outputs means the
+  app makes no sound at all.
 
 - **An Add-ons tab.** One place for every optional download — GPU acceleration,
   Japanese voices and the Studio training environment — each saying what it
