@@ -8,6 +8,7 @@ on. Does not touch the microphone.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import os
@@ -2256,7 +2257,7 @@ def test_speech_plan() -> None:
     that check compared the voice against the RECOGNITION model.
     """
     print("\n[speech plan]")
-    from voice2tts import plan, translate, voices
+    from voice2tts import plan, voices
     from voice2tts.config import Config
     from voice2tts.modes import TranslationMode
 
@@ -2295,19 +2296,21 @@ def test_speech_plan() -> None:
     # -- THE reported fault --------------------------------------------------
     # Translating English into Japanese with a Japanese voice is correct, and
     # was being reported as a mismatch.
-    japanese = plan.build(make(mode=TranslationMode.MODELS, source="en", target="ja",
-                               voice="ja_JA-hi_fi_captain-medium"))
-    if translate.find_pair("en", "ja") is None:
-        print("  SKIP  the reported case (no en->ja model installed)")
-    else:
-        check("translating into Japanese wants a Japanese voice",
-              japanese.spoken == "ja", japanese.spoken)
-        check("so a Japanese voice raises no complaint",
-              not [p for p in japanese.problems if "mispronounce" in p.text],
-              str([str(p) for p in japanese.problems]))
-        check("and an English-only recogniser is fine, because it hears English",
-              not [p for p in japanese.problems if "only understands" in p.text],
-              str([str(p) for p in japanese.problems]))
+    # Pretended, not skipped. This is THE reported fault, and on a machine with
+    # no en->ja model downloaded the old guard skipped it -- so the one case
+    # this whole module exists for was tested nowhere but the author's laptop.
+    with _pretend_installed(("en", "ja")):
+        japanese = plan.build(make(mode=TranslationMode.MODELS, source="en",
+                                   target="ja",
+                                   voice="ja_JA-hi_fi_captain-medium"))
+    check("translating into Japanese wants a Japanese voice",
+          japanese.spoken == "ja", japanese.spoken)
+    check("so a Japanese voice raises no complaint",
+          not [p for p in japanese.problems if "mispronounce" in p.text],
+          str([str(p) for p in japanese.problems]))
+    check("and an English-only recogniser is fine, because it hears English",
+          not [p for p in japanese.problems if "only understands" in p.text],
+          str([str(p) for p in japanese.problems]))
 
     # The same voice with translation OFF is a real mismatch.
     off = plan.build(make(voice="ja_JA-hi_fi_captain-medium"))
@@ -2316,12 +2319,12 @@ def test_speech_plan() -> None:
           str([str(p) for p in off.problems]))
 
     # -- the other way round -------------------------------------------------
-    wrong_voice = plan.build(make(mode=TranslationMode.MODELS, source="en", target="de",
-                                  voice="en_US-amy-medium"))
-    if translate.find_pair("en", "de") is not None:
-        check("an English voice for German output is wrong",
-              any("mispronounce" in p.text for p in wrong_voice.problems),
-              str([str(p) for p in wrong_voice.problems]))
+    with _pretend_installed(("en", "de")):
+        wrong_voice = plan.build(make(mode=TranslationMode.MODELS, source="en",
+                                      target="de", voice="en_US-amy-medium"))
+    check("an English voice for German output is wrong",
+          any("mispronounce" in p.text for p in wrong_voice.problems),
+          str([str(p) for p in wrong_voice.problems]))
 
     # -- no model for the pair ----------------------------------------------
     # The text stays in the SOURCE language, so the voice should match THAT.
@@ -4728,6 +4731,36 @@ def test_platform() -> None:
           or "last transcript" not in report.lower())
 
 
+@contextlib.contextmanager
+def _pretend_installed(*pairs: tuple[str, str]):
+    """Pretend these language pairs have models, whatever this machine has.
+
+    Which voice is right for which output is POLICY, and policy has to be
+    testable on a machine that has downloaded nothing. Asking the real catalogue
+    meant these checks quietly skipped on a fresh clone and failed on CI --
+    testing the tester's download history rather than the rule.
+
+    `route()` itself is left alone, so its pivot logic is still the real one.
+    """
+    from pathlib import Path
+
+    from voice2tts import translate
+
+    real = translate.find_pair
+    wanted = set(pairs)
+
+    def pretend(source: str, target: str):
+        if (source, target) in wanted:
+            return translate.Pair(source, target, Path("(pretend)"))
+        return real(source, target)
+
+    translate.find_pair = pretend
+    try:
+        yield
+    finally:
+        translate.find_pair = real
+
+
 def _mispronounces(voice: str, model: str = "base.en", language: str = "en",
                    target: str = "") -> str:
     """The plan's complaint about this voice, or "".
@@ -4745,11 +4778,20 @@ def _mispronounces(voice: str, model: str = "base.en", language: str = "en",
     cfg.tts.voice = voice
     cfg.stt.model = model
     cfg.stt.language = language
-    if target:
-        cfg.translation.mode = TranslationMode.MODELS
-        cfg.translation.source = language
-        cfg.translation.target = target
-    found = [p.text for p in plan.build(cfg).problems if "mispronounce" in p.text]
+    if not target:
+        found = [p.text for p in plan.build(cfg).problems
+                 if "mispronounce" in p.text]
+        return found[0] if found else ""
+
+    cfg.translation.mode = TranslationMode.MODELS
+    cfg.translation.source = language
+    cfg.translation.target = target
+    # A model for the pair, so the text really does reach the voice in the
+    # target language. Without one the plan correctly falls back to speaking the
+    # source -- which is a different rule, checked separately below.
+    with _pretend_installed((language, target)):
+        found = [p.text for p in plan.build(cfg).problems
+                 if "mispronounce" in p.text]
     return found[0] if found else ""
 
 

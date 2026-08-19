@@ -240,6 +240,15 @@ They were not forty mistakes; they were six patterns repeated.
   of the wrong type crashed the loader before `validate()` could repair
   anything.
 
+- **`scripts/nothing_installed.py`**, which runs the self-test as if nothing
+  optional had ever been downloaded -- the machine CI actually runs on, and not
+  the machine anyone develops on. Four checks had been quietly asking what the
+  author happened to have downloaded rather than what the rule under test says,
+  so they were green locally and red at release verification. Running it found
+  one more real bug: a voice this build cannot pronounce hid the fact that it
+  was also the wrong language, so fixing the first problem was how you found
+  out about the second.
+
 ### Fixed
 
 - **A Japanese voice crashed on every utterance.** Piper imports `pyopenjtalk`

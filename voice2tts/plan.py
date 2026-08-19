@@ -235,27 +235,32 @@ def build(cfg: Config, voice: str = "") -> SpeechPlan:
             "so translation does nothing.", where="Translate"))
 
     # -- can the voice say it ------------------------------------------------
+    # Two independent questions, reported independently. They used to be an
+    # if/else, so a voice this build cannot pronounce hid the fact that it was
+    # also the wrong language -- install the pack and you would find out about
+    # the second problem only then. One problem masking another is the same
+    # shape as everything else this module exists to prevent.
     unspeakable = voices.missing_phonemizer(voice)
     if unspeakable:
         problems.append(Problem(unspeakable, where="Add-ons", serious=True))
-    else:
-        voice_language = voices.voice_language(voice)
-        # An unknown language says nothing: a voice built in the Studio carries
-        # no language at all, and guessing produced a wrong warning.
-        if voice_language and spoken not in ("auto", "") \
-                and voice_language != spoken:
-            fix = next((key for key in voices.installed_keys()
-                        if voices.voice_language(key) == spoken), None)
-            problems.append(Problem(
-                f"{voice} speaks {translate.language_name(voice_language)}, but "
-                f"the text reaching it will be in "
-                f"{translate.language_name(spoken)}. It will mispronounce every "
-                "word"
-                + (f" (use {fix})." if fix else
-                   "; the Voice library tab can fetch one."),
-                where="Translate -> Voice" if mode.translating
-                else "Normal -> Voice",
-                serious=True))
+
+    voice_language = voices.voice_language(voice)
+    # An unknown language says nothing: a voice built in the Studio carries no
+    # language at all, and guessing produced a wrong warning.
+    if voice_language and spoken not in ("auto", "") \
+            and voice_language != spoken:
+        fix = next((key for key in voices.installed_keys()
+                    if voices.voice_language(key) == spoken
+                    and voices.is_speakable(key)), None)
+        problems.append(Problem(
+            f"{voice} speaks {translate.language_name(voice_language)}, but "
+            f"the text reaching it will be in "
+            f"{translate.language_name(spoken)}. It will mispronounce every "
+            "word"
+            + (f" (use {fix})." if fix else
+               "; the Voice library tab can fetch one."),
+            where="Translate -> Voice" if mode.translating else "Normal -> Voice",
+            serious=True))
 
     return SpeechPlan(mode=mode, heard=heard, spoken=spoken, voice=voice,
                       requested=cfg.translation.target,
