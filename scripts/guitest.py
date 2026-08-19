@@ -48,6 +48,24 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 
+_FAILURES: list[str] = []
+
+
+def report_failures() -> None:
+    """Repeat every failure at the end of the run.
+
+    A run prints a thousand lines and CI log viewers drop the middle, so
+    a failure in the eleventh section of nineteen can be missing from a
+    copied log entirely -- which is exactly what happened, and cost a
+    round trip working out which test it was.
+    """
+    if not _FAILURES:
+        return
+    print(chr(10) + f"{len(_FAILURES)} failure(s), repeated so a truncated log still carries them:")
+    for entry in _FAILURES:
+        print(f"  FAIL  {entry}")
+
+
 def check(name: str, ok: bool, detail: str = "") -> None:
     global passed, failed
     if ok:
@@ -55,6 +73,7 @@ def check(name: str, ok: bool, detail: str = "") -> None:
         print(f"  PASS  {name}" + (f"  ({detail})" if detail else ""))
     else:
         failed += 1
+        _FAILURES.append(name + (f"  ({detail})" if detail else ""))
         print(f"  FAIL  {name}" + (f"  ({detail})" if detail else ""))
 
 
@@ -1498,6 +1517,7 @@ def main() -> int:
 
     root.destroy()
 
+    report_failures()
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 
