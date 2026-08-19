@@ -707,13 +707,15 @@ def main() -> int:
 
     # Streaming cannot honour mic muting -- pausing the recording mangles the
     # words -- so anyone relying on that setting has to be told, not surprised.
-    win.mute_var.set(True)
-    win._refresh_stt_mode()
+    # No manual refresh: the checkbox has a command= now, so ticking it is what
+    # has to update the note. Calling the refresh by hand here was a workaround
+    # that made the test pass over a checkbox wired to nothing.
+    win.mute_var.set(False)   # known state; invoke() toggles from here
+    win.mute_check.invoke()
     check("it warns that mic muting does not apply",
           "hear itself" in win.stt_mode_note.cget("text"),
           win.stt_mode_note.cget("text"))
-    win.mute_var.set(False)
-    win._refresh_stt_mode()
+    win.mute_check.invoke()
     check("and does not nag when nothing is muted",
           "hear itself" not in win.stt_mode_note.cget("text"),
           win.stt_mode_note.cget("text"))

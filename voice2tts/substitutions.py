@@ -126,6 +126,12 @@ class Substituter:
                 try:
                     result = pattern.sub(replacement, result)
                 except re.error as exc:  # a bad backreference in the replacement
+                    # Recorded, not just logged: the rule will fail on every
+                    # utterance from here on, and the list beside it went on
+                    # showing it as active.
+                    note = f"{pattern.pattern!r}: {exc}"
+                    if note not in self.rejected:
+                        self.rejected.append(note)
                     log.warning("substitution failed: %s", exc)
             if result == before:
                 break  # settled; no rule fed another

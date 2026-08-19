@@ -248,11 +248,18 @@ class SettingsWindow(tk.Toplevel):
         self.verify_status.grid(row=8, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         self.mute_var = tk.BooleanVar()
-        ttk.Checkbutton(
+        self.mute_check = ttk.Checkbutton(
             tab,
             text="Mute microphone while speaking (prevents the app hearing itself)",
             variable=self.mute_var,
-        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(10, 0))
+            # Streaming cannot honour this -- pausing the recording mangles the
+            # words -- and the note that says so lives on another tab. Without a
+            # command the note only updated when something else refreshed it,
+            # so the box and the explanation beside it disagreed.
+            command=self._refresh_stt_mode,
+        )
+        self.mute_check.grid(row=9, column=0, columnspan=2, sticky="w",
+                             pady=(10, 0))
 
         self.autostart_var = tk.BooleanVar(value=run_at_login())
         self.autostart_check = ttk.Checkbutton(

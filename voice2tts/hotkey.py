@@ -112,6 +112,9 @@ class HotkeyManager:
         self._held_mods: set[str] = set()
         self._lock = threading.Lock()
         self._listener: keyboard.Listener | None = None
+        # Keys already reported as having no canonical form, so a held key does
+        # not fill the log at the keyboard repeat rate.
+        self._uncanonical: set[str] = set()
 
     # -- registration ---------------------------------------------------------
 
@@ -175,10 +178,22 @@ class HotkeyManager:
 
     # -- listener thread ------------------------------------------------------
 
-    def _canonical(self, key):
+    def _canonical(self, key: object) -> object:
+        """pynput's canonical form of a key, or the key itself if it will not.
+
+        A key that fails here is still matched, against `raw` -- see
+        _handle_press, which tries both. Returning the uncanonicalised key with
+        nothing said would mean a binding that simply never fires, while the
+        settings window shows it bound.
+        """
         try:
             return self._listener.canonical(key) if self._listener else key
-        except Exception:  # noqa: BLE001 - canonical() can throw on exotic keys
+        except Exception as exc:  # noqa: BLE001 - canonical() throws on exotic keys
+            if str(key) not in self._uncanonical:
+                self._uncanonical.add(str(key))
+                log.warning("%s has no canonical form (%s); matching it as-is, "
+                            "which may not work on every keyboard layout",
+                            key, exc)
             return key
 
     def _handle_press(self, key) -> None:
@@ -250,6 +265,9 @@ class HotkeyListener:
         self._engaged = False
         self._lock = threading.Lock()
         self._listener: keyboard.Listener | None = None
+        # Keys already reported as having no canonical form, so a held key does
+        # not fill the log at the keyboard repeat rate.
+        self._uncanonical: set[str] = set()
 
     def start(self) -> None:
         if self._listener is not None:
@@ -282,10 +300,22 @@ class HotkeyListener:
 
     # -- listener thread ------------------------------------------------------
 
-    def _canonical(self, key):
+    def _canonical(self, key: object) -> object:
+        """pynput's canonical form of a key, or the key itself if it will not.
+
+        A key that fails here is still matched, against `raw` -- see
+        _handle_press, which tries both. Returning the uncanonicalised key with
+        nothing said would mean a binding that simply never fires, while the
+        settings window shows it bound.
+        """
         try:
             return self._listener.canonical(key) if self._listener else key
-        except Exception:  # noqa: BLE001 - canonical() can throw on exotic keys
+        except Exception as exc:  # noqa: BLE001 - canonical() throws on exotic keys
+            if str(key) not in self._uncanonical:
+                self._uncanonical.add(str(key))
+                log.warning("%s has no canonical form (%s); matching it as-is, "
+                            "which may not work on every keyboard layout",
+                            key, exc)
             return key
 
     @staticmethod

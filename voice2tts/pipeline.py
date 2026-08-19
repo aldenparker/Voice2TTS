@@ -76,7 +76,10 @@ class HistoryEntry:
     heard: str
     spoken: str
     at: float
-    source: str = "speech"   # speech | clipboard | typed
+    # Kept in step with every caller of record()/say_text(). The History tab
+    # groups on this, so a value invented at a call site simply disappears from
+    # the grouping without anything saying so.
+    source: str = "speech"   # speech | clipboard | typed | repeat
 
     @property
     def edited(self) -> bool:
@@ -338,6 +341,8 @@ class Pipeline:
                 self.cfg.tts.voice = fallback
                 self.tts = PiperEngine(self.cfg.tts)
             self._emit("info", f"Voice {self.tts.voice_path.stem}")
+            if self.tts.design_problem:
+                self._emit("warning", self.tts.design_problem)
 
         self._load_translator()
 

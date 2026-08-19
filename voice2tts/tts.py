@@ -69,9 +69,9 @@ class PiperEngine:
 
         # A voice built in the Voice Designer carries an effects chain beside it.
         # Ordinary voices have no sidecar and pay nothing for this.
-        from .designer import read_design
+        from .designer import read_design_or_problem
 
-        self.design = read_design(path)
+        self.design, self.design_problem = read_design_or_problem(path)
         if self.design is not None and self.design.is_neutral:
             self.design = None
         if self.design is not None:
