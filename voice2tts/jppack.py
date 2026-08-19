@@ -18,6 +18,12 @@ WHAT IS IN IT, AND WHY EACH PIECE
                        the same module name, is what makes this possible.
     sudachipy          imported at pyopenjtalk's module level; without it the
                        import fails outright.
+    pydantic           and its own dependencies. pyopenjtalk-plus declares it
+                       and nothing here noticed for months, because the machine
+                       this was written on already had one. See WANTED: the
+                       download list is now READ from each wheel's metadata
+                       rather than typed out, because a typed list is only ever
+                       correct on the machine it was typed on.
     sudachidict_core   NOT optional, though it is most of the download.
                        pyopenjtalk asks for it lazily, to settle kanji with more
                        than one reading. Measured: eight ordinary sentences, and
@@ -48,22 +54,45 @@ from .paths import japanese_dir
 log = logging.getLogger(__name__)
 
 PYPI_JSON = "https://pypi.org/pypi/{package}/json"
+PYPI_VERSION_JSON = "https://pypi.org/pypi/{package}/{version}/json"
 
-# Pinned to what was verified working with the bundled Piper. An empty version
-# means "newest", which is right for the dictionary: it is data, released on its
-# own schedule, and any recent one settles the same readings.
-PACKAGES = (
+# What to ask for. Pinned to what was verified working with the bundled Piper;
+# an empty version means "newest", which is right for the dictionary -- it is
+# data, released on its own schedule, and any recent one settles the same
+# readings.
+#
+# What these NEED is not written here. It used to be: this tuple was the whole
+# download list, and pyopenjtalk-plus depends on pydantic, which nobody had
+# noticed because the development machine already had one. The pack unpacked
+# perfectly and then would not import, on every machine but the author's.
+# Dependencies are read from each wheel's own metadata by _resolve().
+WANTED = (
     ("pyopenjtalk-plus", "0.4.1.post9"),
     ("sudachipy", "0.6.11"),
     ("sudachidict_core", ""),
 )
 
+# Shipped inside the application, so the pack must not carry a second copy:
+# activate() appends to sys.path, so ours wins anyway and the download would be
+# pure weight.
+#
+# Declared, NOT probed with find_spec. Resolving against whatever happens to be
+# importable is precisely how a pack that worked in a development venv shipped
+# without pydantic -- the venv had it and the installer did not. This list is
+# the same on every machine, which is the point.
+PROVIDED = frozenset({"numpy"})
+
+# A runaway dependency graph is a download nobody asked for. Nothing here needs
+# more than about eight packages; well past that is a bug in the resolver.
+MAX_PACKAGES = 24
+
 # The module Piper actually imports, which is what decides whether this worked.
 PROBE_MODULE = "pyopenjtalk"
 
 MAX_WHEEL_BYTES = 500_000_000
-APPROX_DOWNLOAD_MB = 100
-APPROX_INSTALLED_MB = 330
+# Measured on a real install, not estimated: 105 MB of wheels, 340 MB unpacked.
+APPROX_DOWNLOAD_MB = 105
+APPROX_INSTALLED_MB = 340
 
 
 @dataclass
@@ -115,14 +144,149 @@ def activate() -> bool:
     return True
 
 
+def _metadata(package: str, version: str = "", timeout: float = 20.0) -> Json:
+    """PyPI's record for one package, at one version if given.
+
+    Split out so the resolver and the wheel picker read the same thing, and so
+    the tests can hand both of them a fixture instead of the network.
+    """
+    url = (PYPI_JSON.format(package=package) if not version
+           else PYPI_VERSION_JSON.format(package=package, version=version))
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        loaded: Json = json.loads(response.read().decode("utf-8"))
+    return loaded
+
+
+def _canonical(name: str) -> str:
+    """PyPI treats these as the same name; so must we, or we download twice."""
+    return name.strip().lower().replace("_", "-")
+
+
+def _wanted_here(marker: str) -> bool:
+    """Whether a requirement's environment marker applies to this build.
+
+    Deliberately small. The only markers these packages use are `extra` (an
+    optional feature nobody asked for) and platform or version guards, and
+    anything this does not understand is INCLUDED -- a few megabytes of
+    something unnecessary is a far better failure than a missing module
+    discovered one utterance at a time.
+    """
+    if not marker:
+        return True
+    text = marker.lower()
+    if "extra ==" in text:
+        return False   # an optional feature; we asked for none of them
+    for name in ("sys_platform", "platform_system", "os_name"):
+        if name in text and not any(
+                token in text for token in ("win32", "windows", "nt")):
+            return False
+    return True
+
+
+def _split_requirement(requirement: str) -> tuple[str, str]:
+    """One requirement as (name, exact version or "").
+
+    The version matters, not only the name. pydantic pins pydantic-core to one
+    exact release and raises SystemError on any other -- so resolving names and
+    taking the newest of each produced a pack that downloaded cleanly, unpacked
+    cleanly, and then refused to import, which is the same failure this
+    resolver was written to fix.
+
+    Only an unambiguous `==` pin is honoured. A range means the newest will do;
+    where it will not, the package belongs in WANTED with a version.
+    """
+    text = requirement.strip()
+
+    # "pydantic<3.0.0,>=2.0.0" and "pyopenjtalk-plus[onnxruntime]" both reduce
+    # to the name in front of the first delimiter.
+    name = text
+    for delimiter in ("[", "(", "<", ">", "=", "!", "~", " ", ";"):
+        name = name.split(delimiter)[0]
+    name = _canonical(name)
+    if not name:
+        return "", ""
+
+    pinned = ""
+    for clause in _specifiers(text):
+        if clause.startswith(("===", "==")) and "*" not in clause:
+            pinned = clause.lstrip("=").strip() or pinned
+    return name, pinned
+
+
+def _specifiers(requirement: str) -> list[str]:
+    """The comparison clauses of a requirement, e.g. ["<3.0.0", ">=2.0.0"]."""
+    text = requirement.strip()
+    start = next((i for i, character in enumerate(text) if character in "<>=!~"),
+                 len(text))
+    if start >= len(text):
+        return []
+    return [part.strip() for part in text[start:].split(",") if part.strip()]
+
+
+def _requirements(data: Json) -> list[tuple[str, str]]:
+    """The packages this one declares it needs, as (name, exact version or "").
+
+    Reading them rather than maintaining a list is the whole point: a list is
+    what shipped a phonemizer without pydantic.
+    """
+    found = []
+    for entry in (data.get("info", {}).get("requires_dist") or []):
+        requirement, _, marker = str(entry).partition(";")
+        if not _wanted_here(marker):
+            continue
+        name, pinned = _split_requirement(requirement)
+        if name:
+            found.append((name, pinned))
+    return found
+
+
+def _resolve(wanted: tuple[tuple[str, str], ...] = WANTED,
+             timeout: float = 20.0) -> list[tuple[str, str]]:
+    """Every package that has to be downloaded, in the order to install them.
+
+    A breadth-first walk of what each wheel says it needs. The alternative --
+    running pip -- is not available: the frozen build has no interpreter to run
+    it with, which is why this module exists at all.
+    """
+    queue = [(_canonical(name), version) for name, version in wanted]
+    seen = {name for name, _ in queue} | {_canonical(p) for p in PROVIDED}
+    resolved: list[tuple[str, str]] = []
+
+    while queue:
+        name, version = queue.pop(0)
+        resolved.append((name, version))
+        if len(resolved) > MAX_PACKAGES:
+            raise RuntimeError(
+                f"the phonemizer's dependencies came to more than "
+                f"{MAX_PACKAGES} packages, which is not something this pack "
+                "should ever need")
+        try:
+            data = _metadata(name, version, timeout)
+        except Exception as exc:  # noqa: BLE001 - reported, not fatal per package
+            log.warning("could not read what %s needs (%s); continuing without "
+                        "its dependencies", name, exc)
+            continue
+        for dependency, pinned in _requirements(data):
+            if dependency in seen:
+                continue
+            seen.add(dependency)
+            # The pin is honoured where one package demands an exact release of
+            # another. Ignoring it gave a pydantic and a pydantic-core that
+            # refuse to run together.
+            queue.append((dependency, pinned))
+
+    log.info("phonemizer needs %d packages: %s", len(resolved),
+             ", ".join(f"{name} {version}" if version else name
+                       for name, version in resolved))
+    return resolved
+
+
 def _wheel_url(package: str, version: str,
                timeout: float = 20.0) -> tuple[str, int, str]:
     """The Windows wheel for a package, or the pure-python one if that is all
     there is -- the dictionary is data and ships as py3-none-any."""
-    request = urllib.request.Request(PYPI_JSON.format(package=package),
-                                     headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    data = _metadata(package, timeout=timeout)
 
     # A compiled wheel is built against one Python ABI. PyPI lists cp310 first
     # for these packages, and installing that under 3.12 gives a pack that
@@ -210,7 +374,9 @@ def install(progress: StepProgress = None) -> PackStatus:
     dest.mkdir(parents=True, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix="voice2tts-jp-"))
     try:
-        for package, version in PACKAGES:
+        say("Working out what the phonemizer needs...")
+        packages = _resolve()
+        for package, version in packages:
             say(f"Locating {package}...")
             url, size, filename = _wheel_url(package, version)
             megabytes = size / 1e6 if size else 0

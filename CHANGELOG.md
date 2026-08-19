@@ -176,6 +176,38 @@ spoken, and whether this build can pronounce it -- and disagreed.
   a translation chain left every attribute `None` for the next caller, and the
   substitution preview bound one name to two types.
 
+### Fixed — the Japanese pack was missing a dependency
+
+`pyopenjtalk-plus` declares `pydantic`, and the pack never downloaded it. It
+unpacked perfectly and then would not import, on every machine except the one it
+was written on -- because a development venv has pydantic via something
+unrelated, and the installed build does not. The check added earlier this
+release named the reason exactly (`installed but will not load: No module named
+'pydantic'`), which is how it was found, but the pack itself was wrong.
+
+- **The download list is read, not typed.** It was three package names in a
+  tuple; it is now those three plus whatever their own wheel metadata says they
+  need, walked transitively. A typed list is only ever correct on the machine it
+  was typed on.
+
+- **Exact version pins are honoured.** Found while fixing the above: pydantic
+  pins `pydantic-core` to one release and raises `SystemError` on any other, so
+  resolving names and taking the newest of each produced a pack that downloaded
+  cleanly, unpacked cleanly, and still would not import.
+
+- **What the application already ships is declared, not probed.** `numpy` is
+  named in a list rather than detected with `find_spec`, because "what happens
+  to be importable" differs between a venv and an installer -- which is the
+  whole shape of this bug.
+
+- **`scripts/isolated_pack.py`** installs the pack into a temporary directory
+  and imports it under `python -S` with only the pack and a staged copy of the
+  application's numpy reachable. That is the frozen build's condition, and it is
+  the only thing that catches this class of failure. Its first version pointed
+  at numpy's parent directory -- which is site-packages -- and so put the entire
+  venv back and reported a deliberately broken pack as fine; staging a copy is
+  what makes it real.
+
 ### Fixed — things that failed without saying so
 
 An audit of the whole package found about forty places that failed quietly.

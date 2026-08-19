@@ -2186,11 +2186,70 @@ def test_japanese_pack() -> None:
     check("the probe module is what piper imports",
           jppack.PROBE_MODULE == "pyopenjtalk",
           "anything else would report a pack that does not work as working")
-    names = [name for name, _ in jppack.PACKAGES]
-    check("the dictionary is included", "sudachidict_core" in names, str(names))
+    names = [name for name, _ in jppack.WANTED]
+    check("the dictionary is asked for", "sudachidict_core" in names, str(names))
     check("and the phonemizer fork, not the source-only original",
           "pyopenjtalk-plus" in names,
           "plain pyopenjtalk publishes no Windows wheels at all")
+
+    # -- what the packages themselves say they need --------------------------
+    # This list used to BE the download, and pyopenjtalk-plus needs pydantic,
+    # which nobody had noticed because the development machine already had one.
+    # The pack unpacked perfectly and then would not import, on every machine
+    # but the author's. Dependencies are read from the wheels now, so the tests
+    # are about the reading.
+    for requirement, expected in [
+        ("pydantic<3.0.0,>=2.0.0", ("pydantic", "")),
+        ("pydantic-core==2.46.4", ("pydantic-core", "2.46.4")),
+        ("typing-extensions>=4.0.0", ("typing-extensions", "")),
+        ("sudachidict_core", ("sudachidict-core", "")),
+        ("pyopenjtalk-plus[onnxruntime]>=0.4", ("pyopenjtalk-plus", "")),
+        ("numpy==1.26.*", ("numpy", "")),   # a wildcard is not an exact pin
+    ]:
+        check(f"{requirement!r} reads as {expected}",
+              jppack._split_requirement(requirement) == expected,
+              str(jppack._split_requirement(requirement)))
+
+    check("an optional extra is not downloaded",
+          not jppack._wanted_here(' extra == "marine"'),
+          "nobody asked for the marine accent model")
+    check("nor a dependency for another operating system",
+          not jppack._wanted_here(' sys_platform == "linux"'))
+    check("but an unrecognised marker is included",
+          jppack._wanted_here(' python_version >= "3.9"'),
+          "a few unnecessary megabytes beat a missing module")
+
+    # The resolver, against a fixture rather than PyPI: the shape that matters
+    # is "A needs B, B pins C exactly, and the app already ships D".
+    fixture = {
+        "root": ["needs-a-pin", "numpy>=1.24", 'extra-only; extra == "x"'],
+        "needs-a-pin": ["pinned-core==9.9.9"],
+        "pinned-core": [],
+    }
+    real_metadata = jppack._metadata
+    jppack._metadata = lambda name, version="", timeout=20.0: {
+        "info": {"requires_dist": fixture.get(name, [])}}
+    try:
+        resolved = dict(jppack._resolve((("root", "1.0"),)))
+    finally:
+        jppack._metadata = real_metadata
+
+    check("a dependency of a dependency is downloaded too",
+          "pinned-core" in resolved, str(resolved))
+    check("an exact pin is carried, not replaced by the newest",
+          resolved.get("pinned-core") == "9.9.9", str(resolved))
+    check("the root keeps the version it was asked for",
+          resolved.get("root") == "1.0", str(resolved))
+    check("an optional extra is left out", "extra-only" not in resolved,
+          str(resolved))
+    check("and what the application already ships is not downloaded twice",
+          "numpy" not in resolved,
+          "the pack is appended to sys.path, so ours wins anyway")
+
+    check("numpy is declared as provided rather than probed for",
+          "numpy" in jppack.PROVIDED,
+          "find_spec would answer differently in a venv and in the installer, "
+          "which is exactly how pydantic came to be missing")
 
     # A compiled wheel is built against one Python ABI. PyPI lists cp310 first
     # for these, and installing that under 3.12 unpacks perfectly and then
@@ -4199,6 +4258,27 @@ def _reach(what: str, call, attempts: int = 3, pause: float = 2.0):
 def test_network() -> None:
     """Live checks against VB-Audio and HuggingFace. Needs internet."""
     print("\n[network]")
+
+    # The Japanese pack's real dependency graph. Resolved from PyPI, so it can
+    # change under us -- and when it does, the failure is a pack that unpacks
+    # and will not import, one utterance at a time. Better to hear it here.
+    from voice2tts import jppack as jp
+
+    try:
+        graph = dict(jp._resolve())
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        check("the phonemizer's dependencies resolve", False, str(exc)[:90])
+        graph = {}
+    if graph:
+        check("the phonemizer still needs pydantic", "pydantic" in graph,
+              "if this stops being true the PROVIDED list may need revisiting")
+        check("and pydantic still pins pydantic-core to one release",
+              bool(graph.get("pydantic-core")),
+              "an unpinned pair raises SystemError on import; see _split_requirement")
+        check("the dictionary is in there", "sudachidict-core" in graph, str(graph))
+        check("and the graph stays small",
+              len(graph) <= jp.MAX_PACKAGES,
+              f"{len(graph)} packages; more than about eight is suspicious")
     # A non-transient HTTP error is our bug -- the address we ship is wrong --
     # so it fails rather than skips. Caught here rather than left to propagate,
     # because an exception out of a test takes the whole run down with it and a
