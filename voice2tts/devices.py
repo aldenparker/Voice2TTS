@@ -205,12 +205,23 @@ def _first_match(devs: list[Device], match: str) -> Device | None:
     candidates = [d for d in devs if d.name.lower() == needle]
     if not candidates:
         candidates = [d for d in devs if needle in d.name.lower()]
+        if candidates:
+            # Falling back from an exact name to a substring is a guess, and it
+            # used to be a silent one: "Speakers" bound to whichever device
+            # sorted first, which on a machine with several is a coin toss the
+            # user never saw being flipped.
+            log.warning(
+                "no device named exactly %r; matching %r by name fragment "
+                "(%d candidate%s: %s)",
+                match, candidates[0].name, len(candidates),
+                "" if len(candidates) == 1 else "s",
+                ", ".join(d.name for d in candidates[:4]))
     if not candidates:
         log.warning("no device matching %r", match)
         return None
     if ordinal > len(candidates):
-        log.warning("%r asked for #%d but only %d match; using the first",
-                    name, ordinal, len(candidates))
+        log.warning("%r asked for #%d but only %d match; using %r instead",
+                    name, ordinal, len(candidates), candidates[0].name)
         return candidates[0]
     return candidates[ordinal - 1]
 

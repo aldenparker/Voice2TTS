@@ -320,18 +320,27 @@ def _verify(path: Path, release: Release) -> None:
             path.unlink(missing_ok=True)
             raise RuntimeError("downloaded file is not a Windows executable")
 
-    if release.sha256_url:
-        expected = _fetch_expected_sha(release.sha256_url)
-        if expected:
-            actual = _sha256(path)
-            if actual.lower() != expected.lower():
-                path.unlink(missing_ok=True)
-                raise RuntimeError(
-                    f"checksum mismatch\n  expected {expected}\n  actual   {actual}"
-                )
-            log.info("checksum verified")
-    else:
-        log.warning("release published no .sha256 asset; skipping checksum check")
+    if not release.sha256_url:
+        path.unlink(missing_ok=True)
+        raise RuntimeError(
+            "this release published no .sha256 file, so the installer cannot "
+            "be verified. Every Voice2TTS release publishes one -- download it "
+            "from the releases page by hand if you are sure.")
+
+    expected = _fetch_expected_sha(release.sha256_url)
+    if expected is None:
+        path.unlink(missing_ok=True)
+        raise RuntimeError(
+            "the checksum for this release could not be fetched, so the "
+            "installer cannot be verified. Try again when the network settles.")
+
+    actual = _sha256(path)
+    if actual.lower() != expected.lower():
+        path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"checksum mismatch\n  expected {expected}\n  actual   {actual}"
+        )
+    log.info("checksum verified")
 
 
 def _fetch_expected_sha(url: str, timeout: float = 20.0) -> str | None:

@@ -2803,7 +2803,10 @@ class SettingsWindow(tk.Toplevel):
         self.pipeline.apply_tts_changes()
         self.pipeline.apply_vad_changes()
         active = self.pipeline.apply_text_changes()
-        self.subs_status.config(text=f"{active} rule(s) active")
+        dropped = self.pipeline.dropped_rules
+        self.subs_status.config(
+            text=f"{active} rule(s) active"
+                 + (f"; {len(dropped)} unusable: {dropped[0]}" if dropped else ""))
         self.pipeline.apply_translation_changes()
         # validate() can refuse what was asked for -- a no-op language pair, an
         # English-only model with nothing to translate from. Point the widgets

@@ -36,7 +36,7 @@ from .streaming import StreamingRecognizer
 from .stt import Heard, WhisperEngine
 from .substitutions import Rule, Substituter
 from .translate import Chain
-from .tts import PiperEngine, UnspeakableVoice
+from .tts import PiperEngine, UnspeakableVoice, VoiceSubstituted
 from .vad import SAMPLE_RATE, WINDOW, VadSegmenter
 
 log = logging.getLogger(__name__)
@@ -97,6 +97,35 @@ class State(Enum):
     SPEAKING = "speaking"
 
 
+# What may follow what. The state is set from eighteen places across three
+# threads, and nothing said which orders were meant to be possible -- so a race
+# that took the app from SPEAKING straight back to LISTENING, skipping the
+# drain, looked exactly like normal operation in the log.
+#
+# A transition outside this table is a bug in the pipeline, not in the user's
+# settings, so it is logged loudly and then allowed: refusing it would wedge
+# whichever thread got there, which is a worse outcome than a wrong tray icon.
+_ALLOWED: dict[State, frozenset[State]] = {
+    State.STOPPED: frozenset({State.LOADING}),
+    # Loading can fail back to STOPPED, or finish into IDLE.
+    State.LOADING: frozenset({State.IDLE, State.STOPPED}),
+    State.IDLE: frozenset({State.LISTENING, State.THINKING, State.REVIEWING,
+                           State.SPEAKING, State.STOPPED}),
+    # Speech was detected: it either produces something to work on, or turns
+    # out to have been noise and drops back.
+    State.LISTENING: frozenset({State.THINKING, State.IDLE, State.SPEAKING,
+                                State.STOPPED}),
+    # Recognised text either goes for review, goes straight out, or was noise.
+    State.THINKING: frozenset({State.REVIEWING, State.SPEAKING, State.IDLE,
+                               State.LISTENING, State.STOPPED}),
+    State.REVIEWING: frozenset({State.SPEAKING, State.IDLE, State.STOPPED}),
+    # Streaming feeds the next phrase in while the last is still going out, so
+    # SPEAKING may follow itself through THINKING or LISTENING.
+    State.SPEAKING: frozenset({State.IDLE, State.THINKING, State.LISTENING,
+                               State.STOPPED}),
+}
+
+
 class Pipeline:
     def __init__(
         self,
@@ -145,6 +174,9 @@ class Pipeline:
         self.apply_text_changes()
         self.last_transcript = ""
         self.output_failures: list[tuple[str, str]] = []
+        # Outputs already reported as gone, so the watchdog says it once rather
+        # than once a second.
+        self._reported_dead_outputs: set[str] = set()
 
         self.history: deque[HistoryEntry] = deque(maxlen=max(1, cfg.text.history_size))
         # Set by the UI to approve or edit text before it is spoken. Called on the
@@ -177,6 +209,18 @@ class Pipeline:
     def _set_state(self, state: State) -> None:
         if state is self.state:
             return
+        previous = self.state
+        # Only police a pipeline that is actually running. A stopped one has no
+        # state machine to violate -- the settings window drives it directly to
+        # audition a voice, and so do the tests.
+        policed = self._running.is_set() or previous is not State.STOPPED
+        if policed and state not in _ALLOWED.get(previous, frozenset()):
+            # Loud, and then allowed. See _ALLOWED for why refusing would be
+            # worse. This is the line that turns "the tray said listening while
+            # it was speaking" from a mystery into a stack to look at.
+            log.error("illegal state change %s -> %s; the pipeline reached a "
+                      "combination that is not meant to exist",
+                      previous.value, state.value)
         self.state = state
         log.debug("state -> %s", state.value)
         self._notify(("state", state))
@@ -274,6 +318,14 @@ class Pipeline:
         if self.tts is None:
             try:
                 self.tts = PiperEngine(self.cfg.tts)
+            except VoiceSubstituted as exc:
+                # Take the substitute, but WRITE IT DOWN. Leaving cfg.tts.voice
+                # pointing at the missing one meant every language check after
+                # this reasoned about a voice that was never loaded.
+                self._emit("warning", str(exc))
+                self.cfg.tts.voice = exc.using.stem
+                self.tts = PiperEngine(self.cfg.tts)
+                self.plan = plan_mod.build(self.cfg)
             except UnspeakableVoice as exc:
                 # Starting is better than not starting. The saved voice needs a
                 # phonemizer this build does not carry, so fall back to one that
@@ -355,6 +407,7 @@ class Pipeline:
     def _open_audio(self) -> None:
         assert self.tts is not None
         self.sink = OutputSink(self.cfg.audio)
+        self._reported_dead_outputs = set()
         self.output_failures = self.sink.configure(self.cfg.audio.outputs, self.tts.rate)
         for label, reason in self.output_failures:
             self._emit("warning", f"Output unavailable: {label} ({reason})")
@@ -511,7 +564,17 @@ class Pipeline:
         active = self.substituter.load(compile_rules(cfg.substitutions))
         active += self.target_substituter.load(
             compile_rules(cfg.target_substitutions))
+        # A rule that will not compile used to vanish into the log, so the count
+        # said "6 rule(s) active" over seven rules and the missing one was the
+        # one somebody had just typed.
+        for reason in self.dropped_rules:
+            self._emit("warning", f"Rule not used -- {reason}")
         return active
+
+    @property
+    def dropped_rules(self) -> list[str]:
+        """Rules that could not be compiled, across both lists."""
+        return self.substituter.dropped + self.target_substituter.dropped
 
     def apply_translation_changes(self) -> None:
         """Rebuild the chain after a settings change.
@@ -918,6 +981,7 @@ class Pipeline:
             # REVIEWING counts: it is bounded by review_timeout_s, so sitting
             # here past the stall window means the wait itself is wedged -- and
             # it was the one state the watchdog did not look at.
+            self._check_outputs()
             busy = self.state in (State.THINKING, State.SPEAKING, State.REVIEWING)
             if not busy:
                 stalled_since, reported = None, False
@@ -946,6 +1010,28 @@ class Pipeline:
                 f"Stopped responding while {self.state.value}. The log now holds "
                 "a stack dump -- please include it in a bug report.",
             )
+
+    def _check_outputs(self) -> None:
+        """Notice a speaker that has gone away, and say so once.
+
+        The microphone has been checked since 0.4; the speaker never was. An
+        output stream is not reliably told when its device is unplugged -- the
+        callback simply stops -- so the app went on listening, transcribing and
+        synthesising into nothing, reporting "speaking" throughout.
+        """
+        if self.sink is None:
+            return
+        dead = self.sink.dead_targets()
+        if not dead:
+            return
+        for name, reason in dead:
+            if name in self._reported_dead_outputs:
+                continue
+            self._reported_dead_outputs.add(name)
+            self._emit("error",
+                       f"{name} is no longer accepting audio ({reason}). "
+                       "Nothing said is being heard there -- reopen Settings "
+                       "-> Audio once the device is back.")
 
     def _try_recover_capture(self) -> bool:
         """Reopen the microphone if it is available again. Returns True on success."""
@@ -1175,10 +1261,14 @@ class Pipeline:
         """Speak the clipboard. Returns what was said, or "" if there was nothing."""
         from . import clipboard
 
-        text = clipboard.get_speakable_text()
-        if not text:
-            self._emit("warning", "Clipboard is empty or holds no text")
+        found = clipboard.get_speakable_text()
+        if not found:
+            # Which of the three it was, rather than "empty or holds no text",
+            # which was the answer even when another program had it locked and
+            # pressing the key again would have worked.
+            self._emit("warning", f"Nothing spoken: {found.why.value}.")
             return ""
+        text = found.text
         preview = text if len(text) <= 60 else text[:57] + "..."
         self._emit("clipboard", preview)
         self.say_text(text, source="clipboard")

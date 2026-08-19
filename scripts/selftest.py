@@ -291,9 +291,18 @@ def test_clipboard() -> None:
           f"{len(text)} chars")
     speakable = clipboard.get_speakable_text()
     check("speakable form collapses whitespace",
-          "\n" not in speakable and "  " not in speakable,
-          repr(speakable[:40]))
+          "\n" not in speakable.text and "  " not in speakable.text,
+          repr(speakable.text[:40]))
     check("truncation limit is sane", clipboard.MAX_CHARS >= 1000)
+
+    # "" used to mean three different things, so a clipboard another program was
+    # holding open reported as empty -- and the advice was to copy something the
+    # user had already copied.
+    busy = clipboard.Contents(why=clipboard.Clipboard.BUSY)
+    check("nothing on the clipboard is falsy", not busy)
+    check("and says which of the three it was",
+          "holding the clipboard" in busy.why.value, busy.why.value)
+    check("real text is truthy", bool(clipboard.Contents(text="hello")))
 
 
 def test_substitutions() -> None:

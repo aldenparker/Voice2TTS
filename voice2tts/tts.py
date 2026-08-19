@@ -25,6 +25,22 @@ class UnspeakableVoice(RuntimeError):
     """A voice this build cannot pronounce -- its phonemizer is not here."""
 
 
+class VoiceSubstituted(RuntimeError):
+    """The configured voice is not installed, and something else would be used.
+
+    Raised rather than quietly substituted, because the config still names the
+    missing voice: every language check downstream then reasons about a voice
+    that is not loaded, and reports on the wrong one. The caller decides to take
+    the substitute -- and has to write it into the config when it does.
+    """
+
+    def __init__(self, wanted: str, using: Path):
+        super().__init__(
+            f"The voice {wanted} is not installed. Using {using.stem} instead.")
+        self.wanted = wanted
+        self.using = using
+
+
 class PiperEngine:
     def __init__(self, cfg: TtsConfig):
         from piper import PiperVoice, SynthesisConfig
@@ -69,8 +85,12 @@ class PiperEngine:
             return path
         available = list_voices()
         if available:
+            # The caller has to be told WHICH voice it got, because the config
+            # still names the missing one: every language check downstream then
+            # reasons about a voice that is not loaded, which is how a German
+            # voice came to be judged against an English one's rules.
             log.warning("voice %r not found; using %s", name, available[0].stem)
-            return available[0]
+            raise VoiceSubstituted(name, available[0])
         raise FileNotFoundError(
             f"No Piper voice found for {name!r} and no voices installed. "
             "Run scripts/fetch_models.py to download one."

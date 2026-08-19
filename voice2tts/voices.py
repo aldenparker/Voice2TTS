@@ -69,7 +69,11 @@ def required_phonemizer(voice_key: str) -> tuple[str, str] | None:
         config = json.loads(
             path.with_suffix(".onnx.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        log.debug("no config for %s: %s", voice_key, exc)
+        # Not "no phonemizer needed" -- unknown. A voice whose config cannot be
+        # read might need one, and saying it does not is how an unreadable file
+        # came to look like a working English voice.
+        log.warning("cannot read the config for %s (%s); assuming it needs "
+                    "nothing beyond espeak", voice_key, exc)
         return None
     return _PHONEMIZERS.get(str(config.get("phoneme_type") or "").lower())
 
